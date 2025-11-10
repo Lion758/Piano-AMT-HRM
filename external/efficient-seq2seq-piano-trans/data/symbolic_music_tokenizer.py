@@ -277,10 +277,8 @@ class SymbolicMusicTokenizer:
         self.token_type_list.append(TokenVel) 
         self.token_type_list.append(TokenPedal)
         # self.token_type_list.append(TokenAlignment) # 1
-        
-        #asasdddsd testet
+    
         self.token_tpye_set = set(self.token_type_list)
-        f = 12
         # init begin index for each token type.
         idx = 0
         for cp_index, token_type in enumerate(self.token_type_list):
