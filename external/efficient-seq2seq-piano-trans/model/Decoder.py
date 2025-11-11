@@ -20,7 +20,7 @@ class DecoderLayer(nn.Module):
         self.pre_self_attention_layer_norm = LayerNorm(config.emb_dim)
         self.self_attention = Multi_Head_Attention(num_heads=config.num_heads, head_dim=config.head_dim, dropout_rate=config.dropout_rate, window_size=window_size, is_causal=True)
         self.dropout1 = nn.Dropout(config.dropout_rate)
-
+        
         self.pre_cross_attention_layer_norm = LayerNorm(config.emb_dim)
         self.encoder_decoder_attention = Multi_Head_Attention(num_heads=config.num_heads, head_dim=config.head_dim, dropout_rate=config.dropout_rate)
         self.dropout2 = nn.Dropout(config.dropout_rate)

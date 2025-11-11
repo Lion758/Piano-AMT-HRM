@@ -287,7 +287,7 @@ class SymbolicMusicTokenizer:
             size = token_type.get_size()
             for i in range(size):
                 token = idx + i
-                self.reverse_type_dict[token] = token_type
+                self.reverse_type_dict[token] = token_type #stores the index to be able to reverse back to type
             idx += size
             
             
