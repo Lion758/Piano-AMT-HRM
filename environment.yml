@@ -1,0 +1,16 @@
+name: piano_amt
+channels:
+  - defaults
+dependencies:
+  - python=3.10.19
+  - torchvision
+  - torchaudio
+  - matplotlib
+  - h5py
+  - tqdm
+  - pydantic
+  - omegaconf
+  - pytorch-lightning
+  - wandb
+  - numpy=1.26
+

@@ -101,7 +101,7 @@ class MT3Trainer(pl.LightningModule):
             }
             )
 
-        self.feature_extracters = {}
+        self.feature_extracters = {} #naming inconsistency  A) feature_extracterS
         # mel_extracter = MelSpectrogram(sample_rate=DEFAULT_SAMPLE_RATE, n_mels=DEFAULT_NUM_MEL_BINS, n_fft=FFT_SIZE, hop_length=DEFAULT_HOP_WIDTH,  f_min=MEL_FMIN, f_max=MEL_FMAX)
         mel_extracter = MelSpectrogram(config.data.num_mel_bins, config.data.sample_rate, config.data.fft_size, config.data.hop_length,  mel_fmin=config.data.mel_fmin, mel_fmax=config.data.mel_fmax)
         #cqt_extracter = CQT(sr=config.data.sample_rate, hop_length=config.data.hop_length, fmin=config.data.cqt_fmin, n_bins=config.data.num_cqt_bins, bins_per_octave=config.data.bins_per_octave)
@@ -110,7 +110,7 @@ class MT3Trainer(pl.LightningModule):
         # self.feature_extracters["mel"] = mel_extracter.to(self.device)
         # self.feature_extracters["cqt"] = cqt_extracter.to(self.device)
         if config.data.features == "mel":
-            self.features_extracter = mel_extracter
+            self.features_extracter = mel_extracter #B) self.featureS_extracter
 
         #elif config.data.features == "cqt":
             #self.features_extracter = cqt_extracter
@@ -149,7 +149,7 @@ class MT3Trainer(pl.LightningModule):
         for k in batch_list[0].keys():
             batch[k] = torch.cat([b[k] for b in batch_list], dim=0)
         
-
+         
         outputs_dict = {}
         targets_dict = {}
         loss_dict = {}

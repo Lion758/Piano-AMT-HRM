@@ -35,7 +35,6 @@ class ArchConfig(pydantic.BaseModel):
     name: str
     loss: LossConfig
 
-//hey
 class PretrainConfig(pydantic.BaseModel):
     # Config
     arch: ArchConfig
