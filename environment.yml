@@ -9,8 +9,5 @@ dependencies:
   - h5py
   - tqdm
   - pydantic
-  - omegaconf
   - pytorch-lightning
-  - wandb
   - numpy=1.26
-
