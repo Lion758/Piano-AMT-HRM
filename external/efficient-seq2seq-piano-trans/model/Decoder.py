@@ -9,23 +9,57 @@ from model.Attention import Multi_Head_Attention
 from data.constants import *
 from model.Mask import make_sliding_window_mask
 
+class ConditionalLayerNorm(nn.Module):
+    """Layer Norm where scale (gamma) and shift (beta) come from the plan vector."""
+    def __init__(self, emb_dim, plan_dim):
+        super().__init__()
+        # Standard LN learns its own gamma/beta. We will compute them dynamically.
+        self.ln = nn.LayerNorm(emb_dim, elementwise_affine=False) # Turn OFF learned parameters
+        # A small network to generate gamma/beta from the plan vector
+        self.plan_to_affine = nn.Sequential(
+            nn.Linear(plan_dim, emb_dim * 2),
+            nn.Tanh()  # Optional activation
+        )
+        self.emb_dim = emb_dim
+
+    def forward(self, x, plan_vector):
+        """
+        x: [batch, seq_len, emb_dim]
+        plan_vector: [batch, plan_dim]
+        """
+        # 1. Apply standard normalization (mean=0, var=1)
+        x_norm = self.ln(x)
+        
+        # 2. Generate conditional gamma (scale) and beta (shift) from plan
+        # output: [batch, emb_dim * 2]
+        affine_params = self.plan_to_affine(plan_vector)
+        gamma, beta = affine_params.chunk(2, dim=-1) # Each is [batch, emb_dim]
+        
+        # 3. Reshape to add sequence dimension for broadcasting: [batch, 1, emb_dim]
+        gamma = gamma.unsqueeze(1)
+        beta = beta.unsqueeze(1)
+        
+        # 4. Apply conditional scale and shift: y = x_norm * gamma + beta
+        return x_norm * gamma + beta
+    
 class DecoderLayer(nn.Module):
-    def __init__(self, config,  layer_idx=0):
+    def __init__(self, config, plan_dim=128,  layer_idx=0): #add plan_dim argument
         super(DecoderLayer, self).__init__()
         self.config = config
+        self.plan_dim = plan_dim
 
         window_size = None
         if hasattr(config, 'decoder_window_size'):
             window_size = config.decoder_window_size
-        self.pre_self_attention_layer_norm = LayerNorm(config.emb_dim)
+        self.pre_self_attention_layer_norm = ConditionalLayerNorm(config.emb_dim, plan_dim)
         self.self_attention = Multi_Head_Attention(num_heads=config.num_heads, head_dim=config.head_dim, dropout_rate=config.dropout_rate, window_size=window_size, is_causal=True)
         self.dropout1 = nn.Dropout(config.dropout_rate)
         
-        self.pre_cross_attention_layer_norm = LayerNorm(config.emb_dim)
+        self.pre_cross_attention_layer_norm = ConditionalLayerNorm(config.emb_dim, plan_dim)
         self.encoder_decoder_attention = Multi_Head_Attention(num_heads=config.num_heads, head_dim=config.head_dim, dropout_rate=config.dropout_rate)
         self.dropout2 = nn.Dropout(config.dropout_rate)
 
-        self.pre_mlp_layer_norm = LayerNorm(config.emb_dim)
+        self.pre_mlp_layer_norm = ConditionalLayerNorm(config.emb_dim, plan_dim)
         self.mlp = MlpBlock(emb_dim=config.emb_dim, intermediate_dim=config.mlp_dim, activations=config.mlp_activations, intermediate_dropout_rate=config.dropout_rate)
         
         self.dropout3 = nn.Dropout(config.dropout_rate)
@@ -33,15 +67,17 @@ class DecoderLayer(nn.Module):
     def initialize_decoder_cache(self,):
         self.self_attention.initialize_decoder_cache()
 
-    def forward(self, inputs, encoded, decoder_mask=None, encoder_decoder_mask=None, decode=False, return_attn_weights=False, sliding_window_size=None, decoder_targets_frame_index=None):
+    def forward(self, inputs, encoded, plan_vector, decoder_mask=None, encoder_decoder_mask=None, decode=False, return_attn_weights=False, sliding_window_size=None, decoder_targets_frame_index=None):
+        #plan_vector shape: [batch, plan_dim]
+        
         # self-attention
-        x = self.pre_self_attention_layer_norm(inputs)  
+        x = self.pre_self_attention_layer_norm(inputs, plan_vector)  #added plan_vector
         x= self.self_attention(x, x, mask=decoder_mask, decode=decode, sliding_window_size=sliding_window_size)
         x = self.dropout1(x)
         x = x + inputs
 
         # Cross-attention
-        y = self.pre_cross_attention_layer_norm(x)
+        y = self.pre_cross_attention_layer_norm(x, plan_vector) #added plan_vector
         if return_attn_weights:
             y, cross_attn_weights = self.encoder_decoder_attention(y, encoded, mask=encoder_decoder_mask, return_attn_weights=return_attn_weights)
         else:
@@ -53,7 +89,7 @@ class DecoderLayer(nn.Module):
         y = y + x
 
         # MLP block
-        z = self.pre_mlp_layer_norm(y)
+        z = self.pre_mlp_layer_norm(y, plan_vector) #added plan vector
         z = self.mlp(z)
         z = self.dropout3(z)
         z = z + y
@@ -126,16 +162,26 @@ class DecoderLayer(nn.Module):
         y = y.reshape(batch_size, seq_length, emb_dim)  # [batch,
         
         return y
-    
+
 class Decoder(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, plan_dim=128):
         super(Decoder, self).__init__()
         self.config = config
-        
+        self.plan_dim = plan_dim
+
+        # --- NEW: Plan Network ---
+        # This network creates the plan from the encoded audio.
+        # For example, using a simple pooling + MLP.
+        self.plan_network = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),  # Pool over the time dimension
+            nn.Flatten(),
+            nn.Linear(config.emb_dim, plan_dim),
+            nn.Tanh()
+        )
         self.token_embed = Embed(config.vocab_size, config.emb_dim, one_hot=True)
         self.fixed_embed = FixedEmbed(config.emb_dim)
         self.dropout = nn.Dropout(config.dropout_rate)
-        self.decoder_layers = nn.ModuleList([DecoderLayer(config, layer_idx=layer_idx) for layer_idx in range(config.num_decoder_layers)])
+        self.decoder_layers = nn.ModuleList([DecoderLayer(config, plan_dim=plan_dim, layer_idx=layer_idx) for layer_idx in range(config.num_decoder_layers)]) #pass plan_dim
         self.layer_norm = LayerNorm(config.emb_dim)
         self.dense = nn.Linear(in_features=config.emb_dim, out_features=config.vocab_size)
         self.dense_pitch = nn.Linear(in_features=config.emb_dim, out_features=config.vocab_size)
@@ -162,7 +208,13 @@ class Decoder(nn.Module):
         y = y + self.fixed_embed(decoder_positions, decode=decode)
         y = self.dropout(y)
         y = y.type(cfg.dtype)
-            
+         
+        # --- NEW: Generate the Global Plan Vector ---
+        # encoded shape is [batch, time, emb_dim]
+        # Permute for pooling: [batch, emb_dim, time]
+        encoded_for_plan = encoded.permute(0, 2, 1)
+        plan_vector = self.plan_network(encoded_for_plan)  # shape: [batch, plan_dim]
+        # --- End of NEW ---    
 
         for layer_idx ,layer in enumerate(self.decoder_layers):
             # [batch, length, emb_dim] -> [batch, length, emb_dim]
@@ -180,7 +232,7 @@ class Decoder(nn.Module):
             if encoder_decoder_mask_i is not None:
                 encoder_decoder_mask_i = encoder_decoder_mask_i[:, :, :seq_length, :encoded_i.size(1)]  # [batch, num_heads, length, encoded_length]
 
-            y = layer(y, encoded_i, decoder_mask=decoder_mask, encoder_decoder_mask=encoder_decoder_mask_i, decode=decode, decoder_targets_frame_index=decoder_targets_frame_index)
+            y = layer(y, encoded_i, plan_vector=plan_vector, decoder_mask=decoder_mask, encoder_decoder_mask=encoder_decoder_mask_i, decode=decode, decoder_targets_frame_index=decoder_targets_frame_index)
             
             if hasattr(self.config, "get_encder_decoder_attention_weights") and self.config.get_encder_decoder_attention_weights:
                 res_dict[f"decoder_layer_cross_attention_weights_{layer_idx}"] = None  # Save attention weights for each layer
@@ -217,7 +269,7 @@ class Decoder(nn.Module):
         return res_dict
     
 
-    
+ 
     
 class CompoundDecoder(nn.Module):
     def __init__(self, config, sub_token_names=[], decoder_type="performance", decoder_layer_num = None): # decoder_type can be "performance" or "score"
