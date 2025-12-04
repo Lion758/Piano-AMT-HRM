@@ -27,7 +27,7 @@ class EncoderLayer(nn.Module):
         self.dropout1 = nn.Dropout(config.dropout_rate)
         
         self.pre_mlp_layer_norm = LayerNorm(config.emb_dim)
-        self.mlp = MlpBlock(emb_dim=config.emb_dim, intermediate_dim=config.mlp_dim, activations=config.mlp_activations, intermediate_dropout_rate=config.dropout_rate)
+        self.mlp = MlpBlock(emb_dim=config.emb_dim, intermediate_dim=config.mlp_dim, activations=config.mlp_activations, intermediate_dropout_rate=config.dropout_rate) #refers to ffn
         self.dropout2 = nn.Dropout(config.dropout_rate)
 
     def forward(self, inputs, encoder_mask=None, deterministic=False):
@@ -66,6 +66,8 @@ class Encoder(nn.Module):
         Returns:
             _type_: shape [batch, length, emb_dim]
         """
+        #length is number of time steps in each sample
+        #depth refers to how many numbers describe each frame 
         cfg = self.config
         assert encoder_input_tokens.ndim == 3  # [batch, length, depth]
 
