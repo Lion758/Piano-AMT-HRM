@@ -59,7 +59,6 @@ from mir_eval.transcription import precision_recall_f1_overlap as evaluate_notes
 from mir_eval.transcription_velocity import precision_recall_f1_overlap as evaluate_notes_with_velocity
 import mir_eval
 
-import wandb
 from datetime import datetime
 import time as std_time
 import socket
@@ -764,7 +763,7 @@ def my_main(config: OmegaConf):
             f.write(str(config) + "\n"*5)
             f.write("\n".join([socket.gethostname(), " "]))
             f.write(str(model))
-
+        
         # image dir.
         img_dir = os.path.join(log_dir, "img")
         os.system('mkdir -p "%s"'%img_dir)
