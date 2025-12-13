@@ -10,7 +10,7 @@ from model.Encoder import Encoder
 from model.Decoder import Decoder, CompoundDecoder
 from model.Layers import *
 from model.Mask import *
-from model.HPPNet import HPPNet
+#from model.HPPNet import HPPNet
 from data.constants import *
 
 from torch.nn.utils.rnn import pad_sequence
