@@ -5,7 +5,11 @@ Converted jax-based code https://github.com/magenta/mt3/blob/main/mt3/layers.py#
 import torch
 from typing import Callable
 import numpy as np
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
+
 
 # device = "cuda" if torch.cuda.is_available() else "cpu"
 

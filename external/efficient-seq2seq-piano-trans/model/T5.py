@@ -5,6 +5,8 @@ Converted jax-based code https://github.com/magenta/mt3/blob/main/mt3/network.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as Functional
+from model.HRMAdapter import HRMAdapter
+
 
 from model.Encoder import Encoder
 from model.Decoder import Decoder, CompoundDecoder
@@ -54,6 +56,35 @@ class Transformer(nn.Module):
 
         self.pad_token = TOKEN_PAD
         self.eos_token = TOKEN_END
+                # -----------------------------
+        # Option A: HRM refiner on pooled encoder memories
+        # -----------------------------
+        # All fields are optional; if not in config, they default safely.
+        self.use_hrm_refiner = getattr(self.config, "use_hrm_refiner", False)
+        self.hrm_refine_scales = set(getattr(self.config, "hrm_refine_scales", [4]))
+        self.hrm_hidden_size = getattr(self.config, "hrm_hidden_size", self.config.emb_dim)
+        self.hrm_num_heads = getattr(self.config, "hrm_num_heads", 8)
+        self.hrm_mlp_dim = getattr(self.config, "hrm_mlp_dim", 1024)
+        self.hrm_H_cycles = getattr(self.config, "hrm_H_cycles", 2)
+        self.hrm_L_cycles = getattr(self.config, "hrm_L_cycles", 2)
+        self.hrm_gate_init = getattr(self.config, "hrm_gate_init", 0.0)
+
+        # Create one HRMAdapter per pooling scale we want to refine.
+        # Keyed by pooling size as string to work with ModuleDict.
+        self.hrm_refiners = nn.ModuleDict()
+        if self.use_hrm_refiner and hasattr(self.config, "pooling_sizes"):
+            for p in set(self.config.pooling_sizes):
+                if p in self.hrm_refine_scales:
+                    self.hrm_refiners[str(p)] = HRMAdapter(
+                        d_model=self.config.emb_dim,
+                        hidden_size=self.hrm_hidden_size,
+                        num_heads=self.hrm_num_heads,
+                        mlp_dim=self.hrm_mlp_dim,
+                        H_cycles=self.hrm_H_cycles,
+                        L_cycles=self.hrm_L_cycles,
+                        gate_init=self.hrm_gate_init,
+                    )
+
         
     def encode(
             self, 
@@ -162,9 +193,20 @@ class Transformer(nn.Module):
             for pooling in set(self.config.pooling_sizes):
                 encoded_i = encoded
                 if pooling > 1:
-                    encoded_i = encoded_i.reshape(encoded_i.size(0), encoded_i.size(1)//pooling, pooling, encoded_i.size(2)).mean(dim=2)  # [batch, 1, encoded_length, emb_dim]
+                    encoded_i = encoded_i.reshape(
+                        encoded_i.size(0),
+                        encoded_i.size(1) // pooling,
+                        pooling,
+                        encoded_i.size(2)
+                    ).mean(dim=2)
+
+                # ---- HRM refinement on pooled memory (Option A) ----
+                if self.use_hrm_refiner and str(pooling) in self.hrm_refiners:
+                    encoded_i = self.hrm_refiners[str(pooling)](encoded_i)
+
                 encoded_pooling_dict[pooling] = encoded_i  # Save the encoded_i for later use
             encoded = None
+
 
         decoder_output_dict = self.decoder(
             encoded,
@@ -301,9 +343,20 @@ class Transformer(nn.Module):
                 for pooling in set(self.config.pooling_sizes):
                     encoded_pool = encoded_i
                     if pooling > 1:
-                        encoded_pool = encoded_pool.reshape(batch_size, encoded_pool.size(1)//pooling, pooling, encoded_pool.size(2)).mean(dim=2)  # [batch, 1, encoded_length, emb_dim]
-                    encoded_pooling_dict[pooling] = encoded_pool  # Save the encoded_i for later use
+                        encoded_pool = encoded_pool.reshape(
+                            batch_size,
+                            encoded_pool.size(1) // pooling,
+                            pooling,
+                            encoded_pool.size(2)
+                        ).mean(dim=2)
+
+                    # ---- HRM refinement on pooled memory (Option A) ----
+                    if self.use_hrm_refiner and str(pooling) in self.hrm_refiners:
+                        encoded_pool = self.hrm_refiners[str(pooling)](encoded_pool)
+
+                    encoded_pooling_dict[pooling] = encoded_pool  # Save for later use
                 encoded_i = None
+
             
             decoder_output_dict = self.decoder(
                 encoded_i,

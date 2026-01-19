@@ -8,7 +8,14 @@ import torch.nn as nn
 from model.Layers import *
 from model.Mask import *
 import math
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+try:
+    from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+    _FLASH_ATTN_AVAILABLE = True
+except Exception:
+    flash_attn_qkvpacked_func = None
+    flash_attn_func = None
+    _FLASH_ATTN_AVAILABLE = False
+
 
 
 from xformers.ops import memory_efficient_attention
