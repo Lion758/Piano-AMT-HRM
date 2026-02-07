@@ -646,14 +646,29 @@ class MT3Trainer(pl.LightningModule):
         # config
         step_unfreeze_decoder = getattr(self.config.training, "unfreeze_decoder_step", None)
         step_unfreeze_encoder = getattr(self.config.training, "unfreeze_encoder_step", None)
+        step_unfreeze_hrm = getattr(self.config.training, "unfreeze_hrm_step", None)
 
         lr_enc = getattr(self.config.training, "lr_encoder", self.config.training.learning_rate)
         lr_dec = getattr(self.config.training, "lr_decoder", self.config.training.learning_rate)
         lr_hrm = getattr(self.config.training, "lr_hrm", self.config.training.learning_rate)
+        hrm_lr_warmup_steps = getattr(self.config.training, "hrm_lr_warmup_steps", 0)
 
-        # Always train HRM in your plan
-        self.model.unfreeze_hrm()
-        self._set_group_lr(opt, "hrm", lr_hrm)
+        freeze_hrm = getattr(self.config.training, "freeze_hrm_init", False)
+
+        def _warmup_lr(base_lr: float, warmup_steps: int, step: int, start_step: int = 0) -> float:
+            if warmup_steps is None or warmup_steps <= 0:
+                return base_lr
+            progress = max(0, step - start_step + 1)
+            return base_lr * min(1.0, progress / warmup_steps)
+
+        # HRM
+        if freeze_hrm and (step_unfreeze_hrm is None or self.global_step < step_unfreeze_hrm):
+            self.model.freeze_hrm()
+            self._set_group_lr(opt, "hrm", 0.0)
+        else:
+            self.model.unfreeze_hrm()
+            hrm_lr = _warmup_lr(lr_hrm, hrm_lr_warmup_steps, self.global_step, step_unfreeze_hrm or 0)
+            self._set_group_lr(opt, "hrm", hrm_lr)
 
         # Decoder
         if step_unfreeze_decoder is None or self.global_step < step_unfreeze_decoder:
