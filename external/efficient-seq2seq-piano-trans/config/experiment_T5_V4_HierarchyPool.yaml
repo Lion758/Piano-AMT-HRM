@@ -6,10 +6,10 @@ model:
 
   cross_attention_hierarchy_pooling: true
   pooling_sizes: [4, 4, 2, 2, 1, 1]
+  hrm_refine_scales: [4, 2, 1]
   # pooling_sizes: [4, 4, 4, 4, 4, 4]
 
 training:
   notes: "HRM_adapter_with_freezing_USE_ROPE=true"
   
-
 

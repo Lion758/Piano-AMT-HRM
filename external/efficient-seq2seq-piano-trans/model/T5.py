@@ -218,6 +218,10 @@ class Transformer(nn.Module):
                     reset_flag= None, #reset_flag,   # [B] bool, e.g. new piece boundary
                     )
                 encoded_pooling_dict[pooling] = encoded_i  # Save the encoded_i for later use
+            expected_poolings = set(self.config.pooling_sizes)
+            missing_poolings = expected_poolings - set(encoded_pooling_dict.keys())
+            if missing_poolings:
+                raise ValueError(f"encoded_pooling_dict missing pooling sizes: {sorted(missing_poolings)}")
 
             encoded = None
 
@@ -377,6 +381,10 @@ class Transformer(nn.Module):
                     encoded_pooling_dict[pooling] = encoded_pool
 
                 encoded_i = None
+                expected_poolings = set(self.config.pooling_sizes)
+                missing_poolings = expected_poolings - set(encoded_pooling_dict.keys())
+                if missing_poolings:
+                    raise ValueError(f"encoded_pooling_dict missing pooling sizes: {sorted(missing_poolings)}")
             
             decoder_output_dict = self.decoder(
                 encoded_i,
