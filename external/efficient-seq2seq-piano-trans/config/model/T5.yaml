@@ -31,3 +31,12 @@
 
 #HRM 
   use_hrm_refiner: true
+  hrm_H_cycles: 2
+  hrm_L_cycles: 2
+  hrm_H_layers: 4
+  hrm_L_layers: 4
+  hrm_num_heads: 8
+  hrm_expansion: 4.0
+  hrm_rms_norm_eps: 1e-5
+  hrm_use_rope: true
+  hrm_forward_dtype: torch.bfloat16
