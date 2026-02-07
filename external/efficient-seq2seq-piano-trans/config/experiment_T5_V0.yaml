@@ -18,7 +18,7 @@ training:
   batch: 32
   batch_test: 256 # 64 # 256
   learning_rate: 1e-4
-  training_steps: 2001 #200001
+  training_steps: 5001 #200001
   evaluation_epochs: 1
   
   mode: train

@@ -50,7 +50,7 @@ training:
   batch_test: 256 # 64 # 256
   batch_inference: 64
   learning_rate: 1e-4
-  training_steps: 2001 #200001
+  training_steps: 5001 #200001
   evaluation_epochs: 1 #5
   online_testing: true
 

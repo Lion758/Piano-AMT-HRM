@@ -1,7 +1,7 @@
 # training:
   mode: train # train, test
   learning_rate: 1e-4
-  training_steps: 2001 #50001 #1000000
+  training_steps: 5001 #50001 #1000000
   checking_steps: 10000
   evaluation_epochs: 1 #5
   evaluate_every_n_steps: 50
@@ -20,8 +20,8 @@
   freeze_hrm_init: false
 
   # phase boundaries (set to null to disable)
-  unfreeze_decoder_step: 400
-  unfreeze_encoder_step: 1200
+  unfreeze_decoder_step: 1000
+  unfreeze_encoder_step: 1800
 
   # per-module learning rates
   lr_hrm: 1.0e-3
