@@ -43,7 +43,8 @@ def my_main(config: OmegaConf):
                 print(f"Removing key {key} from state_dict")
                 del state_dict[key]
 
-        trainer.model.load_state_dict(state_dict, strict=True) # config.model.strict_checkpoint
+        #load state_dict = true
+        trainer.model.load_state_dict(state_dict, strict=False) # config.model.strict_checkpoint
         trainer.model = trainer.model.to(device).eval()
 
     audio_path = config.audio_path

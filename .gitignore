@@ -170,6 +170,7 @@ cython_debug/
 #.idea/
 
 
+external/efficient-seq2seq-piano-trans/dataset
 
 
 separated/

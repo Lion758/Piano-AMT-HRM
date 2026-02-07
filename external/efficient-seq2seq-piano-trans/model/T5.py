@@ -1,10 +1,12 @@
 """
 Converted jax-based code https://github.com/magenta/mt3/blob/main/mt3/network.py#L158 to pytorch
 """
-
+#HRM_REFINERS
 import torch
 import torch.nn as nn
 import torch.nn.functional as Functional
+from model.HRM_refiners import HRMEncoderAdapter
+
 
 from model.Encoder import Encoder
 from model.Decoder import Decoder, CompoundDecoder
@@ -54,6 +56,28 @@ class Transformer(nn.Module):
 
         self.pad_token = TOKEN_PAD
         self.eos_token = TOKEN_END
+
+        self.use_hrm_refiner = getattr(self.config, "use_hrm_refiner", False)
+        self.hrm_refine_scales = set(getattr(self.config, "hrm_refine_scales", [4]))
+
+        self.hrm_refiners = nn.ModuleDict()
+        if self.use_hrm_refiner and hasattr(self.config, "pooling_sizes"):
+            for p in set(self.config.pooling_sizes):
+                if p in self.hrm_refine_scales:
+                    self.hrm_refiners[str(p)] = HRMEncoderAdapter(
+                        d_model=self.config.emb_dim,
+                        H_cycles=getattr(self.config, "hrm_H_cycles", 2),
+                        L_cycles=getattr(self.config, "hrm_L_cycles", 2),
+                        H_layers=getattr(self.config, "hrm_H_layers", 1),
+                        L_layers=getattr(self.config, "hrm_L_layers", 1),
+                        num_heads=getattr(self.config, "hrm_num_heads", 8),
+                        expansion=getattr(self.config, "hrm_expansion", 4.0),
+                        rms_norm_eps=getattr(self.config, "hrm_rms_norm_eps", 1e-5),
+                        use_rope=getattr(self.config, "hrm_use_rope", True),
+                        max_seq_len=getattr(self.config, "max_len", 4096),
+                        one_step_grad=getattr(self.config, "hrm_one_step_grad", True),
+                    )
+        
         
     def encode(
             self, 
@@ -89,6 +113,20 @@ class Transformer(nn.Module):
         else:
             encoder_outputs = self.encoder(encoder_input_tokens, encoder_mask, deterministic=not enable_dropout)
         return encoder_outputs
+    
+    def set_requires_grad(self, module: nn.Module, flag: bool):
+        for p in module.parameters():
+            p.requires_grad = flag
+
+    def freeze_encoder(self): self.set_requires_grad(self.encoder, False)
+    def unfreeze_encoder(self): self.set_requires_grad(self.encoder, True)
+
+    def freeze_decoder(self): self.set_requires_grad(self.decoder, False)
+    def unfreeze_decoder(self): self.set_requires_grad(self.decoder, True)
+
+    def freeze_hrm(self): self.set_requires_grad(self.hrm_refiners, False)
+    def unfreeze_hrm(self): self.set_requires_grad(self.hrm_refiners, True)
+
     
     def decode(
             self, 
@@ -154,17 +192,34 @@ class Transformer(nn.Module):
             if hasattr(self.config, "encoder_decoder_slide_window_size") and self.config.encoder_decoder_slide_window_size > 0:
                 encoder_decoder_mask = encoder_decoder_mask_0
                 
-                
+        encoded_pooling_dict = {}
+        #reset_flag = torch.ones(encoded.size(0), dtype=torch.bool, device=encoded.device)  # default reset-all        
+
         # Hierarchical pooling
-        encoded_pooling_dict = None
+      
         if hasattr(self.config, "cross_attention_hierarchy_pooling") and self.config.cross_attention_hierarchy_pooling:
             encoded_pooling_dict = {}
             for pooling in set(self.config.pooling_sizes):
                 encoded_i = encoded
+                encoded_pool = encoded
                 if pooling > 1:
-                    encoded_i = encoded_i.reshape(encoded_i.size(0), encoded_i.size(1)//pooling, pooling, encoded_i.size(2)).mean(dim=2)  # [batch, 1, encoded_length, emb_dim]
+                    encoded_pool = encoded_pool.reshape(
+                        encoded_i.size(0),
+                        encoded_i.size(1) // pooling,
+                        pooling,
+                        encoded_i.size(2)
+                    ).mean(dim=2)
+
+                if self.use_hrm_refiner and str(pooling) in self.hrm_refiners:
+                    # ---- HRM refinement on pooled memory (Option A) ----
+                    encoded_i, _ = self.hrm_refiners[str(pooling)](
+                    x_pool=encoded_pool, carry= None, #carry_dict.get(pooling, None),
+                    reset_flag= None, #reset_flag,   # [B] bool, e.g. new piece boundary
+                    )
                 encoded_pooling_dict[pooling] = encoded_i  # Save the encoded_i for later use
+
             encoded = None
+
 
         decoder_output_dict = self.decoder(
             encoded,
@@ -293,7 +348,10 @@ class Transformer(nn.Module):
                 # encoder_decoder_mask_i = torch.stack(encoder_decoder_mask_i_list, dim=0)
                 encoder_decoder_mask_i = encoder_decoder_mask_i[:, :, :, :self.config.encoder_decoder_slide_window_size]  # [batch_size, 1, i+pred_step, T]
             
-            
+            encoded_pooling_dict = {}
+            #carry_dict = getattr(self, "hrm_carry_dict", {})   # or pass it in
+            #reset_flag = torch.ones(encoded.size(0), dtype=torch.bool, device=encoded.device)  # default reset-all        
+
             # Hierarchical pooling
             encoded_pooling_dict = None
             if hasattr(self.config, "cross_attention_hierarchy_pooling") and self.config.cross_attention_hierarchy_pooling:
@@ -301,8 +359,22 @@ class Transformer(nn.Module):
                 for pooling in set(self.config.pooling_sizes):
                     encoded_pool = encoded_i
                     if pooling > 1:
-                        encoded_pool = encoded_pool.reshape(batch_size, encoded_pool.size(1)//pooling, pooling, encoded_pool.size(2)).mean(dim=2)  # [batch, 1, encoded_length, emb_dim]
-                    encoded_pooling_dict[pooling] = encoded_pool  # Save the encoded_i for later use
+                        encoded_pool = encoded_pool.reshape(
+                            batch_size,
+                            encoded_pool.size(1) // pooling,
+                            pooling,
+                            encoded_pool.size(2)
+                        ).mean(dim=2)
+
+                    # ---- HRM refinement on pooled memory (Option A) ----
+                    if self.use_hrm_refiner and str(pooling) in self.hrm_refiners:
+                        encoded_pool, _ = self.hrm_refiners[str(pooling)](
+                        x_pool=encoded_pool,
+                        carry= None, # carry_dict.get(pooling, None),
+                        reset_flag= None, #reset_flag,
+                        )
+                    encoded_pooling_dict[pooling] = encoded_pool
+
                 encoded_i = None
             
             decoder_output_dict = self.decoder(

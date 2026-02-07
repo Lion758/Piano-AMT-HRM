@@ -8,7 +8,14 @@ import torch.nn as nn
 from model.Layers import *
 from model.Mask import *
 import math
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+try:
+    from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+    _FLASH_ATTN_AVAILABLE = True
+except Exception:
+    flash_attn_qkvpacked_func = None
+    flash_attn_func = None
+    _FLASH_ATTN_AVAILABLE = False
+
 
 
 from xformers.ops import memory_efficient_attention
@@ -162,6 +169,17 @@ class Multi_Head_Attention(nn.Module):
                 query = query.permute(0, 2, 1, 3)  # (batch_size, num_heads, seq_len, head_dim)
                 key = key.permute(0, 2, 1, 3)
                 value = value.permute(0, 2, 1, 3)
+
+                
+                K = key.size(-2)
+                if attention_bias is not None and attention_bias.size(-1) != K:
+                    if attention_bias.size(-1) < K:
+                    # pad with zeros (no masking) for the extra keys
+                        pad = K - attention_bias.size(-1)
+                        attention_bias = torch.nn.functional.pad(attention_bias, (0, pad), value=0.0)
+                    else:
+                        attention_bias = attention_bias[..., :K]
+
 
                 x = F.scaled_dot_product_attention(query, key, value, attn_mask=attention_bias, dropout_p=dropout_p)
                 x = x.permute(0, 2, 1, 3)  # (batch_size, seq_len, num_heads, head_dim)

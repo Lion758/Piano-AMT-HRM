@@ -378,6 +378,7 @@ class MT3Trainer(pl.LightningModule):
         if self.global_step > 1 and self.config.training.online_testing: # skip the validation step in the init epoch.
             self.test_outputs_dict = defaultdict(list)
             test_dataloader = self.test_dataloader()
+
             for batch_idx, batch in tqdm( enumerate(test_dataloader), desc="Testing ...", total=len(test_dataloader), disable=(self.global_rank != 0) ):
                 new_batch = {}
                 for k,v in batch.items():
@@ -615,15 +616,68 @@ class MT3Trainer(pl.LightningModule):
 
 
     def configure_optimizers(self):
-        optimizer = AdamW(self.model.parameters(), self.config.training.learning_rate)
+        m = self.model  # Transformer
 
-        # scheduler = CosineAnnealingLR(optimizer, T_max=10)
-        # scheduler.get_lr()
-        # return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler}}
-        
+        lr_enc = getattr(self.config.training, "lr_encoder", self.config.training.learning_rate)
+        lr_dec = getattr(self.config.training, "lr_decoder", self.config.training.learning_rate)
+        lr_hrm = getattr(self.config.training, "lr_hrm", self.config.training.learning_rate)
+
+        freeze_enc = getattr(self.config.training, "freeze_encoder_init", False)
+        freeze_dec = getattr(self.config.training, "freeze_decoder_init", False)
+        freeze_hrm = getattr(self.config.training, "freeze_hrm_init", False)
+
+        param_groups = [
+            {"name": "encoder", "params": m.encoder.parameters(), "lr": 0.0 if freeze_enc else lr_enc},
+            {"name": "decoder", "params": m.decoder.parameters(), "lr": 0.0 if freeze_dec else lr_dec},
+            {"name": "hrm", "params": m.hrm_refiners.parameters(), "lr": 0.0 if freeze_hrm else lr_hrm},
+        ]
+
+        optimizer = AdamW(param_groups, lr=self.config.training.learning_rate)
         return optimizer
-    
-    
+
+    def _set_group_lr(self, optimizer, group_name: str, lr: float):
+        for g in optimizer.param_groups:
+            if g.get("name", None) == group_name:
+                g["lr"] = lr
+
+    def apply_freeze_schedule(self):
+        opt = self.optimizers()  # lightning helper
+
+        # config
+        step_unfreeze_decoder = getattr(self.config.training, "unfreeze_decoder_step", None)
+        step_unfreeze_encoder = getattr(self.config.training, "unfreeze_encoder_step", None)
+
+        lr_enc = getattr(self.config.training, "lr_encoder", self.config.training.learning_rate)
+        lr_dec = getattr(self.config.training, "lr_decoder", self.config.training.learning_rate)
+        lr_hrm = getattr(self.config.training, "lr_hrm", self.config.training.learning_rate)
+
+        # Always train HRM in your plan
+        self.model.unfreeze_hrm()
+        self._set_group_lr(opt, "hrm", lr_hrm)
+
+        # Decoder
+        if step_unfreeze_decoder is None or self.global_step < step_unfreeze_decoder:
+            self.model.freeze_decoder()
+            self._set_group_lr(opt, "decoder", 0.0)
+        else:
+            self.model.unfreeze_decoder()
+            self._set_group_lr(opt, "decoder", lr_dec)
+
+        # Encoder
+        if step_unfreeze_encoder is None or self.global_step < step_unfreeze_encoder:
+            self.model.freeze_encoder()
+            self._set_group_lr(opt, "encoder", 0.0)
+        else:
+            self.model.unfreeze_encoder()
+            self._set_group_lr(opt, "encoder", lr_enc)
+
+    def on_train_start(self):
+        self.apply_freeze_schedule()
+
+    def on_train_batch_start(self, batch, batch_idx):
+        self.apply_freeze_schedule()
+        
+
     def train_dataloader(self):
         # train_data = MIDIDataset(type='train')
         if self.config.data.dataset_name == "Audio2Midi_Dataset":
@@ -696,6 +750,7 @@ class MT3Trainer(pl.LightningModule):
 
         testloader = DataLoader(test_data, batch_size=self.config.training.batch_test, num_workers=self.config.training.num_workers)
         return testloader
+
 
 
 @rank_zero_only
@@ -796,6 +851,7 @@ def my_main(config: OmegaConf):
                         devices=config.devices, # 1 [1,2, 4, 5, 6,7]
                         accelerator=config.accelerator, # "gpu"
                         logger=logger_list,
+                        #limit_val_batches= 5,
                         #  val_check_interval=0.0, # 0.0:disable, None:total training batch.
                         check_val_every_n_epoch=config.training.evaluation_epochs,
                         max_steps=config.training.training_steps,
