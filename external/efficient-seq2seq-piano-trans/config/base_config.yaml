@@ -45,7 +45,7 @@ model:
 training:
   notes: "T5"
   mode: train
-  # mode: test
+  # mode: test test
   batch:  32  #4
   batch_test: 256 # 64 # 256
   batch_inference: 64
