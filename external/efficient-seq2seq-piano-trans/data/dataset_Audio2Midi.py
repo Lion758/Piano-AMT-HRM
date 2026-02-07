@@ -259,6 +259,7 @@ class SingleWavDataset(Dataset):
             "decoder_targets_mask": decoder_targets_mask,
             "decoder_targets_len": torch.tensor(seq_len, dtype=torch.long),
             "decoder_targets_frame_index": decoder_targets_frame_index,
+            "hrm_reset_flag": torch.tensor(begin == 0, dtype=torch.bool),
             
             "encoder_decoder_mask": encoder_decoder_mask[None],
             

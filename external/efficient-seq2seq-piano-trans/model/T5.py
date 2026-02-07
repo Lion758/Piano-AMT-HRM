@@ -78,6 +78,7 @@ class Transformer(nn.Module):
                         max_seq_len=getattr(self.config, "max_len", 4096),
                         one_step_grad=getattr(self.config, "hrm_one_step_grad", True),
                     )
+        self.hrm_carry_dict = {}
         
         
     def encode(
@@ -143,7 +144,8 @@ class Transformer(nn.Module):
             max_decode_length=None,
             use_preframe_tokens=True,
             decoder_targets_frame_index=None,
-            encoder_decoder_mask=None
+            encoder_decoder_mask=None,
+            hrm_reset_flag=None,
             ):
         
         encoder_decoder_mask_0 = encoder_decoder_mask
@@ -194,7 +196,9 @@ class Transformer(nn.Module):
                 encoder_decoder_mask = encoder_decoder_mask_0
                 
         encoded_pooling_dict = {}
-        #reset_flag = torch.ones(encoded.size(0), dtype=torch.bool, device=encoded.device)  # default reset-all        
+        reset_flag = None
+        if hrm_reset_flag is not None:
+            reset_flag = hrm_reset_flag.to(encoded.device)
 
         # Hierarchical pooling
       
@@ -213,10 +217,18 @@ class Transformer(nn.Module):
 
                 if self.use_hrm_refiner and str(pooling) in self.hrm_refiners:
                     # ---- HRM refinement on pooled memory (Option A) ----
-                    encoded_i, _ = self.hrm_refiners[str(pooling)](
-                    x_pool=encoded_pool, carry= None, #carry_dict.get(pooling, None),
-                    reset_flag= None, #reset_flag,   # [B] bool, e.g. new piece boundary
+                    carry = self.hrm_carry_dict.get(pooling)
+                    if carry is not None and (
+                        carry.z_H.size(0) != encoded_pool.size(0)
+                        or carry.z_H.size(1) != encoded_pool.size(1)
+                    ):
+                        carry = None
+                    encoded_i, new_carry = self.hrm_refiners[str(pooling)](
+                        x_pool=encoded_pool,
+                        carry=carry,
+                        reset_flag=reset_flag,
                     )
+                    self.hrm_carry_dict[pooling] = new_carry
                 encoded_pooling_dict[pooling] = encoded_i  # Save the encoded_i for later use
             expected_poolings = set(self.config.pooling_sizes)
             missing_poolings = expected_poolings - set(encoded_pooling_dict.keys())
@@ -263,7 +275,8 @@ class Transformer(nn.Module):
                 dur_inputs = None,
                 dur_targets = None,
                 decoder_targets_frame_index=None,
-                encoder_decoder_mask=None
+                encoder_decoder_mask=None,
+                hrm_reset_flag=None,
     ):
         res_dict = {}
             
@@ -274,7 +287,8 @@ class Transformer(nn.Module):
         
         decoder_output_dict = self.decode(encoder_outputs, encoder_outputs, decoder_input_tokens, decoder_target_tokens, encoder_segment_ids=encoder_segment_ids, decoder_segment_ids=decoder_segment_ids, decoder_positions=decoder_positions, enable_dropout=enable_dropout, decode=decode, 
             decoder_targets_frame_index=decoder_targets_frame_index,
-            encoder_decoder_mask=encoder_decoder_mask)
+            encoder_decoder_mask=encoder_decoder_mask,
+            hrm_reset_flag=hrm_reset_flag)
 
 
         res_dict.update(decoder_output_dict)
@@ -324,6 +338,7 @@ class Transformer(nn.Module):
             
         use_kv_cache = True
         curr_token = torch.ones([batch_size, pred_step]).to(encoder_inputs) * TOKEN_START  # [batch_size, pred_step]
+        hrm_reset_flag = torch.ones(batch_size, dtype=torch.bool, device=encoder_inputs.device)
         for i in tqdm(range(0, target_seq_length, pred_step), desc="Generating tokens (rank %d)" % global_rank):
             encoded_i = encoded[:, :T, :]  # [batch_size, T, n_mel]
             
@@ -354,8 +369,6 @@ class Transformer(nn.Module):
                 encoder_decoder_mask_i = encoder_decoder_mask_i[:, :, :, :self.config.encoder_decoder_slide_window_size]  # [batch_size, 1, i+pred_step, T]
             
             encoded_pooling_dict = {}
-            #carry_dict = getattr(self, "hrm_carry_dict", {})   # or pass it in
-            #reset_flag = torch.ones(encoded.size(0), dtype=torch.bool, device=encoded.device)  # default reset-all        
 
             # Hierarchical pooling
             encoded_pooling_dict = None
@@ -373,11 +386,18 @@ class Transformer(nn.Module):
 
                     # ---- HRM refinement on pooled memory (Option A) ----
                     if self.use_hrm_refiner and str(pooling) in self.hrm_refiners:
-                        encoded_pool, _ = self.hrm_refiners[str(pooling)](
-                        x_pool=encoded_pool,
-                        carry= None, # carry_dict.get(pooling, None),
-                        reset_flag= None, #reset_flag,
+                        carry = self.hrm_carry_dict.get(pooling)
+                        if carry is not None and (
+                            carry.z_H.size(0) != encoded_pool.size(0)
+                            or carry.z_H.size(1) != encoded_pool.size(1)
+                        ):
+                            carry = None
+                        encoded_pool, new_carry = self.hrm_refiners[str(pooling)](
+                            x_pool=encoded_pool,
+                            carry=carry,
+                            reset_flag=hrm_reset_flag,
                         )
+                        self.hrm_carry_dict[pooling] = new_carry
                     encoded_pooling_dict[pooling] = encoded_pool
 
                 encoded_i = None
@@ -458,6 +478,8 @@ class Transformer(nn.Module):
             eos_flags = eos_flags | (curr_token[:, 0] == self.eos_token)
             if berak_on_eos and eos_flags.int().sum() == batch_size:
                 break
+            if hrm_reset_flag is not None:
+                hrm_reset_flag = torch.zeros_like(hrm_reset_flag)
 
             # Update current frame index
             gen_onsets = curr_token[:, 0]
@@ -477,6 +499,4 @@ class Transformer(nn.Module):
         return gen_tokens #[:, :max_num_tokens]
 
     
-    
-
-
+   

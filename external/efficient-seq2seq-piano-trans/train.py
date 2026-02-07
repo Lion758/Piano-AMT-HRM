@@ -118,10 +118,11 @@ class MT3Trainer(pl.LightningModule):
             #self.features_extracter = log_stft_extracter
     
 
-    def forward(self, encoder_input_tokens, decoder_target_tokens, decode, decoder_input_tokens = None, decoder_positions=None, decoder_targets_frame_index=None, encoder_decoder_mask=None):
+    def forward(self, encoder_input_tokens, decoder_target_tokens, decode, decoder_input_tokens = None, decoder_positions=None, decoder_targets_frame_index=None, encoder_decoder_mask=None, hrm_reset_flag=None):
         return self.model.forward(encoder_input_tokens, decoder_target_tokens, decode=decode, decoder_input_tokens=decoder_input_tokens, decoder_positions=decoder_positions, 
                 decoder_targets_frame_index=decoder_targets_frame_index,
-                encoder_decoder_mask=encoder_decoder_mask)
+                encoder_decoder_mask=encoder_decoder_mask,
+                hrm_reset_flag=hrm_reset_flag)
     
     def log_time_event(self, event_name):
         if self.global_rank == 0:
@@ -176,6 +177,7 @@ class MT3Trainer(pl.LightningModule):
         
         decoder_targets_frame_index = batch["decoder_targets_frame_index"]
         encoder_decoder_mask = batch["encoder_decoder_mask"]
+        hrm_reset_flag = batch.get("hrm_reset_flag")
         
         # Clip seq len if it is shorter than the max.
         if False:
@@ -197,7 +199,8 @@ class MT3Trainer(pl.LightningModule):
         # => [B*T, n_token, vocab_size], [B, T, 128]
         outputs_dict = self.forward(encoder_input_tokens=inputs, decoder_target_tokens=decoder_target_tokens, decode=False, decoder_input_tokens = decoder_inputs, 
                                     decoder_targets_frame_index=decoder_targets_frame_index,
-                                    encoder_decoder_mask=encoder_decoder_mask)
+                                    encoder_decoder_mask=encoder_decoder_mask,
+                                    hrm_reset_flag=hrm_reset_flag)
         self.log_time_event("forward_done")
 
         # cal losses
