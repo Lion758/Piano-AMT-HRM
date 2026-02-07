@@ -17,13 +17,17 @@
   # initial freeze
   freeze_encoder_init: true
   freeze_decoder_init: true
-  freeze_hrm_init: false
+  freeze_hrm_init: true
 
   # phase boundaries (set to null to disable)
-  unfreeze_decoder_step: 1000
+  unfreeze_decoder_step: 500
   unfreeze_encoder_step: 1800
+  unfreeze_hrm_step: 800
+
+  # lr warmup (steps)
+  hrm_lr_warmup_steps: 500
 
   # per-module learning rates
-  lr_hrm: 1.0e-3
+  lr_hrm: 1.0e-4
   lr_decoder: 1.0e-4
   lr_encoder: 1.0e-4
