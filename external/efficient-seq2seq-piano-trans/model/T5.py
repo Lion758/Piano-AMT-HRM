@@ -68,12 +68,13 @@ class Transformer(nn.Module):
                         d_model=self.config.emb_dim,
                         H_cycles=getattr(self.config, "hrm_H_cycles", 2),
                         L_cycles=getattr(self.config, "hrm_L_cycles", 2),
-                        H_layers=getattr(self.config, "hrm_H_layers", 1),
-                        L_layers=getattr(self.config, "hrm_L_layers", 1),
+                        H_layers=getattr(self.config, "hrm_H_layers", 4),
+                        L_layers=getattr(self.config, "hrm_L_layers", 4),
                         num_heads=getattr(self.config, "hrm_num_heads", 8),
                         expansion=getattr(self.config, "hrm_expansion", 4.0),
                         rms_norm_eps=getattr(self.config, "hrm_rms_norm_eps", 1e-5),
                         use_rope=getattr(self.config, "hrm_use_rope", True),
+                        forward_dtype=eval(getattr(self.config, "hrm_forward_dtype", "torch.bfloat16")),
                         max_seq_len=getattr(self.config, "max_len", 4096),
                         one_step_grad=getattr(self.config, "hrm_one_step_grad", True),
                     )
@@ -469,6 +470,5 @@ class Transformer(nn.Module):
 
     
     
-
 
 

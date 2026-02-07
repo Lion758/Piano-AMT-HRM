@@ -81,6 +81,21 @@ python train.py --config-name=$config\
 
 - Config files is managed with [hydra](http://hydra.cc/).
 
+### HRM refiner configuration
+
+When `model.use_hrm_refiner=true`, the HRM encoder adapter can be configured via the
+following knobs in the model config (defaults aligned with `external/HRM/config/arch/hrm_v1.yaml`):
+
+- `model.hrm_H_cycles` (default: 2)
+- `model.hrm_L_cycles` (default: 2)
+- `model.hrm_H_layers` (default: 4)
+- `model.hrm_L_layers` (default: 4)
+- `model.hrm_num_heads` (default: 8)
+- `model.hrm_expansion` (default: 4.0)
+- `model.hrm_rms_norm_eps` (default: 1e-5)
+- `model.hrm_use_rope` (default: true)
+- `model.hrm_forward_dtype` (default: torch.bfloat16)
+
 
 ## Evaluation
 
@@ -110,7 +125,6 @@ python inference.py model.checkpoint_path="$checkpoint_path" audio_path="'audio/
 
 - rlax59us' [MT3-pytorch](https://github.com/rlax59us/MT3-pytorch)
 - Official [PyTorch Lightning](https://github.com/PyTorchLightning/pytorch-lightning)
-
 
 
 
