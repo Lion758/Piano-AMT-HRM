@@ -689,6 +689,16 @@ class MT3Trainer(pl.LightningModule):
             self.model.unfreeze_encoder()
             self._set_group_lr(opt, "encoder", lr_enc)
 
+        # Ensure at least one parameter requires grad to avoid Lightning backward errors.
+        if not any(p.requires_grad for p in self.model.parameters()):
+            self.model.unfreeze_decoder()
+            self._set_group_lr(opt, "decoder", 0.0)
+            if self.global_rank == 0:
+                print(
+                    "Warning: all modules were frozen; decoder temporarily set to requires_grad=True "
+                    "to allow backprop (lr stays 0 until unfreeze schedule)."
+                )
+
     def on_train_start(self):
         self.apply_freeze_schedule()
 
