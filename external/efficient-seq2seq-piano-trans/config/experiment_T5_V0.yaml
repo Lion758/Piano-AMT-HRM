@@ -15,7 +15,7 @@ model:
   checkpoint_path:  "checkpoints/T5_V4_steps_200000.ckpt"
 
 training:
-  batch: 32
+  batch: 28
   batch_test: 256 # 64 # 256
   learning_rate: 1e-4
   training_steps: 5001 #200001
