@@ -77,6 +77,9 @@ class Transformer(nn.Module):
                         forward_dtype=eval(getattr(self.config, "hrm_forward_dtype", "torch.bfloat16")),
                         max_seq_len=getattr(self.config, "max_len", 4096),
                         one_step_grad=getattr(self.config, "hrm_one_step_grad", True),
+                        halt_max_steps=getattr(self.config, "hrm_halt_max_steps", 1),
+                        halt_exploration_prob=getattr(self.config, "hrm_halt_exploration_prob", 0.0),
+                        use_act_halt=getattr(self.config, "hrm_use_act_halt", False),
                     )
         self.hrm_carry_dict = {}
         
@@ -196,6 +199,7 @@ class Transformer(nn.Module):
                 encoder_decoder_mask = encoder_decoder_mask_0
                 
         encoded_pooling_dict = {}
+        hrm_halting = {}
         reset_flag = None
         if hrm_reset_flag is not None:
             reset_flag = hrm_reset_flag.to(encoded.device)
@@ -223,12 +227,13 @@ class Transformer(nn.Module):
                         or carry.z_H.size(1) != encoded_pool.size(1)
                     ):
                         carry = None
-                    encoded_i, new_carry = self.hrm_refiners[str(pooling)](
+                    encoded_i, new_carry, halting_diag = self.hrm_refiners[str(pooling)](
                         x_pool=encoded_pool,
                         carry=carry,
                         reset_flag=reset_flag,
                     )
                     self.hrm_carry_dict[pooling] = new_carry
+                    hrm_halting[pooling] = halting_diag
                 encoded_pooling_dict[pooling] = encoded_i  # Save the encoded_i for later use
             expected_poolings = set(self.config.pooling_sizes)
             missing_poolings = expected_poolings - set(encoded_pooling_dict.keys())
@@ -249,6 +254,8 @@ class Transformer(nn.Module):
             decode=decode,
             decoder_targets_frame_index=decoder_targets_frame_index,
             )
+        if hrm_halting:
+            decoder_output_dict["hrm_halting"] = hrm_halting
         return decoder_output_dict
     
     def _shift_right(self, input_ids, shift_step=1):
@@ -392,7 +399,7 @@ class Transformer(nn.Module):
                             or carry.z_H.size(1) != encoded_pool.size(1)
                         ):
                             carry = None
-                        encoded_pool, new_carry = self.hrm_refiners[str(pooling)](
+                        encoded_pool, new_carry, _halting_diag = self.hrm_refiners[str(pooling)](
                             x_pool=encoded_pool,
                             carry=carry,
                             reset_flag=hrm_reset_flag,
