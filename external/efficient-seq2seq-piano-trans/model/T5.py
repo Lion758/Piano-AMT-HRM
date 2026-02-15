@@ -256,6 +256,19 @@ class Transformer(nn.Module):
             )
         if hrm_halting:
             decoder_output_dict["hrm_halting"] = hrm_halting
+
+            # Optionally expose ACT diagnostics in the top-level output for training.
+            # We prioritize pooling=1 when present, otherwise use the smallest pooling scale.
+            preferred_pooling = 1 if 1 in hrm_halting else min(hrm_halting.keys())
+            act_diag = hrm_halting[preferred_pooling]
+            if "q_halt_logits" in act_diag:
+                decoder_output_dict["hrm_q_halt_logits"] = act_diag["q_halt_logits"]
+            if "q_continue_logits" in act_diag:
+                decoder_output_dict["hrm_q_continue_logits"] = act_diag["q_continue_logits"]
+            if "target_q_continue" in act_diag:
+                decoder_output_dict["hrm_target_q_continue"] = act_diag["target_q_continue"]
+            if "steps" in act_diag:
+                decoder_output_dict["hrm_steps"] = act_diag["steps"]
         return decoder_output_dict
     
     def _shift_right(self, input_ids, shift_step=1):
