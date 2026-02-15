@@ -169,6 +169,11 @@ class HRMEncoderAdapter(nn.Module):
                 z_H = self.H_level(hidden_states=z_H, input_injection=z_L + h_injection_bias, attention_mask=pool_mask, **seq_info)
         return z_H, z_L
 
+    def _compute_halt_logits(self, z_h_cls: torch.Tensor) -> torch.Tensor:
+        """Run the halting head in its parameter dtype to avoid mixed-dtype matmul errors."""
+        head_dtype = self.halt_head.weight.dtype
+        return self.halt_head(z_h_cls.to(head_dtype)).to(torch.float32)
+
     def forward(
         self,
         x_pool: torch.Tensor,                # [B, T, d]
@@ -218,7 +223,7 @@ class HRMEncoderAdapter(nn.Module):
             seq_info = dict(cos_sin=None)
 
         max_steps = self.halt_max_steps if self.use_act_halt else 1
-        halt_logits = self.halt_head(z_H[:, 0]).to(torch.float32)
+        halt_logits = self._compute_halt_logits(z_H[:, 0])
         target_q_continue = None
 
         for _ in range(max_steps):
@@ -241,7 +246,7 @@ class HRMEncoderAdapter(nn.Module):
             z_H = z_H * pool_mask_3d.to(z_H.dtype)
             z_L = z_L * pool_mask_3d.to(z_L.dtype)
 
-            halt_logits = self.halt_head(z_H[:, 0]).to(torch.float32)
+            halt_logits = self._compute_halt_logits(z_H[:, 0])
             q_halt_logits, q_continue_logits = halt_logits[..., 0], halt_logits[..., 1]
 
             steps = steps + active.to(steps.dtype)
@@ -265,7 +270,7 @@ class HRMEncoderAdapter(nn.Module):
                         external_context=external_context.detach() if external_context is not None else None,
                         pool_mask=pool_mask,
                     )
-                    next_halt_logits = self.halt_head(next_bootstrap_H[:, 0]).to(torch.float32)
+                    next_halt_logits = self._compute_halt_logits(next_bootstrap_H[:, 0])
                     next_q_halt_logits, next_q_continue_logits = next_halt_logits[..., 0], next_halt_logits[..., 1]
                     target_q_continue = torch.sigmoid(
                         torch.where(is_last_step, next_q_halt_logits, torch.maximum(next_q_halt_logits, next_q_continue_logits))
