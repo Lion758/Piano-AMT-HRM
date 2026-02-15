@@ -139,6 +139,7 @@ class HRMEncoderAdapter(nn.Module):
         x_pool: torch.Tensor,
         seq_info: Dict[str, Optional[Tuple[torch.Tensor, torch.Tensor]]],
         external_context: Optional[torch.Tensor] = None,
+        pool_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         h_injection_bias = external_context if external_context is not None else 0.0
 
@@ -153,19 +154,19 @@ class HRMEncoderAdapter(nn.Module):
                     for l_step in range(self.L_cycles):
                         is_last = (h_step == self.H_cycles - 1) and (l_step == self.L_cycles - 1)
                         if not is_last:
-                            z_L = self.L_level(hidden_states=z_L, input_injection=l_injection(z_H), **seq_info)
+                            z_L = self.L_level(hidden_states=z_L, input_injection=l_injection(z_H), attention_mask=pool_mask, **seq_info)
                     if h_step != self.H_cycles - 1:
-                        z_H = self.H_level(hidden_states=z_H, input_injection=z_L + h_injection_bias, **seq_info)
+                        z_H = self.H_level(hidden_states=z_H, input_injection=z_L + h_injection_bias, attention_mask=pool_mask, **seq_info)
 
-            z_L = self.L_level(hidden_states=z_L, input_injection=l_injection(z_H), **seq_info)
-            z_H = self.H_level(hidden_states=z_H, input_injection=z_L + h_injection_bias, **seq_info)
+            z_L = self.L_level(hidden_states=z_L, input_injection=l_injection(z_H), attention_mask=pool_mask, **seq_info)
+            z_H = self.H_level(hidden_states=z_H, input_injection=z_L + h_injection_bias, attention_mask=pool_mask, **seq_info)
             return z_H, z_L
 
         for h_step in range(self.H_cycles):
             for _ in range(self.L_cycles):
-                z_L = self.L_level(hidden_states=z_L, input_injection=l_injection(z_H), **seq_info)
+                z_L = self.L_level(hidden_states=z_L, input_injection=l_injection(z_H), attention_mask=pool_mask, **seq_info)
             if h_step != self.H_cycles - 1:
-                z_H = self.H_level(hidden_states=z_H, input_injection=z_L + h_injection_bias, **seq_info)
+                z_H = self.H_level(hidden_states=z_H, input_injection=z_L + h_injection_bias, attention_mask=pool_mask, **seq_info)
         return z_H, z_L
 
     def forward(
@@ -174,6 +175,7 @@ class HRMEncoderAdapter(nn.Module):
         carry: Optional[HRMEncoderCarry] = None,
         reset_flag: Optional[torch.Tensor] = None,  # [B] bool
         external_context: Optional[torch.Tensor] = None,  # [B, T, d]
+        pool_mask: Optional[torch.Tensor] = None,  # [B, T]
     ) -> Tuple[torch.Tensor, HRMEncoderCarry, Dict[str, torch.Tensor]]:
         B, T, D = x_pool.shape
         assert D == self.d_model
@@ -189,6 +191,12 @@ class HRMEncoderAdapter(nn.Module):
         if reset_flag is None:
             reset_flag = torch.zeros((B,), dtype=torch.bool, device=x_pool.device)
 
+        if pool_mask is None:
+            pool_mask = torch.ones((B, T), dtype=torch.bool, device=x_pool.device)
+        else:
+            pool_mask = pool_mask.to(device=x_pool.device, dtype=torch.bool)
+        pool_mask_3d = pool_mask.unsqueeze(-1)
+
         if external_context is None and carry is not None:
             external_context = carry.external_context
         if external_context is not None:
@@ -197,6 +205,9 @@ class HRMEncoderAdapter(nn.Module):
         reset_mask = reset_flag | carry.halted if self.use_act_halt else reset_flag
         carry = self.reset_carry(reset_mask, carry)
         z_H, z_L = carry.z_H, carry.z_L
+        z_H = z_H * pool_mask_3d.to(z_H.dtype)
+        z_L = z_L * pool_mask_3d.to(z_L.dtype)
+        x_pool = x_pool * pool_mask_3d.to(x_pool.dtype)
         steps = carry.steps
         halted = carry.halted
 
@@ -221,10 +232,14 @@ class HRMEncoderAdapter(nn.Module):
                 x_pool,
                 seq_info,
                 external_context=external_context,
+                pool_mask=pool_mask,
             )
             active_mask = active.view(-1, 1, 1)
             z_H = torch.where(active_mask, next_z_H, z_H)
             z_L = torch.where(active_mask, next_z_L, z_L)
+
+            z_H = z_H * pool_mask_3d.to(z_H.dtype)
+            z_L = z_L * pool_mask_3d.to(z_L.dtype)
 
             halt_logits = self.halt_head(z_H[:, 0]).to(torch.float32)
             q_halt_logits, q_continue_logits = halt_logits[..., 0], halt_logits[..., 1]
@@ -248,6 +263,7 @@ class HRMEncoderAdapter(nn.Module):
                         x_pool.detach(),
                         seq_info,
                         external_context=external_context.detach() if external_context is not None else None,
+                        pool_mask=pool_mask,
                     )
                     next_halt_logits = self.halt_head(next_bootstrap_H[:, 0]).to(torch.float32)
                     next_q_halt_logits, next_q_continue_logits = next_halt_logits[..., 0], next_halt_logits[..., 1]
@@ -258,8 +274,8 @@ class HRMEncoderAdapter(nn.Module):
             halted = halted | (step_halted & active)
 
         new_carry = HRMEncoderCarry(
-            z_H=z_H.detach(),
-            z_L=z_L.detach(),
+            z_H=(z_H * pool_mask_3d.to(z_H.dtype)).detach(),
+            z_L=(z_L * pool_mask_3d.to(z_L.dtype)).detach(),
             steps=steps.detach(),
             halted=halted.detach(),
             external_context=external_context.detach() if external_context is not None else None,
@@ -267,6 +283,7 @@ class HRMEncoderAdapter(nn.Module):
 
         # Return refined memory. HRM “uses z_H as the output state”; we keep that.
         refined = x_pool + torch.tanh(self.out_gate) * z_H.to(x_pool.dtype)
+        refined = refined * pool_mask_3d.to(refined.dtype)
         diagnostics = {
             "steps": steps,
             "halted": halted,

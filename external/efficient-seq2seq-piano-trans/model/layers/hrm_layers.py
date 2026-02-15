@@ -1,4 +1,5 @@
-from typing import Tuple
+from typing import Optional, Tuple
+import math
 
 import torch
 from torch import nn
@@ -109,7 +110,12 @@ class Attention(nn.Module):
         self.qkv_proj = CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False)
         self.o_proj = CastedLinear(self.output_size, self.hidden_size, bias=False)
 
-    def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        cos_sin: CosSin,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
 
         # hidden_states: [bs, seq_len, num_heads, head_dim]
@@ -126,10 +132,29 @@ class Attention(nn.Module):
             cos, sin = cos_sin
             query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-        # flash attn
-        attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal)
-        if isinstance(attn_output, tuple):  # fa2 and fa3 compatibility
-            attn_output = attn_output[0]
+        if attention_mask is None:
+            # flash attn
+            attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal)
+            if isinstance(attn_output, tuple):  # fa2 and fa3 compatibility
+                attn_output = attn_output[0]
+        else:
+            valid_mask = attention_mask.to(torch.bool)
+            q = query.transpose(1, 2)
+            k = key.transpose(1, 2)
+            v = value.transpose(1, 2)
+
+            scale = 1.0 / math.sqrt(self.head_dim)
+            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+
+            key_mask = valid_mask[:, None, None, :]
+            query_mask = valid_mask[:, None, :, None]
+            attn_scores = attn_scores.masked_fill(~key_mask, torch.finfo(attn_scores.dtype).min)
+            has_valid_key = key_mask.any(dim=-1, keepdim=True)
+            attn_scores = torch.where(has_valid_key, attn_scores, torch.zeros_like(attn_scores))
+
+            attn_probs = torch.softmax(attn_scores, dim=-1)
+            attn_probs = attn_probs * query_mask.to(attn_probs.dtype)
+            attn_output = torch.matmul(attn_probs, v).transpose(1, 2)
 
         attn_output = attn_output.view(batch_size, seq_len, self.output_size)  # type: ignore
         return self.o_proj(attn_output)
