@@ -5,6 +5,7 @@ Converted jax-based code https://github.com/magenta/mt3/blob/main/mt3/network.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as Functional
+import warnings
 from model.HRM_refiners import HRMEncoderAdapter
 
 
@@ -20,6 +21,7 @@ from config.utils import DictToObject
 
 from tqdm import tqdm
 from utils.log_memory_usage import profile_cuda_memory
+from model.HRM_refiners import HRMEncoderCarry
 
 class Transformer(nn.Module):
     def __init__(self, config):
@@ -89,6 +91,7 @@ class Transformer(nn.Module):
                         use_act_halt=getattr(self.config, "hrm_use_act_halt", False),
                     )
         self.hrm_carry_dict = {}
+        self._hrm_carry_warned_scales = set()
         self.hrm_cross_scale_proj = nn.ModuleDict()
         if self.hrm_cross_scale_coupling and self.use_hrm_refiner:
             coupling_scales = [
@@ -101,6 +104,54 @@ class Transformer(nn.Module):
                 self.hrm_cross_scale_proj[f"{coarse}_to_{fine}"] = nn.Linear(self.config.emb_dim, self.config.emb_dim)
                 if self.hrm_cross_scale_bidirectional:
                     self.hrm_cross_scale_proj[f"{fine}_to_{coarse}"] = nn.Linear(self.config.emb_dim, self.config.emb_dim)
+
+    def reset_hrm_carry(self, batch_size=None):
+        if batch_size is None:
+            self.hrm_carry_dict = {}
+            self._hrm_carry_warned_scales.clear()
+            return
+
+        keep_batch = int(batch_size)
+        new_carry_dict = {}
+        for pooling, carry in self.hrm_carry_dict.items():
+            if carry is None:
+                continue
+            if carry.z_H.size(0) == keep_batch:
+                new_carry_dict[pooling] = carry
+        self.hrm_carry_dict = new_carry_dict
+        self._hrm_carry_warned_scales.clear()
+
+    def detach_hrm_carry(self):
+        detached = {}
+        for pooling, carry in self.hrm_carry_dict.items():
+            if carry is None:
+                continue
+            detached[pooling] = HRMEncoderCarry(
+                z_H=carry.z_H.detach(),
+                z_L=carry.z_L.detach(),
+                steps=carry.steps.detach(),
+                halted=carry.halted.detach(),
+                external_context=None if carry.external_context is None else carry.external_context.detach(),
+            )
+        self.hrm_carry_dict = detached
+
+    def clear_hrm_carry_on_device_change(self):
+        if not self.hrm_carry_dict:
+            return
+        model_device = next(self.parameters()).device
+        for carry in self.hrm_carry_dict.values():
+            if carry is None:
+                continue
+            if carry.z_H.device != model_device:
+                self.reset_hrm_carry()
+                return
+
+    def train(self, mode: bool = True):
+        was_training = self.training
+        result = super().train(mode)
+        if (was_training and not mode) and getattr(self.config, "hrm_auto_reset_on_eval", False):
+            self.reset_hrm_carry()
+        return result
         
         
     def encode(
@@ -222,7 +273,23 @@ class Transformer(nn.Module):
                     carry.z_H.size(0) != encoded_pool.size(0)
                     or carry.z_H.size(1) != encoded_pool.size(1)
                 ):
+                    if pooling not in self._hrm_carry_warned_scales:
+                        warnings.warn(
+                            (
+                                f"HRM carry shape mismatch at pooling={pooling}: "
+                                f"carry={(carry.z_H.size(0), carry.z_H.size(1))}, "
+                                f"expected={(encoded_pool.size(0), encoded_pool.size(1))}. "
+                                "Resetting HRM carry."
+                            ),
+                            stacklevel=2,
+                        )
+                        self._hrm_carry_warned_scales.add(pooling)
+                    self.reset_hrm_carry()
                     carry = None
+                assert carry is None or (
+                    carry.z_H.size(0) == encoded_pool.size(0)
+                    and carry.z_H.size(1) == encoded_pool.size(1)
+                ), f"HRM carry mismatch after reset for pooling={pooling}"
                 encoded_i, new_carry, halting_diag = self.hrm_refiners[str(pooling)](
                     x_pool=encoded_pool,
                     carry=carry,
@@ -280,6 +347,7 @@ class Transformer(nn.Module):
             ):
         
         encoder_decoder_mask_0 = encoder_decoder_mask
+        self.clear_hrm_carry_on_device_change()
             
         # We use pooling to reduce decoder sequence length.
         # decoder_target_tokens here just use for generating decoder_mask and attention_mask.
@@ -438,6 +506,7 @@ class Transformer(nn.Module):
     
     # @profile_cuda_memory
     def generate(self, encoder_inputs, target_seq_length = 1024, berak_on_eos=False, global_rank=0):
+        self.reset_hrm_carry(batch_size=encoder_inputs.size(0))
         self.decoder.initialize_decoder_cache()
         
         batch_size, T, n_mel = encoder_inputs.size()
