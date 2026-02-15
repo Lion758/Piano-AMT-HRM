@@ -59,10 +59,17 @@ class Transformer(nn.Module):
 
         self.use_hrm_refiner = getattr(self.config, "use_hrm_refiner", False)
         self.hrm_refine_scales = set(getattr(self.config, "hrm_refine_scales", [4]))
+        self.hrm_ablation_pooling_sets = getattr(self.config, "hrm_ablation_pooling_sets", [])
+        self.hrm_active_ablation_idx = getattr(self.config, "hrm_active_ablation_idx", None)
+        if self.hrm_ablation_pooling_sets and self.hrm_active_ablation_idx is not None:
+            selected_scales = self.hrm_ablation_pooling_sets[self.hrm_active_ablation_idx]
+            self.hrm_refine_scales = set(selected_scales)
+        self.hrm_cross_scale_coupling = getattr(self.config, "hrm_cross_scale_coupling", False)
+        self.hrm_cross_scale_bidirectional = getattr(self.config, "hrm_cross_scale_bidirectional", True)
 
         self.hrm_refiners = nn.ModuleDict()
         if self.use_hrm_refiner and hasattr(self.config, "pooling_sizes"):
-            for p in set(self.config.pooling_sizes):
+            for p in self._ordered_poolings(self.config.pooling_sizes, order="coarse_to_fine"):
                 if p in self.hrm_refine_scales:
                     self.hrm_refiners[str(p)] = HRMEncoderAdapter(
                         d_model=self.config.emb_dim,
@@ -82,6 +89,18 @@ class Transformer(nn.Module):
                         use_act_halt=getattr(self.config, "hrm_use_act_halt", False),
                     )
         self.hrm_carry_dict = {}
+        self.hrm_cross_scale_proj = nn.ModuleDict()
+        if self.hrm_cross_scale_coupling and self.use_hrm_refiner:
+            coupling_scales = [
+                p for p in self._ordered_poolings(getattr(self.config, "pooling_sizes", []), order="coarse_to_fine")
+                if str(p) in self.hrm_refiners
+            ]
+            for idx in range(len(coupling_scales) - 1):
+                coarse = coupling_scales[idx]
+                fine = coupling_scales[idx + 1]
+                self.hrm_cross_scale_proj[f"{coarse}_to_{fine}"] = nn.Linear(self.config.emb_dim, self.config.emb_dim)
+                if self.hrm_cross_scale_bidirectional:
+                    self.hrm_cross_scale_proj[f"{fine}_to_{coarse}"] = nn.Linear(self.config.emb_dim, self.config.emb_dim)
         
         
     def encode(
@@ -131,6 +150,90 @@ class Transformer(nn.Module):
 
     def freeze_hrm(self): self.set_requires_grad(self.hrm_refiners, False)
     def unfreeze_hrm(self): self.set_requires_grad(self.hrm_refiners, True)
+
+    def _ordered_poolings(self, pooling_sizes, order="coarse_to_fine"):
+        ordered = sorted({int(p) for p in pooling_sizes}, reverse=(order == "coarse_to_fine"))
+        return ordered
+
+    def set_hrm_ablation_pooling_set(self, pooling_sizes):
+        self.hrm_refine_scales = set(int(p) for p in pooling_sizes)
+
+    def _resize_context_to_length(self, context: torch.Tensor, target_len: int) -> torch.Tensor:
+        if context.size(1) == target_len:
+            return context
+        context_t = context.transpose(1, 2)
+        resized = Functional.interpolate(context_t, size=target_len, mode="nearest")
+        return resized.transpose(1, 2)
+
+    def _run_hierarchy_refinement(self, encoded_source, reset_flag=None):
+        encoded_pooling_dict = {}
+        hrm_halting = {}
+        if not (hasattr(self.config, "cross_attention_hierarchy_pooling") and self.config.cross_attention_hierarchy_pooling):
+            return encoded_source, encoded_pooling_dict, hrm_halting
+
+        ordered_poolings = self._ordered_poolings(self.config.pooling_sizes, order="coarse_to_fine")
+        summary_by_pooling = {}
+        for idx, pooling in enumerate(ordered_poolings):
+            encoded_pool = encoded_source
+            if pooling > 1:
+                encoded_pool = encoded_pool.reshape(
+                    encoded_source.size(0),
+                    encoded_source.size(1) // pooling,
+                    pooling,
+                    encoded_source.size(2),
+                ).mean(dim=2)
+
+            external_context = None
+            if self.hrm_cross_scale_coupling and str(pooling) in self.hrm_refiners and idx > 0:
+                coarse_pooling = ordered_poolings[idx - 1]
+                if coarse_pooling in summary_by_pooling:
+                    proj_key = f"{coarse_pooling}_to_{pooling}"
+                    if proj_key in self.hrm_cross_scale_proj:
+                        coarse_ctx = self.hrm_cross_scale_proj[proj_key](summary_by_pooling[coarse_pooling])
+                        external_context = self._resize_context_to_length(coarse_ctx, encoded_pool.size(1))
+
+            encoded_i = encoded_pool
+            if self.use_hrm_refiner and str(pooling) in self.hrm_refiners:
+                carry = self.hrm_carry_dict.get(pooling)
+                if carry is not None and (
+                    carry.z_H.size(0) != encoded_pool.size(0)
+                    or carry.z_H.size(1) != encoded_pool.size(1)
+                ):
+                    carry = None
+                encoded_i, new_carry, halting_diag = self.hrm_refiners[str(pooling)](
+                    x_pool=encoded_pool,
+                    carry=carry,
+                    reset_flag=reset_flag,
+                    external_context=external_context,
+                )
+                self.hrm_carry_dict[pooling] = new_carry
+                hrm_halting[pooling] = halting_diag
+                summary_by_pooling[pooling] = new_carry.z_H
+            else:
+                summary_by_pooling[pooling] = encoded_i
+
+            if (
+                self.hrm_cross_scale_coupling
+                and self.hrm_cross_scale_bidirectional
+                and idx > 0
+            ):
+                coarse_pooling = ordered_poolings[idx - 1]
+                reverse_key = f"{pooling}_to_{coarse_pooling}"
+                if reverse_key in self.hrm_cross_scale_proj:
+                    finer_summary = summary_by_pooling[pooling].mean(dim=1, keepdim=True)
+                    projected_finer = self.hrm_cross_scale_proj[reverse_key](finer_summary)
+                    coarse_context = self._resize_context_to_length(projected_finer, summary_by_pooling[coarse_pooling].size(1))
+                    summary_by_pooling[coarse_pooling] = summary_by_pooling[coarse_pooling] + coarse_context
+                    if coarse_pooling in self.hrm_carry_dict:
+                        self.hrm_carry_dict[coarse_pooling].external_context = coarse_context.detach()
+
+            encoded_pooling_dict[pooling] = encoded_i
+
+        missing_poolings = set(self.config.pooling_sizes) - set(encoded_pooling_dict.keys())
+        if missing_poolings:
+            raise ValueError(f"encoded_pooling_dict missing pooling sizes: {sorted(missing_poolings)}")
+
+        return None, encoded_pooling_dict, hrm_halting
 
     
     def decode(
@@ -205,42 +308,10 @@ class Transformer(nn.Module):
             reset_flag = hrm_reset_flag.to(encoded.device)
 
         # Hierarchical pooling
-      
-        if hasattr(self.config, "cross_attention_hierarchy_pooling") and self.config.cross_attention_hierarchy_pooling:
-            encoded_pooling_dict = {}
-            for pooling in set(self.config.pooling_sizes):
-                encoded_i = encoded
-                encoded_pool = encoded
-                if pooling > 1:
-                    encoded_pool = encoded_pool.reshape(
-                        encoded_i.size(0),
-                        encoded_i.size(1) // pooling,
-                        pooling,
-                        encoded_i.size(2)
-                    ).mean(dim=2)
-
-                if self.use_hrm_refiner and str(pooling) in self.hrm_refiners:
-                    # ---- HRM refinement on pooled memory (Option A) ----
-                    carry = self.hrm_carry_dict.get(pooling)
-                    if carry is not None and (
-                        carry.z_H.size(0) != encoded_pool.size(0)
-                        or carry.z_H.size(1) != encoded_pool.size(1)
-                    ):
-                        carry = None
-                    encoded_i, new_carry, halting_diag = self.hrm_refiners[str(pooling)](
-                        x_pool=encoded_pool,
-                        carry=carry,
-                        reset_flag=reset_flag,
-                    )
-                    self.hrm_carry_dict[pooling] = new_carry
-                    hrm_halting[pooling] = halting_diag
-                encoded_pooling_dict[pooling] = encoded_i  # Save the encoded_i for later use
-            expected_poolings = set(self.config.pooling_sizes)
-            missing_poolings = expected_poolings - set(encoded_pooling_dict.keys())
-            if missing_poolings:
-                raise ValueError(f"encoded_pooling_dict missing pooling sizes: {sorted(missing_poolings)}")
-
-            encoded = None
+        encoded, encoded_pooling_dict, hrm_halting = self._run_hierarchy_refinement(
+            encoded,
+            reset_flag=reset_flag,
+        )
 
 
         decoder_output_dict = self.decoder(
@@ -388,43 +459,10 @@ class Transformer(nn.Module):
                 # encoder_decoder_mask_i = torch.stack(encoder_decoder_mask_i_list, dim=0)
                 encoder_decoder_mask_i = encoder_decoder_mask_i[:, :, :, :self.config.encoder_decoder_slide_window_size]  # [batch_size, 1, i+pred_step, T]
             
-            encoded_pooling_dict = {}
-
-            # Hierarchical pooling
-            encoded_pooling_dict = None
-            if hasattr(self.config, "cross_attention_hierarchy_pooling") and self.config.cross_attention_hierarchy_pooling:
-                encoded_pooling_dict = {}
-                for pooling in set(self.config.pooling_sizes):
-                    encoded_pool = encoded_i
-                    if pooling > 1:
-                        encoded_pool = encoded_pool.reshape(
-                            batch_size,
-                            encoded_pool.size(1) // pooling,
-                            pooling,
-                            encoded_pool.size(2)
-                        ).mean(dim=2)
-
-                    # ---- HRM refinement on pooled memory (Option A) ----
-                    if self.use_hrm_refiner and str(pooling) in self.hrm_refiners:
-                        carry = self.hrm_carry_dict.get(pooling)
-                        if carry is not None and (
-                            carry.z_H.size(0) != encoded_pool.size(0)
-                            or carry.z_H.size(1) != encoded_pool.size(1)
-                        ):
-                            carry = None
-                        encoded_pool, new_carry, _halting_diag = self.hrm_refiners[str(pooling)](
-                            x_pool=encoded_pool,
-                            carry=carry,
-                            reset_flag=hrm_reset_flag,
-                        )
-                        self.hrm_carry_dict[pooling] = new_carry
-                    encoded_pooling_dict[pooling] = encoded_pool
-
-                encoded_i = None
-                expected_poolings = set(self.config.pooling_sizes)
-                missing_poolings = expected_poolings - set(encoded_pooling_dict.keys())
-                if missing_poolings:
-                    raise ValueError(f"encoded_pooling_dict missing pooling sizes: {sorted(missing_poolings)}")
+            encoded_i, encoded_pooling_dict, _ = self._run_hierarchy_refinement(
+                encoded_i,
+                reset_flag=hrm_reset_flag,
+            )
             
             decoder_output_dict = self.decoder(
                 encoded_i,
