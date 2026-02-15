@@ -132,6 +132,15 @@ class MT3Trainer(pl.LightningModule):
                 self.log("time/%s"%event_name, dur)
                 print("time/%s"%event_name, "%.3f"%dur)
             self.last_time_stamp = curr_time
+
+    def _reset_hrm_carry(self, batch_size=None):
+        if hasattr(self.model, "reset_hrm_carry"):
+            self.model.reset_hrm_carry(batch_size=batch_size)
+
+    def _maybe_auto_reset_hrm_carry_on_batch_start(self, batch):
+        if not getattr(self.config.model, "hrm_auto_reset_on_batch_start", True):
+            return
+        self._reset_hrm_carry()
     
     def forward_step(self, batch, batch_idx, forward_type, cal_metrics=False):
         """_summary_
@@ -363,6 +372,7 @@ class MT3Trainer(pl.LightningModule):
     
 
     def training_step(self, batch, batch_idx, dataloader_idx = None): # This batch_indx will be reseted to 0 in a new epoch.
+        self._maybe_auto_reset_hrm_carry_on_batch_start(batch)
         cal_metrics = False
         if self.global_rank == 0 and self.global_step % self.config.training.cal_metrics_every_n_steps == 0:
             cal_metrics = True
@@ -412,10 +422,15 @@ class MT3Trainer(pl.LightningModule):
         txt_path = cpt_dir + '/latest_epoch.txt'
         with open(txt_path, "w") as f:
             f.write('latest epoch=%d , global step=%d\n'%(self.current_epoch, self.global_step))
+
+    def on_train_epoch_start(self):
+        self._reset_hrm_carry()
+        return super().on_train_epoch_start()
                 
         
     @torch.no_grad()
     def on_validation_start(self):
+        self._reset_hrm_carry()
         
         # Manually call test_steps (online testing).
         if self.global_step > 1 and self.config.training.online_testing: # skip the validation step in the init epoch.
@@ -433,6 +448,7 @@ class MT3Trainer(pl.LightningModule):
     
     @torch.no_grad()
     def validation_step(self, batch, batch_idx, dataloader_idx = None):
+        self._maybe_auto_reset_hrm_carry_on_batch_start(batch)
         outputs_dict, targets_dict, loss_dict, metrics_dict = self.forward_step(batch, batch_idx, "validation", cal_metrics=True)
         log_dict = {}
         log_dict.update(loss_dict)
@@ -454,6 +470,7 @@ class MT3Trainer(pl.LightningModule):
     
     @torch.no_grad()
     def test_step(self, batch, batch_idx):
+        self._reset_hrm_carry(batch_size=batch["inputs"].size(0))
         metrics_dict = {}
         # [B, n_wave_samples]
         input_waves = batch["inputs"]
@@ -740,10 +757,15 @@ class MT3Trainer(pl.LightningModule):
                 )
 
     def on_train_start(self):
+        self._reset_hrm_carry()
         self.apply_freeze_schedule()
 
     def on_train_batch_start(self, batch, batch_idx):
         self.apply_freeze_schedule()
+
+    def on_test_start(self):
+        self._reset_hrm_carry()
+        return super().on_test_start()
         
 
     def train_dataloader(self):

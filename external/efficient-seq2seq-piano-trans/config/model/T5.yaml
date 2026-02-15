@@ -47,3 +47,5 @@
   hrm_cross_scale_coupling: false
   hrm_cross_scale_bidirectional: true
   hrm_ablation_pooling_sets: []
+  hrm_auto_reset_on_batch_start: true
+  hrm_auto_reset_on_eval: false
