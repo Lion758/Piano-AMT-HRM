@@ -224,6 +224,46 @@ class MT3Trainer(pl.LightningModule):
                 else:
                     loss_dict[dic["loss_name"]] = loss
                     total_loss += loss
+
+            if getattr(self.config.model, "hrm_use_act_halt", False):
+                mask = targets_dict["decoder_targets_mask"] > 0
+                labels = targets_dict["decoder_targets"]
+                with torch.no_grad():
+                    loss_counts = mask.sum(dim=-1)
+                    seq_is_correct = ((torch.argmax(outputs_dict["decoder_outputs"], dim=-1) == labels) | ~mask).all(dim=-1)
+                    valid_seq = loss_counts > 0
+
+                q_halt_logits = outputs_dict.get("hrm_q_halt_logits")
+                if q_halt_logits is not None:
+                    q_halt_loss = Functional.binary_cross_entropy_with_logits(
+                        q_halt_logits,
+                        seq_is_correct.to(dtype=q_halt_logits.dtype),
+                        reduction="sum",
+                    )
+                    q_halt_weight = getattr(self.config.training, "hrm_q_halt_loss_weight", 0.5)
+                    total_loss += q_halt_weight * q_halt_loss
+                    loss_dict["hrm_q_halt_loss"] = q_halt_loss
+
+                    if torch.any(valid_seq):
+                        q_halt_pred = q_halt_logits >= 0
+                        metrics_dict["q_halt_accuracy"] = (q_halt_pred[valid_seq] == seq_is_correct[valid_seq]).to(torch.float32).mean()
+
+                q_continue_logits = outputs_dict.get("hrm_q_continue_logits")
+                target_q_continue = outputs_dict.get("hrm_target_q_continue")
+                if q_continue_logits is not None and target_q_continue is not None:
+                    q_continue_loss = Functional.binary_cross_entropy_with_logits(
+                        q_continue_logits,
+                        target_q_continue.to(dtype=q_continue_logits.dtype),
+                        reduction="sum",
+                    )
+                    q_continue_weight = getattr(self.config.training, "hrm_q_continue_loss_weight", 0.5)
+                    total_loss += q_continue_weight * q_continue_loss
+                    loss_dict["hrm_q_continue_loss"] = q_continue_loss
+
+                hrm_steps = outputs_dict.get("hrm_steps")
+                if hrm_steps is not None and torch.any(valid_seq):
+                    metrics_dict["steps"] = hrm_steps[valid_seq].to(torch.float32).mean()
+
             loss_dict["loss"] = total_loss
         self.log_time_event("loss_cal_done")
         

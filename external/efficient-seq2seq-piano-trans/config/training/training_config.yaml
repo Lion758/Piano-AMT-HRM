@@ -31,3 +31,7 @@
   lr_hrm: 1.0e-4
   lr_decoder: 1.0e-4
   lr_encoder: 1.0e-4
+
+  # ACT halting auxiliary losses (used only when model.hrm_use_act_halt=true)
+  hrm_q_halt_loss_weight: 0.5
+  hrm_q_continue_loss_weight: 0.5
