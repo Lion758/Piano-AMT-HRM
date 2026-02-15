@@ -165,13 +165,34 @@ class Transformer(nn.Module):
         resized = Functional.interpolate(context_t, size=target_len, mode="nearest")
         return resized.transpose(1, 2)
 
-    def _run_hierarchy_refinement(self, encoded_source, reset_flag=None):
+    def _compute_encoder_valid_mask(self, encoder_input_tokens: torch.Tensor, encoder_segment_ids=None) -> torch.Tensor:
+        valid_mask = encoder_input_tokens.abs().sum(dim=-1) > 0
+        if encoder_segment_ids is not None:
+            valid_mask = valid_mask & (encoder_segment_ids > 0)
+        return valid_mask
+
+    def _pool_valid_mask(self, source_mask: torch.Tensor, pooling: int, target_len: int) -> torch.Tensor:
+        if pooling <= 1:
+            return source_mask[:, :target_len]
+        reshaped = source_mask[:, :target_len * pooling].reshape(source_mask.size(0), target_len, pooling)
+        return reshaped.any(dim=-1)
+
+    def _run_hierarchy_refinement(self, encoded_source, reset_flag=None, source_mask=None):
         encoded_pooling_dict = {}
         hrm_halting = {}
         if not (hasattr(self.config, "cross_attention_hierarchy_pooling") and self.config.cross_attention_hierarchy_pooling):
             return encoded_source, encoded_pooling_dict, hrm_halting
 
         ordered_poolings = self._ordered_poolings(self.config.pooling_sizes, order="coarse_to_fine")
+        if source_mask is None:
+            source_mask = torch.ones(
+                (encoded_source.size(0), encoded_source.size(1)),
+                dtype=torch.bool,
+                device=encoded_source.device,
+            )
+        else:
+            source_mask = source_mask.to(device=encoded_source.device, dtype=torch.bool)
+
         summary_by_pooling = {}
         for idx, pooling in enumerate(ordered_poolings):
             encoded_pool = encoded_source
@@ -182,6 +203,8 @@ class Transformer(nn.Module):
                     pooling,
                     encoded_source.size(2),
                 ).mean(dim=2)
+
+            pooled_mask = self._pool_valid_mask(source_mask, pooling=pooling, target_len=encoded_pool.size(1))
 
             external_context = None
             if self.hrm_cross_scale_coupling and str(pooling) in self.hrm_refiners and idx > 0:
@@ -205,11 +228,13 @@ class Transformer(nn.Module):
                     carry=carry,
                     reset_flag=reset_flag,
                     external_context=external_context,
+                    pool_mask=pooled_mask,
                 )
                 self.hrm_carry_dict[pooling] = new_carry
                 hrm_halting[pooling] = halting_diag
                 summary_by_pooling[pooling] = new_carry.z_H
             else:
+                encoded_i = encoded_i * pooled_mask.unsqueeze(-1).to(encoded_i.dtype)
                 summary_by_pooling[pooling] = encoded_i
 
             if (
@@ -227,7 +252,7 @@ class Transformer(nn.Module):
                     if coarse_pooling in self.hrm_carry_dict:
                         self.hrm_carry_dict[coarse_pooling].external_context = coarse_context.detach()
 
-            encoded_pooling_dict[pooling] = encoded_i
+            encoded_pooling_dict[pooling] = encoded_i * pooled_mask.unsqueeze(-1).to(encoded_i.dtype)
 
         missing_poolings = set(self.config.pooling_sizes) - set(encoded_pooling_dict.keys())
         if missing_poolings:
@@ -304,6 +329,7 @@ class Transformer(nn.Module):
         encoded_pooling_dict = {}
         hrm_halting = {}
         reset_flag = None
+        encoder_valid_mask = self._compute_encoder_valid_mask(encoder_input_tokens, encoder_segment_ids=encoder_segment_ids).to(encoded.device)
         if hrm_reset_flag is not None:
             reset_flag = hrm_reset_flag.to(encoded.device)
 
@@ -311,6 +337,7 @@ class Transformer(nn.Module):
         encoded, encoded_pooling_dict, hrm_halting = self._run_hierarchy_refinement(
             encoded,
             reset_flag=reset_flag,
+            source_mask=encoder_valid_mask,
         )
 
 
@@ -419,6 +446,7 @@ class Transformer(nn.Module):
         curr_frame_index = torch.zeros(batch_size, dtype=int).to(encoder_inputs.device)
         max_num_tokens = 0
         encoded = self.encode(encoder_inputs, enable_dropout=False)
+        encoder_valid_mask = self._compute_encoder_valid_mask(encoder_inputs).to(encoded.device)
         decoder_mask = torch.tril(torch.ones((target_seq_length, target_seq_length), dtype=self.config.dtype), diagonal=0).to(encoder_inputs.device)
         decoder_mask = decoder_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, self.config.num_heads, -1, -1)  # [batch_size, 1, target_seq_length, target_seq_length]
         encoder_decoder_mask = torch.ones((batch_size, self.config.num_heads, target_seq_length, T), dtype=self.config.dtype).to(encoder_inputs.device)  # [batch_size, 1, target_seq_length, T]
@@ -432,6 +460,7 @@ class Transformer(nn.Module):
         hrm_reset_flag = torch.ones(batch_size, dtype=torch.bool, device=encoder_inputs.device)
         for i in tqdm(range(0, target_seq_length, pred_step), desc="Generating tokens (rank %d)" % global_rank):
             encoded_i = encoded[:, :T, :]  # [batch_size, T, n_mel]
+            encoder_valid_mask_i = encoder_valid_mask[:, :T]
             
             if use_kv_cache:
                 decoder_input_tokens_i = curr_token # 
@@ -455,13 +484,17 @@ class Transformer(nn.Module):
                 encoded_i = encoded_fold[batch_indices, curr_window_index, :, :]  # [batch_size, 1, window_size, emb_dim]
                 # print(encoded_i.size())
                 encoded_i = encoded_i.view(batch_size, self.config.encoder_decoder_slide_window_size, emb_dim)  # [batch_size, window_size, emb_dim]
-                    
+
+                mask_fold = encoder_valid_mask.view(batch_size, -1, self.config.encoder_decoder_slide_window_size)
+                encoder_valid_mask_i = mask_fold[batch_indices, curr_window_index, :].view(batch_size, self.config.encoder_decoder_slide_window_size)
+
                 # encoder_decoder_mask_i = torch.stack(encoder_decoder_mask_i_list, dim=0)
                 encoder_decoder_mask_i = encoder_decoder_mask_i[:, :, :, :self.config.encoder_decoder_slide_window_size]  # [batch_size, 1, i+pred_step, T]
             
             encoded_i, encoded_pooling_dict, _ = self._run_hierarchy_refinement(
                 encoded_i,
                 reset_flag=hrm_reset_flag,
+                source_mask=encoder_valid_mask_i,
             )
             
             decoder_output_dict = self.decoder(
