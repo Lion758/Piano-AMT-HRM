@@ -263,7 +263,10 @@ class Transformer(nn.Module):
                 if coarse_pooling in summary_by_pooling:
                     proj_key = f"{coarse_pooling}_to_{pooling}"
                     if proj_key in self.hrm_cross_scale_proj:
-                        coarse_ctx = self.hrm_cross_scale_proj[proj_key](summary_by_pooling[coarse_pooling])
+                        proj_module = self.hrm_cross_scale_proj[proj_key]
+                        coarse_summary = summary_by_pooling[coarse_pooling]
+                        coarse_ctx = proj_module(coarse_summary.to(dtype=proj_module.weight.dtype))
+                        coarse_ctx = coarse_ctx.to(dtype=encoded_pool.dtype)
                         external_context = self._resize_context_to_length(coarse_ctx, encoded_pool.size(1))
 
             encoded_i = encoded_pool
@@ -313,7 +316,9 @@ class Transformer(nn.Module):
                 reverse_key = f"{pooling}_to_{coarse_pooling}"
                 if reverse_key in self.hrm_cross_scale_proj:
                     finer_summary = summary_by_pooling[pooling].mean(dim=1, keepdim=True)
-                    projected_finer = self.hrm_cross_scale_proj[reverse_key](finer_summary)
+                    reverse_proj = self.hrm_cross_scale_proj[reverse_key]
+                    projected_finer = reverse_proj(finer_summary.to(dtype=reverse_proj.weight.dtype))
+                    projected_finer = projected_finer.to(dtype=summary_by_pooling[coarse_pooling].dtype)
                     coarse_context = self._resize_context_to_length(projected_finer, summary_by_pooling[coarse_pooling].size(1))
                     summary_by_pooling[coarse_pooling] = summary_by_pooling[coarse_pooling] + coarse_context
                     if coarse_pooling in self.hrm_carry_dict:
