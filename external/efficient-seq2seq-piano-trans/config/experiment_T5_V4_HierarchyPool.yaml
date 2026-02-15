@@ -7,6 +7,12 @@ model:
   cross_attention_hierarchy_pooling: true
   pooling_sizes: [4, 4, 2, 2, 1, 1]
   hrm_refine_scales: [4, 2, 1]
+  hrm_cross_scale_coupling: true
+  hrm_cross_scale_bidirectional: true
+  hrm_ablation_pooling_sets:
+    - [4, 2, 1]
+    - [4, 2]
+    - [2, 1]
   # pooling_sizes: [4, 4, 4, 4, 4, 4]
 
 training:
