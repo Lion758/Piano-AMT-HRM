@@ -141,6 +141,26 @@ class MT3Trainer(pl.LightningModule):
         if not getattr(self.config.model, "hrm_auto_reset_on_batch_start", True):
             return
         self._reset_hrm_carry()
+
+    def configure_gradient_clipping(self, optimizer, gradient_clip_val, gradient_clip_algorithm):
+        """Skip Lightning clipping when there are no gradients to clip.
+
+        Some training steps (e.g. with unused parameters in DDP) can reach the clipping
+        hook before any `.grad` tensors are materialized. In that case PyTorch's
+        `clip_grad_value_` can raise on an empty tensor list.
+        """
+        has_any_grad = any(
+            parameter.grad is not None
+            for group in optimizer.param_groups
+            for parameter in group["params"]
+        )
+        if not has_any_grad:
+            return
+        self.clip_gradients(
+            optimizer,
+            gradient_clip_val=gradient_clip_val,
+            gradient_clip_algorithm=gradient_clip_algorithm,
+        )
     
     def forward_step(self, batch, batch_idx, forward_type, cal_metrics=False):
         """_summary_
