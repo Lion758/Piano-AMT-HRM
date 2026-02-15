@@ -156,7 +156,9 @@ class Attention(nn.Module):
             attn_probs = attn_probs * query_mask.to(attn_probs.dtype)
             attn_output = torch.matmul(attn_probs, v).transpose(1, 2)
 
-        attn_output = attn_output.view(batch_size, seq_len, self.output_size)  # type: ignore
+        # `attn_output` can be non-contiguous after transpose/matmul paths.
+        # Use reshape to avoid RuntimeError from view on strided tensors.
+        attn_output = attn_output.reshape(batch_size, seq_len, self.output_size)  # type: ignore
         return self.o_proj(attn_output)
 
 
