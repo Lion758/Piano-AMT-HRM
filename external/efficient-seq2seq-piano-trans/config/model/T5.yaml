@@ -56,6 +56,9 @@
       hrm_halt_max_steps: 3
   hrm_cross_scale_coupling: false
   hrm_cross_scale_bidirectional: true
+  hrm_aux_token_loss: false
+  hrm_aux_token_loss_shared_head: true
+  hrm_aux_token_loss_weight: 0.1
   hrm_ablation_pooling_sets: []
   hrm_auto_reset_on_batch_start: true
   hrm_auto_reset_on_eval: false

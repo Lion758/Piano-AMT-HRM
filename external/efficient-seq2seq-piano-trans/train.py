@@ -311,6 +311,45 @@ class MT3Trainer(pl.LightningModule):
                             halted_ratio = scale_halted.to(torch.float32).mean()
                         metrics_dict[f"hrm/{scale_suffix}_halted_ratio"] = halted_ratio
 
+            if getattr(self.config.model, "hrm_aux_token_loss", False):
+                aux_logits_dict = outputs_dict.get("hrm_aux_token_logits", {})
+                aux_targets_dict = outputs_dict.get("hrm_aux_token_targets", {})
+                aux_masks_dict = outputs_dict.get("hrm_aux_token_masks", {})
+                aux_scale_losses = []
+
+                for scale, aux_logits in aux_logits_dict.items():
+                    aux_targets = aux_targets_dict.get(scale)
+                    aux_mask = aux_masks_dict.get(scale)
+                    if aux_targets is None or aux_mask is None:
+                        continue
+
+                    aux_mask = aux_mask.to(dtype=torch.bool, device=aux_logits.device)
+                    aux_targets = aux_targets.to(device=aux_logits.device)
+                    aux_logits_flat = aux_logits.reshape(-1, aux_logits.size(-1))
+                    aux_targets_flat = aux_targets.reshape(-1)
+                    aux_mask_flat = aux_mask.reshape(-1)
+                    if not torch.any(aux_mask_flat):
+                        continue
+
+                    scale_loss = Functional.cross_entropy(
+                        aux_logits_flat[aux_mask_flat],
+                        aux_targets_flat[aux_mask_flat],
+                        reduction="mean",
+                    )
+                    aux_scale_losses.append(scale_loss)
+                    loss_dict[f"hrm_aux_token_loss_scale_{scale}"] = scale_loss
+
+                    with torch.no_grad():
+                        scale_preds = torch.argmax(aux_logits_flat[aux_mask_flat], dim=-1)
+                        scale_acc = (scale_preds == aux_targets_flat[aux_mask_flat]).to(torch.float32).mean()
+                        metrics_dict[f"hrm/scale_{scale}_aux_token_accuracy"] = scale_acc
+
+                if aux_scale_losses:
+                    aux_loss = torch.stack(aux_scale_losses).mean()
+                    aux_weight = float(getattr(self.config.model, "hrm_aux_token_loss_weight", 0.1))
+                    total_loss += aux_weight * aux_loss
+                    loss_dict["hrm_aux_token_loss"] = aux_loss
+
             loss_dict["loss"] = total_loss
         self.log_time_event("loss_cal_done")
         

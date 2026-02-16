@@ -68,6 +68,8 @@ class Transformer(nn.Module):
             self.hrm_refine_scales = set(selected_scales)
         self.hrm_cross_scale_coupling = getattr(self.config, "hrm_cross_scale_coupling", False)
         self.hrm_cross_scale_bidirectional = getattr(self.config, "hrm_cross_scale_bidirectional", True)
+        self.hrm_aux_token_loss = getattr(self.config, "hrm_aux_token_loss", False)
+        self.hrm_aux_token_loss_shared_head = getattr(self.config, "hrm_aux_token_loss_shared_head", True)
 
         self.hrm_refiners = nn.ModuleDict()
         if self.use_hrm_refiner and hasattr(self.config, "pooling_sizes"):
@@ -104,6 +106,15 @@ class Transformer(nn.Module):
                 self.hrm_cross_scale_proj[f"{coarse}_to_{fine}"] = nn.Linear(self.config.emb_dim, self.config.emb_dim)
                 if self.hrm_cross_scale_bidirectional:
                     self.hrm_cross_scale_proj[f"{fine}_to_{coarse}"] = nn.Linear(self.config.emb_dim, self.config.emb_dim)
+
+        self.hrm_aux_token_proj = nn.ModuleDict()
+        self.hrm_aux_token_shared_proj = None
+        if self.hrm_aux_token_loss and hasattr(self.config, "pooling_sizes"):
+            if self.hrm_aux_token_loss_shared_head:
+                self.hrm_aux_token_shared_proj = nn.Linear(self.config.emb_dim, self.config.vocab_size)
+            else:
+                for pooling in self._ordered_poolings(self.config.pooling_sizes, order="coarse_to_fine"):
+                    self.hrm_aux_token_proj[str(pooling)] = nn.Linear(self.config.emb_dim, self.config.vocab_size)
 
     def reset_hrm_carry(self, batch_size=None):
         if batch_size is None:
@@ -228,11 +239,27 @@ class Transformer(nn.Module):
         reshaped = source_mask[:, :target_len * pooling].reshape(source_mask.size(0), target_len, pooling)
         return reshaped.any(dim=-1)
 
+    def _downsample_decoder_tokens(self, decoder_tokens: torch.Tensor, decoder_mask: torch.Tensor, target_len: int):
+        if decoder_tokens.size(1) == target_len:
+            return decoder_tokens, decoder_mask
+        if target_len <= 0:
+            raise ValueError(f"target_len must be positive, got {target_len}")
+        token_len = decoder_tokens.size(1)
+        sample_idx = torch.linspace(0, token_len - 1, steps=target_len, device=decoder_tokens.device)
+        sample_idx = sample_idx.round().long()
+        return decoder_tokens.index_select(dim=1, index=sample_idx), decoder_mask.index_select(dim=1, index=sample_idx)
+
+    def _get_hrm_aux_projection(self, pooling: int):
+        if self.hrm_aux_token_loss_shared_head:
+            return self.hrm_aux_token_shared_proj
+        return self.hrm_aux_token_proj[str(pooling)]
+
     def _run_hierarchy_refinement(self, encoded_source, reset_flag=None, source_mask=None):
         encoded_pooling_dict = {}
         hrm_halting = {}
+        pooled_mask_dict = {}
         if not (hasattr(self.config, "cross_attention_hierarchy_pooling") and self.config.cross_attention_hierarchy_pooling):
-            return encoded_source, encoded_pooling_dict, hrm_halting
+            return encoded_source, encoded_pooling_dict, hrm_halting, pooled_mask_dict
 
         ordered_poolings = self._ordered_poolings(self.config.pooling_sizes, order="coarse_to_fine")
         if source_mask is None:
@@ -256,6 +283,7 @@ class Transformer(nn.Module):
                 ).mean(dim=2)
 
             pooled_mask = self._pool_valid_mask(source_mask, pooling=pooling, target_len=encoded_pool.size(1))
+            pooled_mask_dict[pooling] = pooled_mask
 
             external_context = None
             if self.hrm_cross_scale_coupling and str(pooling) in self.hrm_refiners and idx > 0:
@@ -330,7 +358,7 @@ class Transformer(nn.Module):
         if missing_poolings:
             raise ValueError(f"encoded_pooling_dict missing pooling sizes: {sorted(missing_poolings)}")
 
-        return None, encoded_pooling_dict, hrm_halting
+        return None, encoded_pooling_dict, hrm_halting, pooled_mask_dict
 
     
     def decode(
@@ -407,7 +435,7 @@ class Transformer(nn.Module):
             reset_flag = hrm_reset_flag.to(encoded.device)
 
         # Hierarchical pooling
-        encoded, encoded_pooling_dict, hrm_halting = self._run_hierarchy_refinement(
+        encoded, encoded_pooling_dict, hrm_halting, pooled_mask_dict = self._run_hierarchy_refinement(
             encoded,
             reset_flag=reset_flag,
             source_mask=encoder_valid_mask,
@@ -440,6 +468,33 @@ class Transformer(nn.Module):
                 decoder_output_dict["hrm_target_q_continue"] = act_diag["target_q_continue"]
             if "steps" in act_diag:
                 decoder_output_dict["hrm_steps"] = act_diag["steps"]
+
+        if self.hrm_aux_token_loss and encoded_pooling_dict and decoder_target_tokens is not None:
+            decoder_target_mask = decoder_target_tokens > 0
+            hrm_aux_token_logits = {}
+            hrm_aux_token_targets = {}
+            hrm_aux_token_masks = {}
+            for pooling, encoded_i in encoded_pooling_dict.items():
+                proj = self._get_hrm_aux_projection(pooling)
+                logits = proj(encoded_i.to(dtype=proj.weight.dtype))
+                logits = logits.to(dtype=encoded_i.dtype)
+
+                downsampled_targets, downsampled_mask = self._downsample_decoder_tokens(
+                    decoder_target_tokens,
+                    decoder_target_mask,
+                    target_len=logits.size(1),
+                )
+                pooled_mask = pooled_mask_dict.get(pooling)
+                if pooled_mask is not None:
+                    downsampled_mask = downsampled_mask & pooled_mask
+
+                hrm_aux_token_logits[pooling] = logits
+                hrm_aux_token_targets[pooling] = downsampled_targets
+                hrm_aux_token_masks[pooling] = downsampled_mask
+
+            decoder_output_dict["hrm_aux_token_logits"] = hrm_aux_token_logits
+            decoder_output_dict["hrm_aux_token_targets"] = hrm_aux_token_targets
+            decoder_output_dict["hrm_aux_token_masks"] = hrm_aux_token_masks
         return decoder_output_dict
     
     def _shift_right(self, input_ids, shift_step=1):
@@ -565,7 +620,7 @@ class Transformer(nn.Module):
                 # encoder_decoder_mask_i = torch.stack(encoder_decoder_mask_i_list, dim=0)
                 encoder_decoder_mask_i = encoder_decoder_mask_i[:, :, :, :self.config.encoder_decoder_slide_window_size]  # [batch_size, 1, i+pred_step, T]
             
-            encoded_i, encoded_pooling_dict, _ = self._run_hierarchy_refinement(
+            encoded_i, encoded_pooling_dict, _, _ = self._run_hierarchy_refinement(
                 encoded_i,
                 reset_flag=hrm_reset_flag,
                 source_mask=encoder_valid_mask_i,
