@@ -46,7 +46,7 @@ training:
   notes: "T5"
   mode: train
   # mode: test test
-  batch:  28  #4
+  batch:  26  #4
   batch_test: 256 # 64 # 256
   batch_inference: 64
   learning_rate: 1e-4
