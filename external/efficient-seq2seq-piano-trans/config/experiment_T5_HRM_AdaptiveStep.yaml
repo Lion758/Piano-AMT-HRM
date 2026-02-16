@@ -1,0 +1,9 @@
+defaults:
+  - experiment_T5_V4_HierarchyPool
+
+model:
+  hrm_use_act_halt: true
+  hrm_halt_max_steps: 3
+
+training:
+  notes: "HRM adaptive-step ACT (max=3)"

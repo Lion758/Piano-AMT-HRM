@@ -254,44 +254,62 @@ class MT3Trainer(pl.LightningModule):
                     loss_dict[dic["loss_name"]] = loss
                     total_loss += loss
 
-            if getattr(self.config.model, "hrm_use_act_halt", False):
-                mask = targets_dict["decoder_targets_mask"] > 0
-                labels = targets_dict["decoder_targets"]
-                with torch.no_grad():
-                    loss_counts = mask.sum(dim=-1)
-                    seq_is_correct = ((torch.argmax(outputs_dict["decoder_outputs"], dim=-1) == labels) | ~mask).all(dim=-1)
-                    valid_seq = loss_counts > 0
+            mask = targets_dict["decoder_targets_mask"] > 0
+            labels = targets_dict["decoder_targets"]
+            with torch.no_grad():
+                loss_counts = mask.sum(dim=-1)
+                seq_is_correct = ((torch.argmax(outputs_dict["decoder_outputs"], dim=-1) == labels) | ~mask).all(dim=-1)
+                valid_seq = loss_counts > 0
 
+            if getattr(self.config.model, "hrm_use_act_halt", False):
                 q_halt_logits = outputs_dict.get("hrm_q_halt_logits")
-                if q_halt_logits is not None:
+                if q_halt_logits is not None and torch.any(valid_seq):
+                    q_halt_weight = float(getattr(self.config.training, "hrm_q_halt_loss_weight", 0.5))
                     q_halt_loss = Functional.binary_cross_entropy_with_logits(
-                        q_halt_logits,
-                        seq_is_correct.to(dtype=q_halt_logits.dtype),
-                        reduction="sum",
+                        q_halt_logits[valid_seq],
+                        seq_is_correct[valid_seq].to(dtype=q_halt_logits.dtype),
+                        reduction="mean",
                     )
-                    q_halt_weight = getattr(self.config.training, "hrm_q_halt_loss_weight", 0.5)
                     total_loss += q_halt_weight * q_halt_loss
                     loss_dict["hrm_q_halt_loss"] = q_halt_loss
 
-                    if torch.any(valid_seq):
-                        q_halt_pred = q_halt_logits >= 0
-                        metrics_dict["q_halt_accuracy"] = (q_halt_pred[valid_seq] == seq_is_correct[valid_seq]).to(torch.float32).mean()
+                    q_halt_pred = q_halt_logits >= 0
+                    metrics_dict["q_halt_accuracy"] = (q_halt_pred[valid_seq] == seq_is_correct[valid_seq]).to(torch.float32).mean()
 
                 q_continue_logits = outputs_dict.get("hrm_q_continue_logits")
                 target_q_continue = outputs_dict.get("hrm_target_q_continue")
-                if q_continue_logits is not None and target_q_continue is not None:
+                if q_continue_logits is not None and target_q_continue is not None and torch.any(valid_seq):
+                    q_continue_weight = float(getattr(self.config.training, "hrm_q_continue_loss_weight", 0.5))
                     q_continue_loss = Functional.binary_cross_entropy_with_logits(
-                        q_continue_logits,
-                        target_q_continue.to(dtype=q_continue_logits.dtype),
-                        reduction="sum",
+                        q_continue_logits[valid_seq],
+                        target_q_continue[valid_seq].to(dtype=q_continue_logits.dtype),
+                        reduction="mean",
                     )
-                    q_continue_weight = getattr(self.config.training, "hrm_q_continue_loss_weight", 0.5)
                     total_loss += q_continue_weight * q_continue_loss
                     loss_dict["hrm_q_continue_loss"] = q_continue_loss
 
                 hrm_steps = outputs_dict.get("hrm_steps")
                 if hrm_steps is not None and torch.any(valid_seq):
                     metrics_dict["steps"] = hrm_steps[valid_seq].to(torch.float32).mean()
+
+            hrm_halting = outputs_dict.get("hrm_halting")
+            if isinstance(hrm_halting, dict):
+                for scale, scale_diag in hrm_halting.items():
+                    scale_suffix = f"scale_{scale}"
+                    scale_steps = scale_diag.get("steps")
+                    if scale_steps is not None:
+                        if torch.any(valid_seq):
+                            metrics_dict[f"hrm/{scale_suffix}_steps_mean"] = scale_steps[valid_seq].to(torch.float32).mean()
+                        else:
+                            metrics_dict[f"hrm/{scale_suffix}_steps_mean"] = scale_steps.to(torch.float32).mean()
+
+                    scale_halted = scale_diag.get("halted")
+                    if scale_halted is not None:
+                        if torch.any(valid_seq):
+                            halted_ratio = scale_halted[valid_seq].to(torch.float32).mean()
+                        else:
+                            halted_ratio = scale_halted.to(torch.float32).mean()
+                        metrics_dict[f"hrm/{scale_suffix}_halted_ratio"] = halted_ratio
 
             loss_dict["loss"] = total_loss
         self.log_time_event("loss_cal_done")

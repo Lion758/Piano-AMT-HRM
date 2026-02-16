@@ -1,0 +1,9 @@
+defaults:
+  - experiment_T5_V4_HierarchyPool
+
+model:
+  hrm_use_act_halt: false
+  hrm_halt_max_steps: 1
+
+training:
+  notes: "HRM fixed-step baseline (1 step)"
