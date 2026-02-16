@@ -1,0 +1,5 @@
+defaults:
+  - experiment_T5_HRM_AdaptiveStep
+
+training:
+  notes: "Retained best schedule: adaptive ACT halting (max=3)"

@@ -41,9 +41,19 @@
   hrm_use_rope: true
   hrm_forward_dtype: torch.bfloat16
 
+  # Baseline setting keeps fixed single-step refinement.
   hrm_halt_max_steps: 1
   hrm_halt_exploration_prob: 0.0
   hrm_use_act_halt: false
+
+  # Experiment profiles for fixed-vs-adaptive depth ablations.
+  hrm_experiment_profiles:
+    fixed_step:
+      hrm_use_act_halt: false
+      hrm_halt_max_steps: 1
+    adaptive_step:
+      hrm_use_act_halt: true
+      hrm_halt_max_steps: 3
   hrm_cross_scale_coupling: false
   hrm_cross_scale_bidirectional: true
   hrm_ablation_pooling_sets: []
