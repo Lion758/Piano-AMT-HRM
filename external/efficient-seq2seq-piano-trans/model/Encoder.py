@@ -19,7 +19,12 @@ class EncoderLayer(nn.Module):
             window_size = None
             if hasattr(config, 'encoder_window_size'):
                 window_size = config.encoder_window_size
-            self.attention = Multi_Head_Attention(num_heads=config.num_heads, head_dim=config.head_dim, dropout_rate=config.dropout_rate, window_size=window_size)
+            self.attention = Multi_Head_Attention(
+                num_heads=config.num_heads,
+                head_dim=config.head_dim,
+                dropout_rate=config.dropout_rate,
+                window_size=window_size,
+            )
         elif config.encoder_attention == "RelativeGlobalAttention":
             self.attention = RelativeGlobalAttention(d_model=config.emb_dim, num_heads=config.num_heads, dropout=config.dropout_rate)
         else:

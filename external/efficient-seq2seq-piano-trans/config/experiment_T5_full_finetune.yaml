@@ -1,0 +1,9 @@
+defaults:
+  - experiment_T5_V4_HierarchyPool
+
+model:
+  use_lora: false
+
+training:
+  notes: "T5_full_finetune"
+  learning_rate: 1e-4
