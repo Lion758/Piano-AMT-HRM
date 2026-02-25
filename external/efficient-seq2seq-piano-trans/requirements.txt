@@ -19,3 +19,4 @@ plotly
 matplotlib
 symusic
 # pip install flash-attn==2.7.4.post1 --no-build-isolation
+peft>=0.13.0

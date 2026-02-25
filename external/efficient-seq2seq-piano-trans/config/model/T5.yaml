@@ -29,6 +29,14 @@
   # dtype: torch.float16  
 
 
+  # LoRA / PEFT
+  use_lora: false
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  lora_target_modules: ["projection", "output", "query", "key", "value", "encoder_decoder_attention"]
+  checkpoint_type: auto  # auto | full | lora | merged
+
 #HRM 
   use_hrm_refiner: true
   hrm_H_cycles: 2

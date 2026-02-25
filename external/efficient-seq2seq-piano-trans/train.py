@@ -71,6 +71,7 @@ from tqdm import tqdm
 from glob import glob
 import pandas as pd
 
+from peft import LoraConfig, TaskType, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
 from symusic import Score, TimeUnit
 from collections import defaultdict
 
@@ -79,6 +80,7 @@ import utils.log_memory_usage as log_memory_usage
 import utils.sequence_processing as sequence_processing
 
 import shutil
+import copy
 class MT3Trainer(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
@@ -87,6 +89,41 @@ class MT3Trainer(pl.LightningModule):
             self.model = HPPNet(config=config.model)
         else:
             self.model = Transformer(config=config.model)
+
+        self.use_lora = bool(getattr(self.config.model, "use_lora", False))
+        if self.use_lora:
+            target_modules = getattr(
+                self.config.model,
+                "lora_target_modules",
+                ["projection", "output", "query", "key", "value", "encoder_decoder_attention"],
+            )
+            if isinstance(target_modules, str):
+                target_modules = [x.strip() for x in target_modules.split(",") if x.strip()]
+
+            peft_cfg = LoraConfig(
+                task_type=TaskType.FEATURE_EXTRACTION,
+                r=int(getattr(self.config.model, "lora_r", 8)),
+                lora_alpha=int(getattr(self.config.model, "lora_alpha", 16)),
+                lora_dropout=float(getattr(self.config.model, "lora_dropout", 0.0)),
+                target_modules=target_modules,
+                bias="none",
+            )
+            self.model = get_peft_model(self.model, peft_cfg)
+
+            if bool(getattr(self.config.training, "lora_train_layer_norm", False)):
+                for name, module in self.model.named_modules():
+                    if "norm" in name.lower():
+                        for p in module.parameters(recurse=False):
+                            p.requires_grad = True
+
+            if bool(getattr(self.config.training, "lora_train_output_head", False)):
+                for name, module in self.model.named_modules():
+                    if isinstance(module, nn.Linear) and any(h in name.lower() for h in ["dense", "head", "output_proj"]):
+                        for p in module.parameters(recurse=False):
+                            p.requires_grad = True
+
+            self.model.print_trainable_parameters()
+
         self.last_time_stamp = std_time.time()
         self.validation_step_count = 0
         self.criterion_list = []
@@ -448,6 +485,16 @@ class MT3Trainer(pl.LightningModule):
         metrics_dict.update(metrict_ret)
     
 
+    def _save_model_checkpoint(self, checkpoint_path, save_lora_variants=False):
+        torch.save(self.model.state_dict(), checkpoint_path)
+        if self.use_lora and save_lora_variants:
+            lora_path = checkpoint_path.replace(".ckpt", ".lora.ckpt")
+            merged_path = checkpoint_path.replace(".ckpt", ".merged.ckpt")
+            torch.save(get_peft_model_state_dict(self.model), lora_path)
+            merged_model = copy.deepcopy(self.model).cpu()
+            merged_model = merged_model.merge_and_unload()
+            torch.save(merged_model.state_dict(), merged_path)
+
     def training_step(self, batch, batch_idx, dataloader_idx = None): # This batch_indx will be reseted to 0 in a new epoch.
         self._maybe_auto_reset_hrm_carry_on_batch_start(batch)
         cal_metrics = False
@@ -462,7 +509,7 @@ class MT3Trainer(pl.LightningModule):
                     cpt_dir = os.path.join(os.path.join(self.logger.save_dir, "cpt"))
                     os.system("mkdir -p %s"%cpt_dir)
                     checkpoint_path = cpt_dir + '/steps_' + str(self.global_step)+'.ckpt'
-                    torch.save(self.model.state_dict(), checkpoint_path)
+                    self._save_model_checkpoint(checkpoint_path, save_lora_variants=True)
                     if hasattr(self, "previous_cpt_path"):
                         if self.prev_checkpoint_step in [10000, 50000, 100000, 200000]:
                             pass
@@ -495,7 +542,7 @@ class MT3Trainer(pl.LightningModule):
         # Save checkpoint.
         cpt_dir = os.path.join(os.path.join(self.logger.save_dir, "cpt"))
         os.system("mkdir -p %s"%cpt_dir)
-        torch.save(self.model.state_dict(), cpt_dir + '/latest.ckpt')
+        self._save_model_checkpoint(cpt_dir + '/latest.ckpt', save_lora_variants=True)
         txt_path = cpt_dir + '/latest_epoch.txt'
         with open(txt_path, "w") as f:
             f.write('latest epoch=%d , global step=%d\n'%(self.current_epoch, self.global_step))
@@ -755,6 +802,12 @@ class MT3Trainer(pl.LightningModule):
     def configure_optimizers(self):
         m = self.model  # Transformer
 
+        if self.use_lora:
+            trainable_params = [p for p in m.parameters() if p.requires_grad]
+            if len(trainable_params) == 0:
+                raise RuntimeError("LoRA is enabled but no trainable parameters were found.")
+            return AdamW(trainable_params, lr=self.config.training.learning_rate)
+
         lr_enc = getattr(self.config.training, "lr_encoder", self.config.training.learning_rate)
         lr_dec = getattr(self.config.training, "lr_decoder", self.config.training.learning_rate)
         lr_hrm = getattr(self.config.training, "lr_hrm", self.config.training.learning_rate)
@@ -778,6 +831,8 @@ class MT3Trainer(pl.LightningModule):
                 g["lr"] = lr
 
     def apply_freeze_schedule(self):
+        if self.use_lora:
+            return
         opt = self.optimizers()  # lightning helper
 
         # config
@@ -962,12 +1017,22 @@ def my_main(config: OmegaConf):
     if config.model.checkpoint_path is None:
         assert config.model.froze_encoder == False, "If you want to train from scratch, please set config.model.froze_encoder to False and config.model.checkpoint_path to None."
     else:
-        state_dict = torch.load(config.model.checkpoint_path) # , map_location=torch.device('cpu')
+        state_dict = torch.load(config.model.checkpoint_path)
         if not config.model.checkpoint_ignore_layres is None:
             for key in config.model.checkpoint_ignore_layres:
-                del state_dict[key]
+                if key in state_dict:
+                    del state_dict[key]
 
-        model.model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
+        checkpoint_type = getattr(config.model, "checkpoint_type", "auto")
+        if checkpoint_type == "lora" or (checkpoint_type == "auto" and any("lora_A" in k or "lora_B" in k for k in state_dict.keys())):
+            set_peft_model_state_dict(model.model, state_dict)
+        else:
+            if checkpoint_type == "merged" and getattr(config.model, "use_lora", False):
+                base_model = model.model.get_base_model() if hasattr(model.model, "get_base_model") else model.model
+                base_model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
+                print("Loaded merged checkpoint into LoRA-enabled model base weights.")
+            else:
+                model.model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
     
     # model.model = torch.compile(model.model)
     

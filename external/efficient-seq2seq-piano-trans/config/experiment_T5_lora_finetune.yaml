@@ -1,0 +1,15 @@
+defaults:
+  - experiment_T5_V4_HierarchyPool
+
+model:
+  use_lora: true
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  lora_target_modules: ["projection", "output", "query", "key", "value", "encoder_decoder_attention"]
+
+training:
+  notes: "T5_lora_finetune"
+  learning_rate: 2e-4
+  lora_train_layer_norm: true
+  lora_train_output_head: false
