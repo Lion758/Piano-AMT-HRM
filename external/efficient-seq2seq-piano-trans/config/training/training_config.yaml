@@ -6,9 +6,10 @@
   evaluation_epochs: 1 #5
   evaluate_every_n_steps: 50
   save_pianoroll_every_n_steps: [10, 20, 50, 100, 200, 500, 1000, 2000] # should be evaluate_every_n_steps * n
-  cal_metrics_every_n_steps: 50
-  batch: 26 #24
-  num_workers: 2 
+  cal_metrics_every_n_steps: 100
+  log_hrm_scale_metrics: false
+  batch: 18 #24
+  num_workers: 4 
   losses:
     loss_decoder: [decoder_outputs, decoder_targets, loss.CrossEntropyLoss]
   log_dir:

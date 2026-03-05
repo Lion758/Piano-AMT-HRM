@@ -19,8 +19,7 @@ def save_frame_pianoroll(img_path, output_pianoroll, target_pianoroll):
     ones = torch.ones_like(target_pianoroll)
     # => [B, 3, T, 128] => [B, 3, 128, T]
     stacked = torch.stack([1-target_pianoroll, 1 - output_pianoroll, ones], dim = 1).transpose(2,3).float()
-    stacked = torchvision.utils.make_grid(stacked, nrow=B, pad_value=0.5, padding=1).permute(1,2,0).cpu().numpy()
+    stacked = torchvision.utils.make_grid(stacked, nrow=B, pad_value=0.5, padding=1).permute(1,2,0).detach().cpu().numpy()
     mask = np.all(stacked == [0, 0, 1],axis=-1)
     stacked[mask] = [0.8, 0.8, 0.8] # Set True Positive color to grey.
     plt.imsave(img_path, stacked)
-

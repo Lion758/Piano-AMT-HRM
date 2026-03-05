@@ -16,6 +16,6 @@ model:
   # pooling_sizes: [4, 4, 4, 4, 4, 4]
 
 training:
-  notes: "HRM_adapter_with_freezing_USE_ROPE=true"
+  notes: "HRM_adaptive_step"
   
 

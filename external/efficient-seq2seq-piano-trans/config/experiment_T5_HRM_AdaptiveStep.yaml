@@ -6,4 +6,4 @@ model:
   hrm_halt_max_steps: 3
 
 training:
-  notes: "HRM adaptive-step ACT (max=3)"
+  notes: "HRM_adaptive_step_ACT"

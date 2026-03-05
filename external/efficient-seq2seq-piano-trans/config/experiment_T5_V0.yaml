@@ -15,16 +15,19 @@ model:
   checkpoint_path:  "checkpoints/T5_V4_steps_200000.ckpt"
 
 training:
-  batch: 26
+  batch: 18
   batch_test: 256 # 64 # 256
   learning_rate: 1e-4
   training_steps: 5001 #200001
+  evaluate_every_n_steps: 250
+  cal_metrics_every_n_steps: 200
+  checking_steps: 1000
+  online_testing: false
   evaluation_epochs: 1
   
   mode: train
   # mode: test
   notes: "Baseline"
-
 
 
 

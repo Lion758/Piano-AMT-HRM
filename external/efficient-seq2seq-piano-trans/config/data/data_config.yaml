@@ -1,7 +1,7 @@
 # data:
   dataset_name: Audio2Midi_Dataset
   dataset_dir: dataset/maestro-v3.0.0
-  features: cqt # mel, log-specgram, cqt
+  features:  mel # log-specgram, cqt
   amplitude_to_db: true
   num_mel_bins: 512
   fft_size: 2048

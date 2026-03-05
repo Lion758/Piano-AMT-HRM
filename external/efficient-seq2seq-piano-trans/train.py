@@ -95,19 +95,34 @@ class MT3Trainer(pl.LightningModule):
             target_modules = getattr(
                 self.config.model,
                 "lora_target_modules",
-                ["projection", "output", "query", "key", "value", "encoder_decoder_attention"],
+                ["projection", "output", "query", "key", "value"],
             )
             if isinstance(target_modules, str):
                 target_modules = [x.strip() for x in target_modules.split(",") if x.strip()]
+            # PEFT can only inject LoRA into supported leaf layers (e.g., nn.Linear),
+            # not container wrappers like `encoder_decoder_attention`.
+            target_modules = [m for m in target_modules if m != "encoder_decoder_attention"]
 
-            peft_cfg = LoraConfig(
-                task_type=TaskType.FEATURE_EXTRACTION,
+            lora_task_type_raw = getattr(self.config.model, "lora_task_type", None)
+            lora_task_type = None
+            if isinstance(lora_task_type_raw, str):
+                task_type_name = lora_task_type_raw.strip()
+                if task_type_name and task_type_name.lower() not in {"none", "null"}:
+                    lora_task_type = getattr(TaskType, task_type_name.upper())
+            elif lora_task_type_raw is not None:
+                lora_task_type = lora_task_type_raw
+
+            lora_cfg_kwargs = dict(
                 r=int(getattr(self.config.model, "lora_r", 8)),
                 lora_alpha=int(getattr(self.config.model, "lora_alpha", 16)),
                 lora_dropout=float(getattr(self.config.model, "lora_dropout", 0.0)),
                 target_modules=target_modules,
                 bias="none",
             )
+            if lora_task_type is not None:
+                lora_cfg_kwargs["task_type"] = lora_task_type
+
+            peft_cfg = LoraConfig(**lora_cfg_kwargs)
             self.model = get_peft_model(self.model, peft_cfg)
 
             if bool(getattr(self.config.training, "lora_train_layer_norm", False)):
@@ -329,8 +344,15 @@ class MT3Trainer(pl.LightningModule):
                 if hrm_steps is not None and torch.any(valid_seq):
                     metrics_dict["steps"] = hrm_steps[valid_seq].to(torch.float32).mean()
 
+            log_hrm_scale_metrics = bool(
+                getattr(
+                    self.config.training,
+                    "log_hrm_scale_metrics",
+                    getattr(self.config.model, "hrm_use_act_halt", False),
+                )
+            )
             hrm_halting = outputs_dict.get("hrm_halting")
-            if isinstance(hrm_halting, dict):
+            if log_hrm_scale_metrics and isinstance(hrm_halting, dict):
                 for scale, scale_diag in hrm_halting.items():
                     scale_suffix = f"scale_{scale}"
                     scale_steps = scale_diag.get("steps")
@@ -1019,28 +1041,97 @@ def my_main(config: OmegaConf):
     else:
         state_dict = torch.load(config.model.checkpoint_path)
         if not config.model.checkpoint_ignore_layres is None:
-            for key in config.model.checkpoint_ignore_layres:
-                if key in state_dict:
-                    del state_dict[key]
+            for ignore_key in config.model.checkpoint_ignore_layres:
+                remove_keys = [k for k in list(state_dict.keys()) if k == ignore_key or k.endswith(ignore_key)]
+                for k in remove_keys:
+                    del state_dict[k]
 
+        use_lora = bool(getattr(config.model, "use_lora", False))
+        strict_ckpt = bool(getattr(config.model, "strict_checkpoint", False))
         checkpoint_type = getattr(config.model, "checkpoint_type", "auto")
-        if checkpoint_type == "lora" or (checkpoint_type == "auto" and any("lora_A" in k or "lora_B" in k for k in state_dict.keys())):
+        state_keys = list(state_dict.keys())
+        has_lora_keys = any("lora_A" in k or "lora_B" in k for k in state_keys)
+        has_base_layer_keys = any(".base_layer." in k for k in state_keys)
+
+        def _load_lora_only():
             set_peft_model_state_dict(model.model, state_dict)
-        else:
-            if checkpoint_type == "merged" and getattr(config.model, "use_lora", False):
-                base_model = model.model.get_base_model() if hasattr(model.model, "get_base_model") else model.model
-                base_model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
-                print("Loaded merged checkpoint into LoRA-enabled model base weights.")
+            print("Loaded LoRA adapter checkpoint.")
+
+        def _load_full_peft():
+            model.model.load_state_dict(state_dict, strict=strict_ckpt)
+            print("Loaded full PEFT checkpoint into LoRA-enabled model.")
+
+        def _load_merged_into_base():
+            base_model = model.model.get_base_model() if hasattr(model.model, "get_base_model") else model.model
+            target_keys = set(base_model.state_dict().keys())
+            remapped_state_dict = {}
+            remapped_count = 0
+            for k, v in state_dict.items():
+                mapped_key = k
+                if mapped_key not in target_keys:
+                    if k.endswith(".weight"):
+                        candidate = k[:-len(".weight")] + ".base_layer.weight"
+                        if candidate in target_keys:
+                            mapped_key = candidate
+                    elif k.endswith(".bias"):
+                        candidate = k[:-len(".bias")] + ".base_layer.bias"
+                        if candidate in target_keys:
+                            mapped_key = candidate
+                if mapped_key != k:
+                    remapped_count += 1
+                remapped_state_dict[mapped_key] = v
+
+            # LoRA adapter params are not present in merged/base checkpoints.
+            # Always load non-strict here to avoid false failures on adapter keys.
+            load_ret = base_model.load_state_dict(remapped_state_dict, strict=False)
+            print(
+                "Loaded merged/base checkpoint into LoRA-enabled model base weights. "
+                f"remapped={remapped_count}, missing={len(load_ret.missing_keys)}, unexpected={len(load_ret.unexpected_keys)}"
+            )
+
+        def _load_full_model():
+            model.model.load_state_dict(state_dict, strict=strict_ckpt)
+            print("Loaded full model checkpoint.")
+
+        if checkpoint_type == "lora":
+            if has_base_layer_keys:
+                print("Warning: checkpoint_type='lora' but full PEFT checkpoint detected; loading full PEFT checkpoint.")
+                _load_full_peft()
             else:
-                model.model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
+                _load_lora_only()
+        elif checkpoint_type == "merged":
+            if use_lora:
+                if has_base_layer_keys:
+                    print("Warning: checkpoint_type='merged' but full PEFT checkpoint detected; loading full PEFT checkpoint.")
+                    _load_full_peft()
+                elif has_lora_keys:
+                    print("Warning: checkpoint_type='merged' but adapter-only checkpoint detected; loading LoRA adapters.")
+                    _load_lora_only()
+                else:
+                    _load_merged_into_base()
+            else:
+                _load_full_model()
+        elif checkpoint_type == "full":
+            _load_full_model()
+        else:
+            # auto
+            if has_lora_keys and has_base_layer_keys:
+                _load_full_peft()
+            elif has_lora_keys:
+                _load_lora_only()
+            elif use_lora:
+                _load_merged_into_base()
+            else:
+                _load_full_model()
     
     # model.model = torch.compile(model.model)
     
     # Create logger.
+    wandb_offline = bool(getattr(config.training, "debug_log_offline", False))
     if "DEBUG" in os.environ and os.environ["DEBUG"] == "True":
-        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="mt3-score-pytorch-debug", offline=config.training.debug_log_offline, save_dir=log_dir) #, rank_zero_only=True
+        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="mt3-score-pytorch-debug", offline=wandb_offline, save_dir=log_dir) #, rank_zero_only=True
     else:
-        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="AMT-audio-to-midi", offline=False, save_dir=log_dir, notes=config.training.notes) #, rank_zero_only=True
+        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="AMT-audio-to-midi", offline=wandb_offline, save_dir=log_dir, notes=config.training.notes) #, rank_zero_only=True
     tensorboard_logger = TensorBoardLogger(save_dir=log_dir)
 
     # Save informations to log dir.
@@ -1076,26 +1167,30 @@ def my_main(config: OmegaConf):
             config_dict["training"]["cuda"]= os.environ["CUDA_VISIBLE_DEVICES"]
         wandb_logger.log_hyperparams(config_dict)
     
-    logger_list = [wandb_logger, tensorboard_logger]
+    disable_wandb = bool(getattr(config.training, "disable_wandb", False))
+    logger_list = [tensorboard_logger] if disable_wandb else [wandb_logger, tensorboard_logger]
     if config.training.mode != "train":
         logger_list = []
-    trainer = pl.Trainer(
+    trainer_kwargs = dict(
                         devices=config.devices, # 1 [1,2, 4, 5, 6,7]
                         accelerator=config.accelerator, # "gpu"
                         logger=logger_list,
-                        #limit_val_batches= 5,
-                        #  val_check_interval=0.0, # 0.0:disable, None:total training batch.
-                        check_val_every_n_epoch=config.training.evaluation_epochs,
                         max_steps=config.training.training_steps,
                         reload_dataloaders_every_n_epochs=5,
                         log_every_n_steps = 50,
-                        #  strategy="dp",
-                        # strategy='ddp_find_unused_parameters_true'
                         gradient_clip_val=0.5,
                         gradient_clip_algorithm="value",
-                        # callbacks=[val_call_back,]
                         strategy=DDPStrategy(find_unused_parameters=True),
                         )
+
+    eval_every_steps = getattr(config.training, "evaluate_every_n_steps", None)
+    if eval_every_steps is not None and int(eval_every_steps) > 0:
+        trainer_kwargs["val_check_interval"] = int(eval_every_steps)
+        trainer_kwargs["check_val_every_n_epoch"] = 1
+    else:
+        trainer_kwargs["check_val_every_n_epoch"] = config.training.evaluation_epochs
+
+    trainer = pl.Trainer(**trainer_kwargs)
 
     trainer.fit(model)
     
