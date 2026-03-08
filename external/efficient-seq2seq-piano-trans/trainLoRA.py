@@ -4,7 +4,6 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import torch.nn as nn
 import torch.nn.functional as Functional
-import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -27,18 +26,27 @@ import wandb
 import json
 import pandas as pd
 from torch.utils.data import IterableDataset, Dataset, ConcatDataset
+
+# COMMNETED OUT (NOT NEEDED) 
 #import editdistance
+#from sklearn.metrics import accuracy_score
+#from line_profiler import LineProfiler
+#___
+
 # from torchaudio.transforms import MelSpectrogram
 
 # from lightning.pytorch.trainer.states import RunningStage, TrainerFn
 from data.constants import *
 import gc
 import os
-from sklearn.metrics import accuracy_score
+
 import matplotlib.pyplot as plt
 from data.mel import MelSpectrogram
 # from nnAudio.features import CQT, STFT
 # import nnAudio.utils
+#any  comment
+
+
 from PIL import Image
 
 import torchaudio
@@ -62,7 +70,8 @@ from itertools import chain
 from tqdm import tqdm
 from glob import glob
 import pandas as pd
-#from line_profiler import LineProfiler
+
+from peft import LoraConfig, TaskType, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
 from symusic import Score, TimeUnit
 from collections import defaultdict
 
@@ -71,43 +80,7 @@ import utils.log_memory_usage as log_memory_usage
 import utils.sequence_processing as sequence_processing
 
 import shutil
-def compute_hrm_q_loss(hrm_aux: dict,
-                       decoder_loss_per_example: torch.Tensor) -> torch.Tensor:
-    """
-    Q-learning loss for HRM encoder halt/continue heads.
-
-    halt target:    is this example "easy" (below-median decoder loss)?
-    continue target: bootstrap from next step's best Q value.
-
-    Args:
-        hrm_aux: dict from HRMEncoder with 'q_halt_list' and 'q_cont_pairs'
-        decoder_loss_per_example: [B] per-example cross-entropy (detached)
-
-    Returns:
-        scalar Q-loss
-    """
-    # "is_easy" replaces HRM's binary seq_is_correct.
-    # Below-median loss → easy → encoder should halt.
-    median_loss = decoder_loss_per_example.median().detach()
-    is_easy = (decoder_loss_per_example.detach() < median_loss).float()
-
-    halt_loss = torch.tensor(0.0, device=is_easy.device)
-    cont_loss = torch.tensor(0.0, device=is_easy.device)
-    n = len(hrm_aux['q_halt_list'])
-
-    for q_halt in hrm_aux['q_halt_list']:
-        halt_loss += F.binary_cross_entropy_with_logits(
-            q_halt, is_easy, reduction='mean'
-        )
-
-    for q_cont, bootstrap in hrm_aux['q_cont_pairs']:
-        if bootstrap is not None:
-            cont_loss += F.binary_cross_entropy_with_logits(
-                q_cont, bootstrap, reduction='mean'
-            )
-
-    return 0.5 * (halt_loss + cont_loss) / max(n, 1)
-
+import copy
 class MT3Trainer(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
@@ -116,6 +89,56 @@ class MT3Trainer(pl.LightningModule):
             self.model = HPPNet(config=config.model)
         else:
             self.model = Transformer(config=config.model)
+
+        self.use_lora = bool(getattr(self.config.model, "use_lora", False))
+        if self.use_lora:
+            target_modules = getattr(
+                self.config.model,
+                "lora_target_modules",
+                ["projection", "output", "query", "key", "value"],
+            )
+            if isinstance(target_modules, str):
+                target_modules = [x.strip() for x in target_modules.split(",") if x.strip()]
+            # PEFT can only inject LoRA into supported leaf layers (e.g., nn.Linear),
+            # not container wrappers like `encoder_decoder_attention`.
+            target_modules = [m for m in target_modules if m != "encoder_decoder_attention"]
+
+            lora_task_type_raw = getattr(self.config.model, "lora_task_type", None)
+            lora_task_type = None
+            if isinstance(lora_task_type_raw, str):
+                task_type_name = lora_task_type_raw.strip()
+                if task_type_name and task_type_name.lower() not in {"none", "null"}:
+                    lora_task_type = getattr(TaskType, task_type_name.upper())
+            elif lora_task_type_raw is not None:
+                lora_task_type = lora_task_type_raw
+
+            lora_cfg_kwargs = dict(
+                r=int(getattr(self.config.model, "lora_r", 8)),
+                lora_alpha=int(getattr(self.config.model, "lora_alpha", 16)),
+                lora_dropout=float(getattr(self.config.model, "lora_dropout", 0.0)),
+                target_modules=target_modules,
+                bias="none",
+            )
+            if lora_task_type is not None:
+                lora_cfg_kwargs["task_type"] = lora_task_type
+
+            peft_cfg = LoraConfig(**lora_cfg_kwargs)
+            self.model = get_peft_model(self.model, peft_cfg)
+
+            if bool(getattr(self.config.training, "lora_train_layer_norm", False)):
+                for name, module in self.model.named_modules():
+                    if "norm" in name.lower():
+                        for p in module.parameters(recurse=False):
+                            p.requires_grad = True
+
+            if bool(getattr(self.config.training, "lora_train_output_head", False)):
+                for name, module in self.model.named_modules():
+                    if isinstance(module, nn.Linear) and any(h in name.lower() for h in ["dense", "head", "output_proj"]):
+                        for p in module.parameters(recurse=False):
+                            p.requires_grad = True
+
+            self.model.print_trainable_parameters()
+
         self.last_time_stamp = std_time.time()
         self.validation_step_count = 0
         self.criterion_list = []
@@ -130,26 +153,28 @@ class MT3Trainer(pl.LightningModule):
             }
             )
 
-        self.feature_extracters = {}
+        self.feature_extracters = {} #naming inconsistency  A) feature_extracterS
         # mel_extracter = MelSpectrogram(sample_rate=DEFAULT_SAMPLE_RATE, n_mels=DEFAULT_NUM_MEL_BINS, n_fft=FFT_SIZE, hop_length=DEFAULT_HOP_WIDTH,  f_min=MEL_FMIN, f_max=MEL_FMAX)
         mel_extracter = MelSpectrogram(config.data.num_mel_bins, config.data.sample_rate, config.data.fft_size, config.data.hop_length,  mel_fmin=config.data.mel_fmin, mel_fmax=config.data.mel_fmax)
-        # cqt_extracter = CQT(sr=config.data.sample_rate, hop_length=config.data.hop_length, fmin=config.data.cqt_fmin, n_bins=config.data.num_cqt_bins, bins_per_octave=config.data.bins_per_octave)
+        #cqt_extracter = CQT(sr=config.data.sample_rate, hop_length=config.data.hop_length, fmin=config.data.cqt_fmin, n_bins=config.data.num_cqt_bins, bins_per_octave=config.data.bins_per_octave)
         # log_stft_extracter = STFT(n_fft=config.data.fft_size, freq_bins=config.data.num_cqt_bins, hop_length=config.data.hop_length, freq_scale="log", fmin=config.data.mel_fmin, fmax=config.data.mel_fmax, sr=config.data.sample_rate, output_format="Magnitude")
         
         # self.feature_extracters["mel"] = mel_extracter.to(self.device)
         # self.feature_extracters["cqt"] = cqt_extracter.to(self.device)
         if config.data.features == "mel":
-            self.features_extracter = mel_extracter
-        elif config.data.features == "cqt":
-            self.features_extracter = cqt_extracter
-        elif config.data.features == "log-stft":
-            self.features_extracter = log_stft_extracter
+            self.features_extracter = mel_extracter #B) self.featureS_extracter
+
+        #elif config.data.features == "cqt":
+            #self.features_extracter = cqt_extracter
+        #elif config.data.features == "log-stft":
+            #self.features_extracter = log_stft_extracter
     
 
-    def forward(self, encoder_input_tokens, decoder_target_tokens, decode, decoder_input_tokens = None, decoder_positions=None, decoder_targets_frame_index=None, encoder_decoder_mask=None, recording_ids=None):
+    def forward(self, encoder_input_tokens, decoder_target_tokens, decode, decoder_input_tokens = None, decoder_positions=None, decoder_targets_frame_index=None, encoder_decoder_mask=None, hrm_reset_flag=None):
         return self.model.forward(encoder_input_tokens, decoder_target_tokens, decode=decode, decoder_input_tokens=decoder_input_tokens, decoder_positions=decoder_positions, 
                 decoder_targets_frame_index=decoder_targets_frame_index,
-                encoder_decoder_mask=encoder_decoder_mask, recording_ids=recording_ids)
+                encoder_decoder_mask=encoder_decoder_mask,
+                hrm_reset_flag=hrm_reset_flag)
     
     def log_time_event(self, event_name):
         if self.global_rank == 0:
@@ -159,6 +184,35 @@ class MT3Trainer(pl.LightningModule):
                 self.log("time/%s"%event_name, dur)
                 print("time/%s"%event_name, "%.3f"%dur)
             self.last_time_stamp = curr_time
+
+    def _reset_hrm_carry(self, batch_size=None):
+        if hasattr(self.model, "reset_hrm_carry"):
+            self.model.reset_hrm_carry(batch_size=batch_size)
+
+    def _maybe_auto_reset_hrm_carry_on_batch_start(self, batch):
+        if not getattr(self.config.model, "hrm_auto_reset_on_batch_start", True):
+            return
+        self._reset_hrm_carry()
+
+    def configure_gradient_clipping(self, optimizer, gradient_clip_val, gradient_clip_algorithm):
+        """Skip Lightning clipping when there are no gradients to clip.
+
+        Some training steps (e.g. with unused parameters in DDP) can reach the clipping
+        hook before any `.grad` tensors are materialized. In that case PyTorch's
+        `clip_grad_value_` can raise on an empty tensor list.
+        """
+        has_any_grad = any(
+            parameter.grad is not None
+            for group in optimizer.param_groups
+            for parameter in group["params"]
+        )
+        if not has_any_grad:
+            return
+        self.clip_gradients(
+            optimizer,
+            gradient_clip_val=gradient_clip_val,
+            gradient_clip_algorithm=gradient_clip_algorithm,
+        )
     
     def forward_step(self, batch, batch_idx, forward_type, cal_metrics=False):
         """_summary_
@@ -177,7 +231,7 @@ class MT3Trainer(pl.LightningModule):
         for k in batch_list[0].keys():
             batch[k] = torch.cat([b[k] for b in batch_list], dim=0)
         
-
+         
         outputs_dict = {}
         targets_dict = {}
         loss_dict = {}
@@ -204,6 +258,7 @@ class MT3Trainer(pl.LightningModule):
         
         decoder_targets_frame_index = batch["decoder_targets_frame_index"]
         encoder_decoder_mask = batch["encoder_decoder_mask"]
+        hrm_reset_flag = batch.get("hrm_reset_flag")
         
         # Clip seq len if it is shorter than the max.
         if False:
@@ -225,7 +280,8 @@ class MT3Trainer(pl.LightningModule):
         # => [B*T, n_token, vocab_size], [B, T, 128]
         outputs_dict = self.forward(encoder_input_tokens=inputs, decoder_target_tokens=decoder_target_tokens, decode=False, decoder_input_tokens = decoder_inputs, 
                                     decoder_targets_frame_index=decoder_targets_frame_index,
-                                    encoder_decoder_mask=encoder_decoder_mask, recording_ids=batch.get('audio_ids_contiguous', None))
+                                    encoder_decoder_mask=encoder_decoder_mask,
+                                    hrm_reset_flag=hrm_reset_flag)
         self.log_time_event("forward_done")
 
         # cal losses
@@ -249,33 +305,112 @@ class MT3Trainer(pl.LightningModule):
                 else:
                     loss_dict[dic["loss_name"]] = loss
                     total_loss += loss
-            loss_dict["loss"] = total_loss
 
-        # HRM Q-loss (only when using HRMEncoder)
-        if 'hrm_aux' in outputs_dict and outputs_dict['hrm_aux'] is not None:
-            # Compute per-example decoder loss as the Q-learning reward signal.
-            # Using the cross-entropy loss over non-PAD tokens as a proxy for
-            # "how hard was this example for the decoder".
+            mask = targets_dict["decoder_targets_mask"] > 0
+            labels = targets_dict["decoder_targets"]
             with torch.no_grad():
-                decoder_outputs_for_q = outputs_dict['decoder_outputs'].detach()  # [B, T, vocab]
-                targets_for_q = targets.clone()
-                targets_for_q[targets_mask == 0] = TOKEN_PAD
-                # [B]
-                per_example_loss = Functional.cross_entropy(
-                    decoder_outputs_for_q.transpose(1, 2).float(),
-                    targets_for_q,
-                    ignore_index=TOKEN_PAD,
-                    reduction='none'
-                ).mean(dim=1)
+                loss_counts = mask.sum(dim=-1)
+                seq_is_correct = ((torch.argmax(outputs_dict["decoder_outputs"], dim=-1) == labels) | ~mask).all(dim=-1)
+                valid_seq = loss_counts > 0
 
-            q_loss = compute_hrm_q_loss(outputs_dict['hrm_aux'], per_example_loss)
+            if getattr(self.config.model, "hrm_use_act_halt", False):
+                q_halt_logits = outputs_dict.get("hrm_q_halt_logits")
+                if q_halt_logits is not None and torch.any(valid_seq):
+                    q_halt_weight = float(getattr(self.config.training, "hrm_q_halt_loss_weight", 0.5))
+                    q_halt_loss = Functional.binary_cross_entropy_with_logits(
+                        q_halt_logits[valid_seq],
+                        seq_is_correct[valid_seq].to(dtype=q_halt_logits.dtype),
+                        reduction="mean",
+                    )
+                    total_loss += q_halt_weight * q_halt_loss
+                    loss_dict["hrm_q_halt_loss"] = q_halt_loss
 
-            # Start with weight 0.05 to avoid disrupting the main CE loss early.
-            # Increase to 0.1-0.2 after ~20k steps once the encoder is stable.
-            q_loss_weight = getattr(self.config.training, 'hrm_q_loss_weight', 0.05)
-            loss_dict['hrm_q_loss'] = q_loss
-            loss_dict['loss'] = loss_dict['loss'] + q_loss_weight * q_loss
-            self.log_time_event("loss_cal_done")
+                    q_halt_pred = q_halt_logits >= 0
+                    metrics_dict["q_halt_accuracy"] = (q_halt_pred[valid_seq] == seq_is_correct[valid_seq]).to(torch.float32).mean()
+
+                q_continue_logits = outputs_dict.get("hrm_q_continue_logits")
+                target_q_continue = outputs_dict.get("hrm_target_q_continue")
+                if q_continue_logits is not None and target_q_continue is not None and torch.any(valid_seq):
+                    q_continue_weight = float(getattr(self.config.training, "hrm_q_continue_loss_weight", 0.5))
+                    q_continue_loss = Functional.binary_cross_entropy_with_logits(
+                        q_continue_logits[valid_seq],
+                        target_q_continue[valid_seq].to(dtype=q_continue_logits.dtype),
+                        reduction="mean",
+                    )
+                    total_loss += q_continue_weight * q_continue_loss
+                    loss_dict["hrm_q_continue_loss"] = q_continue_loss
+
+                hrm_steps = outputs_dict.get("hrm_steps")
+                if hrm_steps is not None and torch.any(valid_seq):
+                    metrics_dict["steps"] = hrm_steps[valid_seq].to(torch.float32).mean()
+
+            log_hrm_scale_metrics = bool(
+                getattr(
+                    self.config.training,
+                    "log_hrm_scale_metrics",
+                    getattr(self.config.model, "hrm_use_act_halt", False),
+                )
+            )
+            hrm_halting = outputs_dict.get("hrm_halting")
+            if log_hrm_scale_metrics and isinstance(hrm_halting, dict):
+                for scale, scale_diag in hrm_halting.items():
+                    scale_suffix = f"scale_{scale}"
+                    scale_steps = scale_diag.get("steps")
+                    if scale_steps is not None:
+                        if torch.any(valid_seq):
+                            metrics_dict[f"hrm/{scale_suffix}_steps_mean"] = scale_steps[valid_seq].to(torch.float32).mean()
+                        else:
+                            metrics_dict[f"hrm/{scale_suffix}_steps_mean"] = scale_steps.to(torch.float32).mean()
+
+                    scale_halted = scale_diag.get("halted")
+                    if scale_halted is not None:
+                        if torch.any(valid_seq):
+                            halted_ratio = scale_halted[valid_seq].to(torch.float32).mean()
+                        else:
+                            halted_ratio = scale_halted.to(torch.float32).mean()
+                        metrics_dict[f"hrm/{scale_suffix}_halted_ratio"] = halted_ratio
+
+            if getattr(self.config.model, "hrm_aux_token_loss", False):
+                aux_logits_dict = outputs_dict.get("hrm_aux_token_logits", {})
+                aux_targets_dict = outputs_dict.get("hrm_aux_token_targets", {})
+                aux_masks_dict = outputs_dict.get("hrm_aux_token_masks", {})
+                aux_scale_losses = []
+
+                for scale, aux_logits in aux_logits_dict.items():
+                    aux_targets = aux_targets_dict.get(scale)
+                    aux_mask = aux_masks_dict.get(scale)
+                    if aux_targets is None or aux_mask is None:
+                        continue
+
+                    aux_mask = aux_mask.to(dtype=torch.bool, device=aux_logits.device)
+                    aux_targets = aux_targets.to(device=aux_logits.device)
+                    aux_logits_flat = aux_logits.reshape(-1, aux_logits.size(-1))
+                    aux_targets_flat = aux_targets.reshape(-1)
+                    aux_mask_flat = aux_mask.reshape(-1)
+                    if not torch.any(aux_mask_flat):
+                        continue
+
+                    scale_loss = Functional.cross_entropy(
+                        aux_logits_flat[aux_mask_flat],
+                        aux_targets_flat[aux_mask_flat],
+                        reduction="mean",
+                    )
+                    aux_scale_losses.append(scale_loss)
+                    loss_dict[f"hrm_aux_token_loss_scale_{scale}"] = scale_loss
+
+                    with torch.no_grad():
+                        scale_preds = torch.argmax(aux_logits_flat[aux_mask_flat], dim=-1)
+                        scale_acc = (scale_preds == aux_targets_flat[aux_mask_flat]).to(torch.float32).mean()
+                        metrics_dict[f"hrm/scale_{scale}_aux_token_accuracy"] = scale_acc
+
+                if aux_scale_losses:
+                    aux_loss = torch.stack(aux_scale_losses).mean()
+                    aux_weight = float(getattr(self.config.model, "hrm_aux_token_loss_weight", 0.1))
+                    total_loss += aux_weight * aux_loss
+                    loss_dict["hrm_aux_token_loss"] = aux_loss
+
+            loss_dict["loss"] = total_loss
+        self.log_time_event("loss_cal_done")
         
         decoder_outputs = outputs_dict["decoder_outputs"]
         decoder_outputs_probs = torch.softmax(decoder_outputs, dim=-1)[..., :VOCAB_SIZE]
@@ -372,7 +507,18 @@ class MT3Trainer(pl.LightningModule):
         metrics_dict.update(metrict_ret)
     
 
+    def _save_model_checkpoint(self, checkpoint_path, save_lora_variants=False):
+        torch.save(self.model.state_dict(), checkpoint_path)
+        if self.use_lora and save_lora_variants:
+            lora_path = checkpoint_path.replace(".ckpt", ".lora.ckpt")
+            merged_path = checkpoint_path.replace(".ckpt", ".merged.ckpt")
+            torch.save(get_peft_model_state_dict(self.model), lora_path)
+            merged_model = copy.deepcopy(self.model).cpu()
+            merged_model = merged_model.merge_and_unload()
+            torch.save(merged_model.state_dict(), merged_path)
+
     def training_step(self, batch, batch_idx, dataloader_idx = None): # This batch_indx will be reseted to 0 in a new epoch.
+        self._maybe_auto_reset_hrm_carry_on_batch_start(batch)
         cal_metrics = False
         if self.global_rank == 0 and self.global_step % self.config.training.cal_metrics_every_n_steps == 0:
             cal_metrics = True
@@ -385,7 +531,7 @@ class MT3Trainer(pl.LightningModule):
                     cpt_dir = os.path.join(os.path.join(self.logger.save_dir, "cpt"))
                     os.system("mkdir -p %s"%cpt_dir)
                     checkpoint_path = cpt_dir + '/steps_' + str(self.global_step)+'.ckpt'
-                    torch.save(self.model.state_dict(), checkpoint_path)
+                    self._save_model_checkpoint(checkpoint_path, save_lora_variants=True)
                     if hasattr(self, "previous_cpt_path"):
                         if self.prev_checkpoint_step in [10000, 50000, 100000, 200000]:
                             pass
@@ -418,19 +564,25 @@ class MT3Trainer(pl.LightningModule):
         # Save checkpoint.
         cpt_dir = os.path.join(os.path.join(self.logger.save_dir, "cpt"))
         os.system("mkdir -p %s"%cpt_dir)
-        torch.save(self.model.state_dict(), cpt_dir + '/latest.ckpt')
+        self._save_model_checkpoint(cpt_dir + '/latest.ckpt', save_lora_variants=True)
         txt_path = cpt_dir + '/latest_epoch.txt'
         with open(txt_path, "w") as f:
             f.write('latest epoch=%d , global step=%d\n'%(self.current_epoch, self.global_step))
+
+    def on_train_epoch_start(self):
+        self._reset_hrm_carry()
+        return super().on_train_epoch_start()
                 
         
     @torch.no_grad()
     def on_validation_start(self):
+        self._reset_hrm_carry()
         
         # Manually call test_steps (online testing).
         if self.global_step > 1 and self.config.training.online_testing: # skip the validation step in the init epoch.
             self.test_outputs_dict = defaultdict(list)
             test_dataloader = self.test_dataloader()
+
             for batch_idx, batch in tqdm( enumerate(test_dataloader), desc="Testing ...", total=len(test_dataloader), disable=(self.global_rank != 0) ):
                 new_batch = {}
                 for k,v in batch.items():
@@ -442,6 +594,7 @@ class MT3Trainer(pl.LightningModule):
     
     @torch.no_grad()
     def validation_step(self, batch, batch_idx, dataloader_idx = None):
+        self._maybe_auto_reset_hrm_carry_on_batch_start(batch)
         outputs_dict, targets_dict, loss_dict, metrics_dict = self.forward_step(batch, batch_idx, "validation", cal_metrics=True)
         log_dict = {}
         log_dict.update(loss_dict)
@@ -463,6 +616,7 @@ class MT3Trainer(pl.LightningModule):
     
     @torch.no_grad()
     def test_step(self, batch, batch_idx):
+        self._reset_hrm_carry(batch_size=batch["inputs"].size(0))
         metrics_dict = {}
         # [B, n_wave_samples]
         input_waves = batch["inputs"]
@@ -668,31 +822,106 @@ class MT3Trainer(pl.LightningModule):
 
 
     def configure_optimizers(self):
-    # Separate recording embedding parameters for higher LR.
-        rec_emb_params = []
-        main_params = []
-        for name, param in self.model.named_parameters():
-            if 'recording_embed' in name or 'recording_proj' in name:
-                rec_emb_params.append(param)
-            else:
-                main_params.append(param)
+        m = self.model  # Transformer
 
-        optimizer_groups = [{
-            'params': main_params,
-            'lr': self.config.training.learning_rate,    # e.g. 1e-4
-        }]
-        if len(rec_emb_params) > 0:
-            rec_lr_mult = getattr(self.config.training, 'recording_emb_lr_multiplier', 100.0)
-            optimizer_groups.append({
-                'params': rec_emb_params,
-                'lr': self.config.training.learning_rate * rec_lr_mult,
-                'weight_decay': 0.01,
-            })
+        if self.use_lora:
+            trainable_params = [p for p in m.parameters() if p.requires_grad]
+            if len(trainable_params) == 0:
+                raise RuntimeError("LoRA is enabled but no trainable parameters were found.")
+            return AdamW(trainable_params, lr=self.config.training.learning_rate)
 
-        optimizer = AdamW(optimizer_groups)
+        lr_enc = getattr(self.config.training, "lr_encoder", self.config.training.learning_rate)
+        lr_dec = getattr(self.config.training, "lr_decoder", self.config.training.learning_rate)
+        lr_hrm = getattr(self.config.training, "lr_hrm", self.config.training.learning_rate)
+
+        freeze_enc = getattr(self.config.training, "freeze_encoder_init", False)
+        freeze_dec = getattr(self.config.training, "freeze_decoder_init", False)
+        freeze_hrm = getattr(self.config.training, "freeze_hrm_init", False)
+
+        param_groups = [
+            {"name": "encoder", "params": m.encoder.parameters(), "lr": 0.0 if freeze_enc else lr_enc},
+            {"name": "decoder", "params": m.decoder.parameters(), "lr": 0.0 if freeze_dec else lr_dec},
+            {"name": "hrm", "params": m.hrm_refiners.parameters(), "lr": 0.0 if freeze_hrm else lr_hrm},
+        ]
+
+        optimizer = AdamW(param_groups, lr=self.config.training.learning_rate)
         return optimizer
-    
-    
+
+    def _set_group_lr(self, optimizer, group_name: str, lr: float):
+        for g in optimizer.param_groups:
+            if g.get("name", None) == group_name:
+                g["lr"] = lr
+
+    def apply_freeze_schedule(self):
+        if self.use_lora:
+            return
+        opt = self.optimizers()  # lightning helper
+
+        # config
+        step_unfreeze_decoder = getattr(self.config.training, "unfreeze_decoder_step", None)
+        step_unfreeze_encoder = getattr(self.config.training, "unfreeze_encoder_step", None)
+        step_unfreeze_hrm = getattr(self.config.training, "unfreeze_hrm_step", None)
+
+        lr_enc = getattr(self.config.training, "lr_encoder", self.config.training.learning_rate)
+        lr_dec = getattr(self.config.training, "lr_decoder", self.config.training.learning_rate)
+        lr_hrm = getattr(self.config.training, "lr_hrm", self.config.training.learning_rate)
+        hrm_lr_warmup_steps = getattr(self.config.training, "hrm_lr_warmup_steps", 0)
+
+        freeze_hrm = getattr(self.config.training, "freeze_hrm_init", False)
+
+        def _warmup_lr(base_lr: float, warmup_steps: int, step: int, start_step: int = 0) -> float:
+            if warmup_steps is None or warmup_steps <= 0:
+                return base_lr
+            progress = max(0, step - start_step + 1)
+            return base_lr * min(1.0, progress / warmup_steps)
+
+        # HRM
+        if freeze_hrm and (step_unfreeze_hrm is None or self.global_step < step_unfreeze_hrm):
+            self.model.freeze_hrm()
+            self._set_group_lr(opt, "hrm", 0.0)
+        else:
+            self.model.unfreeze_hrm()
+            hrm_lr = _warmup_lr(lr_hrm, hrm_lr_warmup_steps, self.global_step, step_unfreeze_hrm or 0)
+            self._set_group_lr(opt, "hrm", hrm_lr)
+
+        # Decoder
+        if step_unfreeze_decoder is None or self.global_step < step_unfreeze_decoder:
+            self.model.freeze_decoder()
+            self._set_group_lr(opt, "decoder", 0.0)
+        else:
+            self.model.unfreeze_decoder()
+            self._set_group_lr(opt, "decoder", lr_dec)
+
+        # Encoder
+        if step_unfreeze_encoder is None or self.global_step < step_unfreeze_encoder:
+            self.model.freeze_encoder()
+            self._set_group_lr(opt, "encoder", 0.0)
+        else:
+            self.model.unfreeze_encoder()
+            self._set_group_lr(opt, "encoder", lr_enc)
+
+        # Ensure at least one parameter requires grad to avoid Lightning backward errors.
+        if not any(p.requires_grad for p in self.model.parameters()):
+            self.model.unfreeze_decoder()
+            self._set_group_lr(opt, "decoder", 0.0)
+            if self.global_rank == 0:
+                print(
+                    "Warning: all modules were frozen; decoder temporarily set to requires_grad=True "
+                    "to allow backprop (lr stays 0 until unfreeze schedule)."
+                )
+
+    def on_train_start(self):
+        self._reset_hrm_carry()
+        self.apply_freeze_schedule()
+
+    def on_train_batch_start(self, batch, batch_idx):
+        self.apply_freeze_schedule()
+
+    def on_test_start(self):
+        self._reset_hrm_carry()
+        return super().on_test_start()
+        
+
     def train_dataloader(self):
         # train_data = MIDIDataset(type='train')
         if self.config.data.dataset_name == "Audio2Midi_Dataset":
@@ -767,6 +996,7 @@ class MT3Trainer(pl.LightningModule):
         return testloader
 
 
+
 @rank_zero_only
 def Init_rank_zero_only(log_dir):
     os.environ["MT3-LOGGER-PATH"] = log_dir
@@ -809,20 +1039,99 @@ def my_main(config: OmegaConf):
     if config.model.checkpoint_path is None:
         assert config.model.froze_encoder == False, "If you want to train from scratch, please set config.model.froze_encoder to False and config.model.checkpoint_path to None."
     else:
-        state_dict = torch.load(config.model.checkpoint_path) # , map_location=torch.device('cpu')
+        state_dict = torch.load(config.model.checkpoint_path)
         if not config.model.checkpoint_ignore_layres is None:
-            for key in config.model.checkpoint_ignore_layres:
-                del state_dict[key]
+            for ignore_key in config.model.checkpoint_ignore_layres:
+                remove_keys = [k for k in list(state_dict.keys()) if k == ignore_key or k.endswith(ignore_key)]
+                for k in remove_keys:
+                    del state_dict[k]
 
-        model.model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
+        use_lora = bool(getattr(config.model, "use_lora", False))
+        strict_ckpt = bool(getattr(config.model, "strict_checkpoint", False))
+        checkpoint_type = getattr(config.model, "checkpoint_type", "auto")
+        state_keys = list(state_dict.keys())
+        has_lora_keys = any("lora_A" in k or "lora_B" in k for k in state_keys)
+        has_base_layer_keys = any(".base_layer." in k for k in state_keys)
+
+        def _load_lora_only():
+            set_peft_model_state_dict(model.model, state_dict)
+            print("Loaded LoRA adapter checkpoint.")
+
+        def _load_full_peft():
+            model.model.load_state_dict(state_dict, strict=strict_ckpt)
+            print("Loaded full PEFT checkpoint into LoRA-enabled model.")
+
+        def _load_merged_into_base():
+            base_model = model.model.get_base_model() if hasattr(model.model, "get_base_model") else model.model
+            target_keys = set(base_model.state_dict().keys())
+            remapped_state_dict = {}
+            remapped_count = 0
+            for k, v in state_dict.items():
+                mapped_key = k
+                if mapped_key not in target_keys:
+                    if k.endswith(".weight"):
+                        candidate = k[:-len(".weight")] + ".base_layer.weight"
+                        if candidate in target_keys:
+                            mapped_key = candidate
+                    elif k.endswith(".bias"):
+                        candidate = k[:-len(".bias")] + ".base_layer.bias"
+                        if candidate in target_keys:
+                            mapped_key = candidate
+                if mapped_key != k:
+                    remapped_count += 1
+                remapped_state_dict[mapped_key] = v
+
+            # LoRA adapter params are not present in merged/base checkpoints.
+            # Always load non-strict here to avoid false failures on adapter keys.
+            load_ret = base_model.load_state_dict(remapped_state_dict, strict=False)
+            print(
+                "Loaded merged/base checkpoint into LoRA-enabled model base weights. "
+                f"remapped={remapped_count}, missing={len(load_ret.missing_keys)}, unexpected={len(load_ret.unexpected_keys)}"
+            )
+
+        def _load_full_model():
+            model.model.load_state_dict(state_dict, strict=strict_ckpt)
+            print("Loaded full model checkpoint.")
+
+        if checkpoint_type == "lora":
+            if has_base_layer_keys:
+                print("Warning: checkpoint_type='lora' but full PEFT checkpoint detected; loading full PEFT checkpoint.")
+                _load_full_peft()
+            else:
+                _load_lora_only()
+        elif checkpoint_type == "merged":
+            if use_lora:
+                if has_base_layer_keys:
+                    print("Warning: checkpoint_type='merged' but full PEFT checkpoint detected; loading full PEFT checkpoint.")
+                    _load_full_peft()
+                elif has_lora_keys:
+                    print("Warning: checkpoint_type='merged' but adapter-only checkpoint detected; loading LoRA adapters.")
+                    _load_lora_only()
+                else:
+                    _load_merged_into_base()
+            else:
+                _load_full_model()
+        elif checkpoint_type == "full":
+            _load_full_model()
+        else:
+            # auto
+            if has_lora_keys and has_base_layer_keys:
+                _load_full_peft()
+            elif has_lora_keys:
+                _load_lora_only()
+            elif use_lora:
+                _load_merged_into_base()
+            else:
+                _load_full_model()
     
     # model.model = torch.compile(model.model)
     
     # Create logger.
+    wandb_offline = bool(getattr(config.training, "debug_log_offline", False))
     if "DEBUG" in os.environ and os.environ["DEBUG"] == "True":
-        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="mt3-score-pytorch-debug", offline=config.training.debug_log_offline, save_dir=log_dir) #, rank_zero_only=True
+        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="mt3-score-pytorch-debug", offline=wandb_offline, save_dir=log_dir) #, rank_zero_only=True
     else:
-        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="AMT-audio-to-midi", offline=False, save_dir=log_dir, notes=config.training.notes) #, rank_zero_only=True
+        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="AMT-audio-to-midi", offline=wandb_offline, save_dir=log_dir, notes=config.training.notes) #, rank_zero_only=True
     tensorboard_logger = TensorBoardLogger(save_dir=log_dir)
 
     # Save informations to log dir.
@@ -858,25 +1167,30 @@ def my_main(config: OmegaConf):
             config_dict["training"]["cuda"]= os.environ["CUDA_VISIBLE_DEVICES"]
         wandb_logger.log_hyperparams(config_dict)
     
-    logger_list = [wandb_logger, tensorboard_logger]
+    disable_wandb = bool(getattr(config.training, "disable_wandb", False))
+    logger_list = [tensorboard_logger] if disable_wandb else [wandb_logger, tensorboard_logger]
     if config.training.mode != "train":
         logger_list = []
-    trainer = pl.Trainer(
+    trainer_kwargs = dict(
                         devices=config.devices, # 1 [1,2, 4, 5, 6,7]
                         accelerator=config.accelerator, # "gpu"
                         logger=logger_list,
-                        #  val_check_interval=0.0, # 0.0:disable, None:total training batch.
-                        check_val_every_n_epoch=config.training.evaluation_epochs,
                         max_steps=config.training.training_steps,
                         reload_dataloaders_every_n_epochs=5,
                         log_every_n_steps = 50,
-                        #  strategy="dp",
-                        # strategy='ddp_find_unused_parameters_true'
                         gradient_clip_val=0.5,
                         gradient_clip_algorithm="value",
-                        # callbacks=[val_call_back,]
                         strategy=DDPStrategy(find_unused_parameters=True),
                         )
+
+    eval_every_steps = getattr(config.training, "evaluate_every_n_steps", None)
+    if eval_every_steps is not None and int(eval_every_steps) > 0:
+        trainer_kwargs["val_check_interval"] = int(eval_every_steps)
+        trainer_kwargs["check_val_every_n_epoch"] = 1
+    else:
+        trainer_kwargs["check_val_every_n_epoch"] = config.training.evaluation_epochs
+
+    trainer = pl.Trainer(**trainer_kwargs)
 
     trainer.fit(model)
     

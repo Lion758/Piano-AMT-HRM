@@ -44,7 +44,7 @@ def stable_hash_to_digit(s: str) -> int:
 
 
 class SingleWavDataset(Dataset):
-    def __init__(self,config, dataset_dir:str, dataset_index:int, audio_idx, midi_path, audio_h5_path, random_clip = True, audio_id_contiguous: int = 0) -> None:
+    def __init__(self,config, dataset_dir:str, dataset_index:int, audio_idx, midi_path, audio_h5_path, random_clip = True) -> None:
         self.config = config
         self.dataset_dir = dataset_dir
         self.dataset_index = dataset_index
@@ -55,7 +55,7 @@ class SingleWavDataset(Dataset):
         n_frames = config.data.n_frames
         max_token_length = config.data.max_token_length
         hop_length = config.data.hop_length
-        self.audio_id_contiguous = audio_id_contiguous
+
 
         frames_per_second=DEFAULT_SAMPLE_RATE / hop_length
         
@@ -260,7 +260,6 @@ class SingleWavDataset(Dataset):
             "decoder_targets_len": torch.tensor(seq_len, dtype=torch.long),
             "decoder_targets_frame_index": decoder_targets_frame_index,
             "hrm_reset_flag": torch.tensor(begin == 0, dtype=torch.bool),
-            "audio_ids_contiguous" : torch.tensor(self.audio_id_contiguous, dtype=torch.long),
             
             "encoder_decoder_mask": encoder_decoder_mask[None],
             
@@ -306,11 +305,6 @@ class Audio2Midi_Dataset(Dataset):
         else:
             raise "Unknown subset: " + subset
         
-        self.audio_id_to_contiguous = {
-            int(idx): i for i, (idx, _) in enumerate(subset_data)
-        }
-        self.num_recordings = len(subset_data)
-
         self.audio_relative_paths = []
         self.mid_relative_paths = []
         self.dataset_dir = root_dir
@@ -352,8 +346,7 @@ class Audio2Midi_Dataset(Dataset):
                 
         
 
-        self.dataset_list = [ SingleWavDataset(config, dataset_dir, dataset_index, i, path, audio_h5_path, random_clip=random_clip,
-                                                audio_id_contiguous=self.audio_id_to_contiguous.get(int(i), 0)) 
+        self.dataset_list = [ SingleWavDataset(config, dataset_dir, dataset_index, i, path, audio_h5_path, random_clip=random_clip) 
             for i, path in tqdm(zip(idx_list, mid_paths), total=len(mid_paths))
         ]
         self.datasets = ConcatDataset(self.dataset_list)

@@ -53,6 +53,7 @@
   hrm_halt_max_steps: 1
   hrm_halt_exploration_prob: 0.0
   hrm_use_act_halt: false
+  use_recording_id_embedding: false
 
   # Experiment profiles for fixed-vs-adaptive depth ablations.
   hrm_experiment_profiles:

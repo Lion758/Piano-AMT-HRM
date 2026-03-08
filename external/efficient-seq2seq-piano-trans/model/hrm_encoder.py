@@ -185,6 +185,7 @@ class HRMEncoder(nn.Module):
         hrm_max_steps:         int   (default 4)
         hrm_L_window_size:     int   (default 64)   — local attn window, L-level only
         hrm_halt_explore_prob: float (default 0.1)
+        use_recording_id_embedding: bool (default True) — hard switch to enable/disable
         num_recordings:        int   (default 0)    — 0 disables recording embeddings
         recording_emb_dim:     int   (default 64)
     """
@@ -275,9 +276,15 @@ class HRMEncoder(nn.Module):
         # Directly analogous to HRM's puzzle_emb (CastedSparseEmbedding).
         # audio_ids is already in your batch from dataset_Audio2Midi.py.
         # Zero-init: model starts from unbiased baseline and learns offsets.
+        self.use_recording_id_embedding = getattr(
+            config, "use_recording_id_embedding", True
+        )
         self.num_recordings = getattr(config, "num_recordings", 0)
         rec_dim = getattr(config, "recording_emb_dim", 64)
-        if self.num_recordings > 0:
+        self.has_recording_embedding = (
+            self.use_recording_id_embedding and self.num_recordings > 0
+        )
+        if self.has_recording_embedding:
             self.recording_embed = nn.Embedding(self.num_recordings, rec_dim)
             nn.init.zeros_(self.recording_embed.weight)
             # Project rec_dim → emb_dim only if they differ
@@ -397,7 +404,7 @@ class HRMEncoder(nn.Module):
         # ── 2. Per-recording embedding ───────────────────────────────────────
         # Analogous to HRM's puzzle_emb. Zero-init means recordings start
         # identical and diverge as the model learns recording-specific biases.
-        if self.num_recordings > 0 and recording_ids is not None:
+        if self.has_recording_embedding and recording_ids is not None:
             rec = self.recording_proj(
                 self.recording_embed(recording_ids)  # [B, rec_dim]
             )                                         # [B, emb_dim]

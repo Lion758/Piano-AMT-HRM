@@ -1,0 +1,37 @@
+# config/experiment_T5_V5_HRM.yaml
+defaults:
+  - experiment_T5_V4_HierarchyPool   # inherit everything from V4
+
+model:
+  # ── Replace TransformerEncoder with HRMEncoder ──────────────────────────
+  use_hrm_encoder: true
+
+  # Two-level hierarchy: L (local, grounded) + H (global, abstract)
+  hrm_L_layers: 4
+  hrm_H_layers: 4
+
+  # Inner cycles per ACT step (truncated BPTT window = 1)
+  hrm_L_cycles: 2
+  hrm_H_cycles: 2
+
+  # ACT refinement depth. Start conservative — increase after validation.
+  hrm_max_steps: 4          # Phase 1-2: 4 steps; Phase 3+: increase to 8
+
+  # L-level local attention window — matches your V1 encoder_window_size: 64
+  hrm_L_window_size: 64     # H-level always uses global attention
+
+  # Halting exploration probability during training
+  hrm_halt_explore_prob: 0.1
+
+  # Per-recording embeddings.
+  # MAESTRO v3 total: 1276 recordings across all splits.
+  # Set use_recording_id_embedding: false to force-disable this feature.
+  use_recording_id_embedding: false
+  num_recordings: 1276
+  recording_emb_dim: 64     # small — acts as a bias offset, not full 512-dim
+
+training:
+  notes: "V5_HRM_encoder"
+  hrm_q_loss_weight: 0.05   # increase to 0.1 after ~20k steps
+
+  # Keep other training settings from V4 (batch, lr, etc.)
