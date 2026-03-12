@@ -46,3 +46,25 @@ training:
   hrm_ablation_pooling_sets: []
   hrm_auto_reset_on_batch_start: true
   hrm_auto_reset_on_eval: false
+
+  # initial freeze
+  freeze_encoder_init: true
+  freeze_decoder_init: true
+  freeze_hrm_init: true
+
+  # phase boundaries (set to null to disable)
+  unfreeze_decoder_step: 500
+  unfreeze_encoder_step: 1800
+  unfreeze_hrm_step: 800
+
+  # lr warmup (steps)
+  hrm_lr_warmup_steps: 500
+
+  # per-module learning rates
+  lr_hrm: 1.0e-4
+  lr_decoder: 1.0e-4
+  lr_encoder: 1.0e-4
+
+  # ACT halting auxiliary losses (used only when model.hrm_use_act_halt=true)
+  hrm_q_halt_loss_weight: 0.5
+  hrm_q_continue_loss_weight: 0.5

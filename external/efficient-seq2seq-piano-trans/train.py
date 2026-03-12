@@ -15,6 +15,7 @@ import hydra
 from model.T5 import Transformer
 from model.HPPNet import HPPNet
 from model.GPT import GPT
+from model.hrm_encoder import compute_hrm_q_loss
 
 from data.dataset_Audio2Midi import Audio2Midi_Dataset
 import pytorch_lightning as pl
@@ -71,42 +72,6 @@ import utils.log_memory_usage as log_memory_usage
 import utils.sequence_processing as sequence_processing
 
 import shutil
-def compute_hrm_q_loss(hrm_aux: dict,
-                       decoder_loss_per_example: torch.Tensor) -> torch.Tensor:
-    """
-    Q-learning loss for HRM encoder halt/continue heads.
-
-    halt target:    is this example "easy" (below-median decoder loss)?
-    continue target: bootstrap from next step's best Q value.
-
-    Args:
-        hrm_aux: dict from HRMEncoder with 'q_halt_list' and 'q_cont_pairs'
-        decoder_loss_per_example: [B] per-example cross-entropy (detached)
-
-    Returns:
-        scalar Q-loss
-    """
-    # "is_easy" replaces HRM's binary seq_is_correct.
-    # Below-median loss → easy → encoder should halt.
-    median_loss = decoder_loss_per_example.median().detach()
-    is_easy = (decoder_loss_per_example.detach() < median_loss).float()
-
-    halt_loss = torch.tensor(0.0, device=is_easy.device)
-    cont_loss = torch.tensor(0.0, device=is_easy.device)
-    n = len(hrm_aux['q_halt_list'])
-
-    for q_halt in hrm_aux['q_halt_list']:
-        halt_loss += F.binary_cross_entropy_with_logits(
-            q_halt, is_easy, reduction='mean'
-        )
-
-    for q_cont, bootstrap in hrm_aux['q_cont_pairs']:
-        if bootstrap is not None:
-            cont_loss += F.binary_cross_entropy_with_logits(
-                q_cont, bootstrap, reduction='mean'
-            )
-
-    return 0.5 * (halt_loss + cont_loss) / max(n, 1)
 
 class MT3Trainer(pl.LightningModule):
     def __init__(self, config):
@@ -159,6 +124,21 @@ class MT3Trainer(pl.LightningModule):
                 self.log("time/%s"%event_name, dur)
                 print("time/%s"%event_name, "%.3f"%dur)
             self.last_time_stamp = curr_time
+
+    def _get_hrm_q_loss_weight(self) -> float:
+        target_weight = float(getattr(self.config.training, "hrm_q_loss_weight", 0.05))
+        init_weight = float(getattr(self.config.training, "hrm_q_loss_init_weight", 0.0))
+        warmup_steps = int(getattr(self.config.training, "hrm_q_loss_warmup_steps", 1000))
+        ramp_steps = int(getattr(self.config.training, "hrm_q_loss_ramp_steps", 4000))
+        step = int(self.global_step)
+
+        if step < warmup_steps:
+            return init_weight
+        if ramp_steps <= 0:
+            return target_weight
+
+        progress = min(1.0, max(0.0, (step - warmup_steps) / float(ramp_steps)))
+        return init_weight + (target_weight - init_weight) * progress
     
     def forward_step(self, batch, batch_idx, forward_type, cal_metrics=False):
         """_summary_
@@ -260,21 +240,45 @@ class MT3Trainer(pl.LightningModule):
                 decoder_outputs_for_q = outputs_dict['decoder_outputs'].detach()  # [B, T, vocab]
                 targets_for_q = targets.clone()
                 targets_for_q[targets_mask == 0] = TOKEN_PAD
-                # [B]
-                per_example_loss = Functional.cross_entropy(
+                token_level_loss = Functional.cross_entropy(
                     decoder_outputs_for_q.transpose(1, 2).float(),
                     targets_for_q,
                     ignore_index=TOKEN_PAD,
                     reduction='none'
-                ).mean(dim=1)
+                )  # [B, T]
+                valid_token_count = targets_mask.sum(dim=1).clamp_min(1).to(token_level_loss.dtype)
+                per_example_loss = token_level_loss.sum(dim=1) / valid_token_count
 
-            q_loss = compute_hrm_q_loss(outputs_dict['hrm_aux'], per_example_loss)
+            q_loss, q_components = compute_hrm_q_loss(
+                outputs_dict['hrm_aux'],
+                per_example_loss,
+                return_components=True,
+            )
 
-            # Start with weight 0.05 to avoid disrupting the main CE loss early.
-            # Increase to 0.1-0.2 after ~20k steps once the encoder is stable.
-            q_loss_weight = getattr(self.config.training, 'hrm_q_loss_weight', 0.05)
+            q_loss_weight = self._get_hrm_q_loss_weight()
+            ce_loss_value = loss_dict['loss'].detach()
+            q_loss_scaled = q_loss_weight * q_loss
             loss_dict['hrm_q_loss'] = q_loss
-            loss_dict['loss'] = loss_dict['loss'] + q_loss_weight * q_loss
+            loss_dict['hrm_q_halt_term'] = q_components['q_halt_term']
+            loss_dict['hrm_q_cont_term'] = q_components['q_cont_term']
+            loss_dict['hrm_q_steps'] = q_components['q_steps']
+            loss_dict['hrm_q_loss_weight'] = torch.tensor(q_loss_weight, device=q_loss.device)
+            loss_dict['hrm_q_loss_scaled'] = q_loss_scaled.detach()
+            loss_dict['hrm_q_to_ce_ratio'] = q_loss_scaled.detach() / (ce_loss_value + 1e-8)
+            loss_dict['loss'] = loss_dict['loss'] + q_loss_scaled
+
+            steps_per_example = outputs_dict['hrm_aux'].get('steps_per_example')
+            if steps_per_example is not None:
+                loss_dict['hrm_steps_mean'] = steps_per_example.float().mean()
+            q_halt_last = outputs_dict['hrm_aux'].get('q_halt_last')
+            if q_halt_last is not None:
+                loss_dict['hrm_q_halt_logit_mean'] = q_halt_last.mean()
+                loss_dict['hrm_q_halt_logit_std'] = q_halt_last.std(unbiased=False)
+            q_continue_last = outputs_dict['hrm_aux'].get('q_continue_last')
+            if q_continue_last is not None:
+                loss_dict['hrm_q_continue_logit_mean'] = q_continue_last.mean()
+                loss_dict['hrm_q_continue_logit_std'] = q_continue_last.std(unbiased=False)
+
             self.log_time_event("loss_cal_done")
         
         decoder_outputs = outputs_dict["decoder_outputs"]

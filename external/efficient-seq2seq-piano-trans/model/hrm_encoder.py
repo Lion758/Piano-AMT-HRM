@@ -21,7 +21,8 @@ Optional additions from HRM (see bottom of file):
 """
 
 import math
-from typing import Optional, Tuple, List
+from contextlib import contextmanager
+from typing import Optional, Tuple, List, Dict, Union
 
 import torch
 import torch.nn as nn
@@ -96,13 +97,36 @@ class HRMTransformerLayer(nn.Module):
         self.drop2 = nn.Dropout(dropout_rate)
         self.norm_eps = rms_norm_eps
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    @contextmanager
+    def _force_attention_deterministic(self, force_no_attn_dropout: bool):
+        if not force_no_attn_dropout:
+            yield
+            return
+        old_dropout_rate = self.attn.dropout_rate
+        old_dropout_p = self.attn.dropout.p
+        self.attn.dropout_rate = 0.0
+        self.attn.dropout.p = 0.0
+        try:
+            yield
+        finally:
+            self.attn.dropout_rate = old_dropout_rate
+            self.attn.dropout.p = old_dropout_p
+
+    def forward(self, x: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
+        force_no_attn_dropout = deterministic or (not self.training)
+        with self._force_attention_deterministic(force_no_attn_dropout):
+            attn_out = self.attn(x, x, deterministic=force_no_attn_dropout)
+        if self.training and not deterministic:
+            attn_out = self.drop1(attn_out)
         x = rms_norm(
-            x + self.drop1(self.attn(x, x)),
+            x + attn_out,
             variance_epsilon=self.norm_eps,
         )
+        mlp_out = self.mlp(x)
+        if self.training and not deterministic:
+            mlp_out = self.drop2(mlp_out)
         x = rms_norm(
-            x + self.drop2(self.mlp(x)),
+            x + mlp_out,
             variance_epsilon=self.norm_eps,
         )
         return x
@@ -126,11 +150,14 @@ class HRMReasoningStack(nn.Module):
         self.layers = layers
 
     def forward(
-        self, hidden: torch.Tensor, injection: torch.Tensor
+        self,
+        hidden: torch.Tensor,
+        injection: torch.Tensor,
+        deterministic: bool = False,
     ) -> torch.Tensor:
         hidden = hidden + injection
         for layer in self.layers:
-            hidden = layer(hidden)
+            hidden = layer(hidden, deterministic=deterministic)
         return hidden
 
 
@@ -286,6 +313,7 @@ class HRMEncoder(nn.Module):
         z_H: torch.Tensor,          # [B, T, emb_dim] — detached on entry
         z_L: torch.Tensor,          # [B, T, emb_dim] — detached on entry
         audio_features: torch.Tensor,  # [B, T, emb_dim] — fixed, never changes
+        deterministic: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Runs H_cycles × L_cycles transformer passes with truncated BPTT.
@@ -319,15 +347,23 @@ class HRMEncoder(nn.Module):
                     )
                     if not is_last:
                         # L receives z_H + raw audio (always grounded in input)
-                        z_L = self.L_level(z_L, z_H + audio_features)
+                        z_L = self.L_level(
+                            z_L,
+                            z_H + audio_features,
+                            deterministic=deterministic,
+                        )
 
                 if h < self.H_cycles - 1:
                     # H reads L's updated summary
-                    z_H = self.H_level(z_H, z_L)
+                    z_H = self.H_level(z_H, z_L, deterministic=deterministic)
 
         # Final L and H pass — gradient flows here
-        z_L = self.L_level(z_L, z_H + audio_features)
-        z_H = self.H_level(z_H, z_L)
+        z_L = self.L_level(
+            z_L,
+            z_H + audio_features,
+            deterministic=deterministic,
+        )
+        z_H = self.H_level(z_H, z_L, deterministic=deterministic)
 
         # Q-head: z_H[:, 0] as global summary token (same as HRM)
         q = self.q_head(z_H[:, 0])   # [B, 2]
@@ -359,12 +395,19 @@ class HRMEncoder(nn.Module):
         """
         B, T, _ = encoder_input_tokens.shape
         device = encoder_input_tokens.device
+        deterministic_mode = bool(deterministic) or (not self.training)
 
         # ── 1. Input projection + positional encoding ────────────────────────
         x = self.dense(encoder_input_tokens)          # [B, T, emb_dim]
         positions = torch.arange(T, device=device).unsqueeze(0)
         x = x + self.embed(positions)
-        x = self.input_norm(self.dropout(x))
+        x = self.input_norm(
+            F.dropout(
+                x,
+                p=self.dropout.p,
+                training=self.training and (not deterministic_mode),
+            )
+        )
 
         # ── 2. Per-recording embedding ───────────────────────────────────────
         # Analogous to HRM's puzzle_emb. Zero-init means recordings start
@@ -385,13 +428,18 @@ class HRMEncoder(nn.Module):
         # ── 4. ACT loop ──────────────────────────────────────────────────────
         hrm_aux = None
 
-        if deterministic or not self.training:
+        if deterministic_mode:
             # ── Inference path ───────────────────────────────────────────────
             # Always run exactly max_steps (no early halting, for batch uniformity).
             # Matching HRM comment: "During evaluation, always use max steps,
             # this is to guarantee the same halting steps inside a batch."
             for _ in range(self.max_steps):
-                z_H, z_L, _, _ = self._act_step(z_H, z_L, audio_features)
+                z_H, z_L, _, _ = self._act_step(
+                    z_H,
+                    z_L,
+                    audio_features,
+                    deterministic=True,
+                )
                 # FIX: detach carry between steps.
                 # z_H/z_L from _act_step have gradients; detach before next step.
                 # (Moot in inference since torch.no_grad() wraps this, but
@@ -403,11 +451,22 @@ class HRMEncoder(nn.Module):
             # ── Training path ─────────────────────────────────────────────────
             q_halt_list:  List[torch.Tensor] = []
             q_cont_pairs: List[tuple]        = []
+            q_halt_last: Optional[torch.Tensor] = None
+            q_cont_last: Optional[torch.Tensor] = None
+            steps_run = 0
 
             for step in range(self.max_steps):
                 is_last = step == self.max_steps - 1
+                steps_run = step + 1
 
-                z_H, z_L, q_halt, q_cont = self._act_step(z_H, z_L, audio_features)
+                z_H, z_L, q_halt, q_cont = self._act_step(
+                    z_H,
+                    z_L,
+                    audio_features,
+                    deterministic=False,
+                )
+                q_halt_last = q_halt
+                q_cont_last = q_cont
                 q_halt_list.append(q_halt)
 
                 # ── Bootstrap target for Q_continue ──────────────────────────
@@ -418,7 +477,10 @@ class HRMEncoder(nn.Module):
                 # Both cases compute a target; only the formula differs.
                 with torch.no_grad():
                     _, _, nq_halt, nq_cont = self._act_step(
-                        z_H.detach(), z_L.detach(), audio_features
+                        z_H.detach(),
+                        z_L.detach(),
+                        audio_features,
+                        deterministic=True,
                     )
                     if is_last:
                         # Last step: can only halt next, so target uses q_halt only
@@ -454,17 +516,32 @@ class HRMEncoder(nn.Module):
             hrm_aux = {
                 "q_halt_list":  q_halt_list,   # List[Tensor[B]]
                 "q_cont_pairs": q_cont_pairs,  # List[(q_cont [B], bootstrap [B])]
+                "steps_per_example": torch.full(
+                    (B,),
+                    steps_run,
+                    device=device,
+                    dtype=torch.long,
+                ),
+                "q_halt_last": None if q_halt_last is None else q_halt_last.detach(),
+                "q_continue_last": None if q_cont_last is None else q_cont_last.detach(),
             }
 
         # z_H here has gradient from its last _act_step call (training)
         # or is detached (inference). Either way, layer_norm keeps the gradient.
-        encoded = self.layer_norm(self.dropout(z_H))
+        encoded = self.layer_norm(
+            F.dropout(
+                z_H,
+                p=self.dropout.p,
+                training=self.training and (not deterministic_mode),
+            )
+        )
         return encoded, hrm_aux
 
 def compute_hrm_q_loss(
     hrm_aux: dict,
     decoder_loss_per_example: torch.Tensor,  # [B] per-example CE loss, detached
-) -> torch.Tensor:
+    return_components: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
     """
     Q-learning losses for HRM encoder halt/continue heads.
 
@@ -511,4 +588,15 @@ def compute_hrm_q_loss(
         )
 
     # Average over steps, then weight at 0.5 (matching HRM losses.py)
-    return 0.5 * (q_halt_loss + q_cont_loss) / max(n_steps, 1)
+    q_halt_term = 0.5 * q_halt_loss / max(n_steps, 1)
+    q_cont_term = 0.5 * q_cont_loss / max(n_steps, 1)
+    q_loss_total = q_halt_term + q_cont_term
+    if not return_components:
+        return q_loss_total
+
+    components = {
+        "q_halt_term": q_halt_term.detach(),
+        "q_cont_term": q_cont_term.detach(),
+        "q_steps": torch.tensor(float(n_steps), device=device),
+    }
+    return q_loss_total, components

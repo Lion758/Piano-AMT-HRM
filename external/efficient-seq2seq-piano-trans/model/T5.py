@@ -27,20 +27,33 @@ class Transformer(nn.Module):
         config.dtype = eval(config.dtype)
         # config.dtype = torch.float32 # 
         self.config = config
+        self._encoder_contract_logged = False
+
         # select encoder
-        if getattr(config, 'use_hrm_encoder', False) and config.encoder_name == "HrmEncoder":
+        encoder_name = getattr(config, "encoder_name", None)
+        use_hrm_flag = bool(getattr(config, "use_hrm_encoder", encoder_name == "HrmEncoder"))
+        is_hrm_encoder_name = encoder_name == "HrmEncoder"
+        if use_hrm_flag != is_hrm_encoder_name:
+            raise ValueError(
+                "Conflicting HRM encoder config: "
+                f"encoder_name={encoder_name}, use_hrm_encoder={use_hrm_flag}. "
+                "Set encoder_name='HrmEncoder' and use_hrm_encoder=true together, "
+                "or disable both."
+            )
+
+        if is_hrm_encoder_name:
             self.encoder = HRMEncoder(config)
-        elif config.encoder_name == "TransformerEncoder":
+        elif encoder_name == "TransformerEncoder":
             self.encoder = Encoder(config)
-        elif config.encoder_name == "CNNEncoder":
+        elif encoder_name == "CNNEncoder":
             self.encoder = CNNEncoder(config)
-        elif config.encoder_name == "HPPNetEncoder":
+        elif encoder_name == "HPPNetEncoder":
             self.encoder = HPPNet(config)
-        elif config.encoder_name == "hFT_Transformer_Encoder":
+        elif encoder_name == "hFT_Transformer_Encoder":
             self.encoder = hFT_Transformer_Encoder(config)
 
         else:
-            raise "Unknown encoder: " + config.encoder_name
+            raise ValueError("Unknown encoder: " + str(encoder_name))
         # froze encoder
         if config.froze_encoder:
             for param in self.encoder.parameters():
@@ -58,6 +71,19 @@ class Transformer(nn.Module):
 
         self.pad_token = TOKEN_PAD
         self.eos_token = TOKEN_END
+
+    def _log_encoder_contract_once(self):
+        if self._encoder_contract_logged:
+            return
+        self._encoder_contract_logged = True
+        print(
+            "[Transformer] Active encoder contract:",
+            f"encoder_name={self.config.encoder_name},",
+            f"encoder_class={self.encoder.__class__.__name__},",
+            f"use_hrm_encoder={getattr(self.config, 'use_hrm_encoder', None)}",
+        )
+        if isinstance(self.encoder, HRMEncoder):
+            assert self.config.encoder_name == "HrmEncoder"
         
     def encode(
             self, 
@@ -72,6 +98,7 @@ class Transformer(nn.Module):
             hrm_aux dict | None
         """
         assert encoder_input_tokens.ndim == 3  # (batch, length, depth)
+        self._log_encoder_contract_once()
 
         if isinstance(self.encoder, HRMEncoder):
             encoder_outputs, hrm_aux = self.encoder(
@@ -107,7 +134,7 @@ class Transformer(nn.Module):
                 encoder_outputs = encoder_outputs.detach()
         else:
             encoder_outputs = self.encoder(encoder_input_tokens, encoder_mask, deterministic=not enable_dropout)
-        return encoder_outputs
+        return encoder_outputs, None
     
     def decode(
             self, 
@@ -229,7 +256,7 @@ class Transformer(nn.Module):
     ):
         res_dict = {}
             
-        if decoder_input_tokens == None:
+        if decoder_input_tokens is None:
             decoder_input_tokens = self._shift_right(decoder_target_tokens, shift_step=1)
             
         encoder_outputs, hrm_aux = self.encode(encoder_input_tokens, encoder_segment_ids=encoder_segment_ids, enable_dropout=enable_dropout, recording_ids=recording_ids)
