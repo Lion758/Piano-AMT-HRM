@@ -173,6 +173,7 @@ cython_debug/
 external/efficient-seq2seq-piano-trans/dataset
 
 
+external/HRM/data
 separated/
 audio_output/
 requirementOGs.txt

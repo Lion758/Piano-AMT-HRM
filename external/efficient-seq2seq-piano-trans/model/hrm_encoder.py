@@ -11,9 +11,7 @@ Fixes vs first draft:
   - LOSS: Q-loss weight 0.5 per HRM losses.py, reduction='sum' not 'mean'
 
 Intentional divergences from HRM (AMT-appropriate):
-  - Pre-norm (your existing style) rather than HRM's post-norm
   - Sinusoidal FixedEmbed rather than RoPE (matches your existing Encoder)
-  - ReLU MLP rather than SwiGLU (matches your existing MlpBlock)
   - float32 rather than bfloat16
   - Per-example CE loss proxy for seq_is_correct (AMT has no exact-match signal)
   - No puzzle_emb_len offset on output (no prepended puzzle tokens in AMT)
@@ -29,17 +27,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from model.Layers import LayerNorm, MlpBlock, FixedEmbed
+from model.Layers import LayerNorm, FixedEmbed
 from model.Attention import Multi_Head_Attention
+from model.layers.hrm_layers import rms_norm, SwiGLU
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Utility: correct truncated normal init
-# Ported directly from external/HRM/models/common.py
-# PyTorch's nn.init.trunc_normal_ is NOT mathematically correct —
-# the std of the initialised tensor does not equal the std argument.
-# This version matches JAX's default truncated normal (used throughout HRM).
-# ─────────────────────────────────────────────────────────────────────────────
 
 def trunc_normal_init_(
     tensor: torch.Tensor,
@@ -76,23 +67,10 @@ def trunc_normal_init_(
     return tensor
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Building blocks
-# ─────────────────────────────────────────────────────────────────────────────
 
 class HRMTransformerLayer(nn.Module):
     """
-    Single pre-norm transformer block (your existing style).
-
-    Note on norm style:
-        HRM original uses POST-norm:
-            hidden = rms_norm(hidden + attn(hidden))
-            hidden = rms_norm(hidden + mlp(hidden))
-        This implementation uses PRE-norm (your existing EncoderLayer style):
-            hidden = hidden + attn(norm(hidden))
-            hidden = hidden + mlp(norm(hidden))
-        Pre-norm is more stable for training and matches your codebase.
-        To switch to post-norm, invert the order of norm/residual below.
+    Single HRM-style transformer block: post-norm RMSNorm + SwiGLU.
     """
 
     def __init__(
@@ -100,12 +78,12 @@ class HRMTransformerLayer(nn.Module):
         emb_dim: int,
         num_heads: int,
         head_dim: int,
-        mlp_dim: int,
+        expansion: float,
         dropout_rate: float,
+        rms_norm_eps: float,
         window_size: Optional[int] = None,
     ):
         super().__init__()
-        self.norm1 = LayerNorm(emb_dim)
         self.attn = Multi_Head_Attention(
             num_heads=num_heads,
             head_dim=head_dim,
@@ -114,24 +92,20 @@ class HRMTransformerLayer(nn.Module):
             is_causal=False,
         )
         self.drop1 = nn.Dropout(dropout_rate)
-        self.norm2 = LayerNorm(emb_dim)
-        self.mlp = MlpBlock(
-            emb_dim=emb_dim,
-            intermediate_dim=mlp_dim,
-            activations="relu",
-            intermediate_dropout_rate=dropout_rate,
-        )
+        self.mlp = SwiGLU(hidden_size=emb_dim, expansion=expansion)
         self.drop2 = nn.Dropout(dropout_rate)
+        self.norm_eps = rms_norm_eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        r = x
-        x = self.norm1(x)
-        x = self.attn(x, x)
-        x = self.drop1(x) + r
-        r = x
-        x = self.norm2(x)
-        x = self.mlp(x)
-        return self.drop2(x) + r
+        x = rms_norm(
+            x + self.drop1(self.attn(x, x)),
+            variance_epsilon=self.norm_eps,
+        )
+        x = rms_norm(
+            x + self.drop2(self.mlp(x)),
+            variance_epsilon=self.norm_eps,
+        )
+        return x
 
 
 class HRMReasoningStack(nn.Module):
@@ -197,8 +171,9 @@ class HRMEncoder(nn.Module):
         emb_dim   = config.emb_dim        # 512
         num_heads = config.num_heads       # 8
         head_dim  = config.head_dim        # 64
-        mlp_dim   = config.mlp_dim         # 1024
         dropout   = config.dropout_rate    # 0.1
+        expansion = getattr(config, "hrm_expansion", 4.0)
+        rms_norm_eps = getattr(config, "hrm_rms_norm_eps", 1e-5)
 
         H_layers = getattr(config, "hrm_H_layers", 3)
         L_layers = getattr(config, "hrm_L_layers", 3)
@@ -221,7 +196,7 @@ class HRMEncoder(nn.Module):
         self.L_level = HRMReasoningStack(
             nn.ModuleList([
                 HRMTransformerLayer(
-                    emb_dim, num_heads, head_dim, mlp_dim, dropout,
+                    emb_dim, num_heads, head_dim, expansion, dropout, rms_norm_eps,
                     window_size=L_window,
                 )
                 for _ in range(L_layers)
@@ -233,7 +208,7 @@ class HRMEncoder(nn.Module):
         self.H_level = HRMReasoningStack(
             nn.ModuleList([
                 HRMTransformerLayer(
-                    emb_dim, num_heads, head_dim, mlp_dim, dropout,
+                    emb_dim, num_heads, head_dim, expansion, dropout, rms_norm_eps,
                     window_size=None,
                 )
                 for _ in range(H_layers)
@@ -244,16 +219,6 @@ class HRMEncoder(nn.Module):
         # MATCHING HRM: nn.Buffer (non-trainable), std=1 (not 0.02),
         # and using the correct truncated normal (not PyTorch's buggy version).
         #
-        # Why non-trainable (Buffer, not Parameter)?
-        #   HRM treats these as fixed initial conditions, not learned.
-        #   The model learns to refine FROM these states, not to optimise them.
-        #   Making them trainable would conflate "good starting point" with
-        #   "what the model should compute", which can cause instability.
-        #
-        # Why std=1?
-        #   Broad initial state gives the model diverse directions to refine
-        #   from on step 1. std=0.02 would start near-zero (essentially the
-        #   zero vector) and may slow convergence.
         self.register_buffer(
             "H_init",
             trunc_normal_init_(torch.empty(emb_dim), std=1.0),
@@ -479,16 +444,12 @@ class HRMEncoder(nn.Module):
                         # All examples in batch are confident — stop early
                         break
 
-                # FIX (CRITICAL): Detach z_H and z_L before next ACT step.
-                # This implements truncated BPTT with window=1 (matching HRM).
-                # Without this, gradients flow across ACT steps, which:
-                #   (a) is not what HRM does
-                #   (b) causes memory to grow linearly with max_steps
-                #   (c) can cause gradient instability
-                # The 1-step gradient window in _act_step only applies WITHIN
+              
                 # a single call. Between calls, we always detach.
-                z_H = z_H.detach()
-                z_L = z_L.detach()
+                # Do not detach after the final step; keep gradient to encoded.
+                if not is_last:
+                    z_H = z_H.detach()
+                    z_L = z_L.detach()
 
             hrm_aux = {
                 "q_halt_list":  q_halt_list,   # List[Tensor[B]]
@@ -499,11 +460,6 @@ class HRMEncoder(nn.Module):
         # or is detached (inference). Either way, layer_norm keeps the gradient.
         encoded = self.layer_norm(self.dropout(z_H))
         return encoded, hrm_aux
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Q-loss function (put in train.py before MT3Trainer class)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def compute_hrm_q_loss(
     hrm_aux: dict,

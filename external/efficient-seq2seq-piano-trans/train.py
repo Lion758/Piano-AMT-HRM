@@ -819,10 +819,11 @@ def my_main(config: OmegaConf):
     # model.model = torch.compile(model.model)
     
     # Create logger.
+    wandb_offline = bool(getattr(config.training, "debug_log_offline", False))
     if "DEBUG" in os.environ and os.environ["DEBUG"] == "True":
-        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="mt3-score-pytorch-debug", offline=config.training.debug_log_offline, save_dir=log_dir) #, rank_zero_only=True
+        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="mt3-score-pytorch-debug", offline=wandb_offline, save_dir=log_dir) #, rank_zero_only=True
     else:
-        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="AMT-audio-to-midi", offline=False, save_dir=log_dir, notes=config.training.notes) #, rank_zero_only=True
+        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="AMT-audio-to-midi", offline=wandb_offline, save_dir=log_dir, notes=config.training.notes) #, rank_zero_only=True
     tensorboard_logger = TensorBoardLogger(save_dir=log_dir)
 
     # Save informations to log dir.

@@ -28,7 +28,7 @@ class Transformer(nn.Module):
         # config.dtype = torch.float32 # 
         self.config = config
         # select encoder
-        if getattr(config, 'use_hrm_encoder', False):
+        if getattr(config, 'use_hrm_encoder', False) and config.encoder_name == "HrmEncoder":
             self.encoder = HRMEncoder(config)
         elif config.encoder_name == "TransformerEncoder":
             self.encoder = Encoder(config)

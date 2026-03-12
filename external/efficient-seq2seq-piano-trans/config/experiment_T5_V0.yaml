@@ -11,16 +11,13 @@ data:
   max_token_length: 1024 # 1023 2046 3069
   n_frames: 512 #  512, 1024, 2048
 
-model:
-  checkpoint_path:  "checkpoints/T5_V4_steps_200000.ckpt"
 
 training:
-  batch: 24
-  batch_test: 256 # 64 # 256
+  batch_test: 64 # 64 # 256
   learning_rate: 1e-4
-  training_steps: 20001 #200001
-  evaluate_every_n_steps: 250
-  cal_metrics_every_n_steps: 200
+  training_steps: 5001 #200001
+  evaluate_every_n_steps: 50
+  cal_metrics_every_n_steps: 50
   checking_steps: 1000
   online_testing: true
   evaluation_epochs: 1

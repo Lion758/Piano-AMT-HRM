@@ -7,8 +7,8 @@ model:
   use_hrm_encoder: true
 
   # Two-level hierarchy: L (local, grounded) + H (global, abstract)
-  hrm_L_layers: 4
-  hrm_H_layers: 4
+  hrm_L_layers: 3
+  hrm_H_layers: 3
 
   # Inner cycles per ACT step (truncated BPTT window = 1)
   hrm_L_cycles: 2
@@ -31,7 +31,7 @@ model:
   recording_emb_dim: 64     # small — acts as a bias offset, not full 512-dim
 
 training:
-  notes: "V5_HRM_encoder"
+  notes: "V5_HRM_encoder_batch26_SWIGLUetc"
   hrm_q_loss_weight: 0.05   # increase to 0.1 after ~20k steps
 
   # Keep other training settings from V4 (batch, lr, etc.)

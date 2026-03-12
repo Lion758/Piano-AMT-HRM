@@ -11,7 +11,7 @@
   # 6) End Tie Section(1 value)
   # 7) EOS(1 value)
   # """
-  encoder_name: "TransformerEncoder" # "TransformerEncoder" # "CNNFreqTransEncoder" # "CNNEncoder", "TransformerEncoder"
+  encoder_name: "HrmEncoder" # "TransformerEncoder" # "CNNFreqTransEncoder" # "CNNEncoder", "TransformerEncoder"
   decoder_name: "TransformerDecoder" # "TransformerDecoder", "FrameLvTransDec"
   encoder_attention: "Multi_Head_Attention" # Multi_Head_Attention, RelativeGlobalAttention
   encoder_position_emb: true
@@ -28,46 +28,4 @@
   dtype: torch.float32
   # dtype: torch.float16  
 
-
-  # LoRA / PEFT
-  use_lora: false
-  lora_r: 8
-  lora_alpha: 16
-  lora_dropout: 0.05
-  lora_target_modules: ["projection", "output", "query", "key", "value", "encoder_decoder_attention"]
-  checkpoint_type: auto  # auto | full | lora | merged
-
 #HRM 
-  use_hrm_refiner: true
-  hrm_H_cycles: 2
-  hrm_L_cycles: 2
-  hrm_H_layers: 4
-  hrm_L_layers: 4
-  hrm_num_heads: 8
-  hrm_expansion: 4.0
-  hrm_rms_norm_eps: 1e-5
-  hrm_use_rope: true
-  hrm_forward_dtype: torch.bfloat16
-
-  # Baseline setting keeps fixed single-step refinement.
-  hrm_halt_max_steps: 1
-  hrm_halt_exploration_prob: 0.0
-  hrm_use_act_halt: false
-  use_recording_id_embedding: false
-
-  # Experiment profiles for fixed-vs-adaptive depth ablations.
-  hrm_experiment_profiles:
-    fixed_step:
-      hrm_use_act_halt: false
-      hrm_halt_max_steps: 1
-    adaptive_step:
-      hrm_use_act_halt: true
-      hrm_halt_max_steps: 3
-  hrm_cross_scale_coupling: false
-  hrm_cross_scale_bidirectional: true
-  hrm_aux_token_loss: false
-  hrm_aux_token_loss_shared_head: true
-  hrm_aux_token_loss_weight: 0.1
-  hrm_ablation_pooling_sets: []
-  hrm_auto_reset_on_batch_start: true
-  hrm_auto_reset_on_eval: false
