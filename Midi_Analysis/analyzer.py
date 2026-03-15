@@ -18,11 +18,11 @@ import os
 import json
 from typing import Dict, List, Any, Optional, Tuple
 
-from .midi_parser import MIDIParser
-from .time_alignment import TimeAlignment
-from .paper_time_alignment import PaperBestTimeAlignment
-from .error_analysis import ErrorAnalysis
-from .json_summarization import JSONSummarization
+from midi_parser import MIDIParser
+from time_alignment import TimeAlignment
+from paper_time_alignment import PaperBestTimeAlignment
+from error_analysis import ErrorAnalysis
+from json_summarization import JSONSummarization
 
 
 class MIDIAnalyzer:

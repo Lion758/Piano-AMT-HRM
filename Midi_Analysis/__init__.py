@@ -10,13 +10,13 @@ __version__ = "0.1.0"
 
 
 # Import main classes for easy access
-from .midi_parser import MIDIParser
-from .time_alignment import TimeAlignment
-from .paper_time_alignment import PaperBestTimeAlignment, align_midi_files_paper_best
-from .phrase_segmentation import PhraseSegmentation
-from .error_analysis import ErrorAnalysis
-from .json_summarization import JSONSummarization
-from .analyzer import MIDIAnalyzer, quick_analyze, compare_performance
+from midi_parser import MIDIParser
+from time_alignment import TimeAlignment
+from paper_time_alignment import PaperBestTimeAlignment, align_midi_files_paper_best
+from phrase_segmentation import PhraseSegmentation
+from error_analysis import ErrorAnalysis
+from json_summarization import JSONSummarization
+from analyzer import MIDIAnalyzer, quick_analyze, compare_performance
 
 # Define what gets imported with "from src import *"
 __all__ = [

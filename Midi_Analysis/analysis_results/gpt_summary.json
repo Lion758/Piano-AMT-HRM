@@ -1,0 +1,251 @@
+{
+  "metadata": {
+    "analysis_timestamp": "2026-03-12T18:57:44.080275",
+    "analysis_version": "1.0",
+    "reference_statistics": {
+      "total_notes": 1398,
+      "duration": 154.99270833333333,
+      "instruments": [
+        {
+          "name": "",
+          "program": 0,
+          "is_drum": false,
+          "note_count": 1398
+        }
+      ],
+      "pitch_range": {
+        "min": 25,
+        "max": 98,
+        "range": 73
+      },
+      "note_density": 9.019779156277513
+    },
+    "performance_statistics": {
+      "total_notes": 1231,
+      "duration": 114.63541666666667,
+      "pitch_range": {
+        "min": 33,
+        "max": 89,
+        "range": 56
+      },
+      "note_density": 10.738391640163561
+    }
+  },
+  "performance_overview": {
+    "overall_assessment": {
+      "grade": "F (Needs Significant Practice)",
+      "score": 29.8,
+      "performance_level": "Novice"
+    },
+    "key_metrics": {
+      "note_accuracy": "0.0%",
+      "timing_consistency": "N/A (insufficient aligned pairs)",
+      "dynamic_range": 93,
+      "rhythmic_consistency": 0.49
+    },
+    "analysis_reliability": {
+      "is_reliable": false,
+      "insufficient_alignment": true,
+      "aligned_pair_count": 0,
+      "minimum_required_aligned_pairs": 69,
+      "reason": "too_few_aligned_pairs_for_stable_metrics"
+    },
+    "strengths": [
+      "Good dynamic expression"
+    ],
+    "weaknesses": [
+      "Note accuracy needs improvement"
+    ],
+    "performance_characteristics": [
+      "Smooth, connected playing"
+    ]
+  },
+  "error_analysis_summary": {
+    "note_accuracy": {
+      "summary": "Significant note accuracy issues (0.0% correct). 100.0% of notes were missed.",
+      "priority": "high"
+    },
+    "timing": {
+      "summary": "Timing analysis unavailable (insufficient aligned notes).",
+      "patterns": [],
+      "priority": "low"
+    },
+    "rhythm": {
+      "summary": "Significant rhythmic inconsistency issues.",
+      "consistency_score": 0.49,
+      "priority": "medium"
+    },
+    "dynamics": {
+      "summary": "Good dynamic control (93 range). Moderately Expressive expression.",
+      "expression_level": "Moderately Expressive",
+      "priority": "low"
+    },
+    "articulation": {
+      "summary": "variable articulation with 22.4% staccato and 52.0% legato notes.",
+      "priority": "medium"
+    },
+    "error_distribution": {
+      "note_accuracy": 100.0,
+      "timing": 0.0
+    },
+    "categorized_errors": {
+      "note_errors": {
+        "missing_notes": {
+          "count": 1398,
+          "percentage_of_reference": 100.0
+        },
+        "extra_notes": {
+          "count": 1227
+        },
+        "wrong_notes": {
+          "count": 0,
+          "percentage_of_reference": 0.0
+        }
+      },
+      "timing_errors": {
+        "rushing_count": 0,
+        "dragging_count": 0,
+        "rushing_percentage": 0.0,
+        "dragging_percentage": 0.0
+      },
+      "other_error_types": {
+        "missing_note": 1398,
+        "extra_note": 1227
+      }
+    }
+  },
+  "practice_recommendations": {
+    "immediate_focus": [
+      "Focus on note accuracy: practice slowly with attention to correct pitches"
+    ],
+    "technical_development": [],
+    "musical_development": [],
+    "general_practice_tips": [
+      "Missing 100.0% of notes: isolate difficult passages",
+      "Work on rhythmic consistency: practice with subdivision counting"
+    ],
+    "practice_schedule": {
+      "daily_focus": {
+        "warmup": "5 minutes: scales with metronome",
+        "technical_work": "10 minutes: sight-reading",
+        "piece_work": "15 minutes: focus on Focus on note accuracy: practice slowly with attention to correct pitches",
+        "musicality": "5 minutes: dynamics practice"
+      },
+      "weekly_goals": [
+        "Improve timing consistency by 10%",
+        "Master 2 most challenging measures",
+        "Work on dynamic contrast"
+      ],
+      "practice_duration": "35-45 minutes daily"
+    },
+    "specific_exercises": [
+      "Staccato-legato contrast exercises",
+      "Hands-separate practice of difficult passages"
+    ]
+  },
+  "musical_analysis": {
+    "technical_difficulty": {
+      "level": "Intermediate-Advanced",
+      "challenging_sections": [
+        {
+          "section": "Measures 5-8",
+          "reason": "Fast arpeggios",
+          "difficulty": "high"
+        },
+        {
+          "section": "Measures 12-15",
+          "reason": "Complex rhythm",
+          "difficulty": "medium"
+        }
+      ],
+      "fastest_passage": {
+        "tempo": ">300 BPM (very fast subdivision run)",
+        "location": "26.20s - 28.19s",
+        "notes_per_second": 25.0,
+        "window_seconds": 2.0,
+        "note_count": 50
+      },
+      "largest_leap": {
+        "interval": "60 semitones",
+        "location": "152.88s",
+        "direction": "up",
+        "from_pitch": 27,
+        "to_pitch": 87
+      }
+    },
+    "musical_characteristics": {
+      "tempo_profile": "Generally steady tempo with slight rubato in expressive sections",
+      "dynamic_contour": "Clear dynamic shaping with peak at climax sections",
+      "articulation_style": "Mixed articulation suitable for Classical style"
+    }
+  },
+  "progress_metrics": {
+    "current_performance": {
+      "overall_score": 29.8,
+      "component_scores": {
+        "note_accuracy": 0.0,
+        "rhythm": 0.49,
+        "dynamics": 0.76,
+        "articulation": 0.21
+      },
+      "benchmarks": {
+        "beginner_target": 60,
+        "intermediate_target": 75,
+        "advanced_target": 85,
+        "professional_target": 92
+      }
+    },
+    "improvement_areas": {
+      "highest_priority": [
+        "Note accuracy"
+      ],
+      "quick_wins": [
+        "Dynamic contrast in repeated sections",
+        "Articulation consistency in scales",
+        "Tempo stability in familiar passages"
+      ],
+      "long_term_goals": [
+        "Develop consistent touch across all dynamics",
+        "Improve sight-reading fluency",
+        "Expand repertoire in this style"
+      ]
+    },
+    "progress_tracking": {
+      "metrics_to_track": [
+        "note_accuracy",
+        "timing_consistency",
+        "dynamic_range"
+      ],
+      "target_scores": {
+        "next_week": 35.8,
+        "one_month": 39.8,
+        "three_months": 44.8
+      },
+      "measurement_frequency": "weekly"
+    }
+  },
+  "gpt_prompt_context": {
+    "instruction_context": {
+      "role": "You are an experienced piano teacher analyzing a student's performance.",
+      "tone": "Constructive, encouraging, specific",
+      "format": "Provide feedback in this order: 1. Overall assessment 2. Strengths 3. Areas for improvement 4. Specific practice suggestions",
+      "detail_level": "Be specific about measures and passages"
+    },
+    "student_profile": {
+      "assumed_level": "Novice",
+      "likely_age": "Young Beginner",
+      "practice_habits": "Would benefit from more structured practice sessions"
+    },
+    "piece_context": {
+      "difficulty_level": "Intermediate-Advanced",
+      "composer_style": "Romantic/Virtuosic",
+      "musical_period": "Romantic Period"
+    },
+    "response_formatting": {
+      "max_length": "500-700 words",
+      "include_examples": true,
+      "use_musical_terms": "Appropriate for student level",
+      "include_encouragement": true
+    }
+  }
+}

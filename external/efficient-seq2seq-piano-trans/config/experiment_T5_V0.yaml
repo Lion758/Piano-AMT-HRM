@@ -15,7 +15,6 @@ data:
 training:
   batch_test: 64 # 64 # 256
   learning_rate: 1e-4
-  training_steps: 5001 #200001
   evaluate_every_n_steps: 50
   cal_metrics_every_n_steps: 50
   checking_steps: 1000
