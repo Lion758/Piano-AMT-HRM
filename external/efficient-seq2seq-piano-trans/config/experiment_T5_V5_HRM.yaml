@@ -6,6 +6,13 @@ model:
   # ── Replace TransformerEncoder with HRMEncoder ──────────────────────────
   use_hrm_encoder: true
 
+  # ── Rotary Positional Encoding (RoPE) ────────────────────────────────────
+  # Replaces sinusoidal FixedEmbed. Applied inside attention to Q and K.
+  # Requires a fresh training run (attention weight shapes change).
+  hrm_use_rope: true
+  hrm_rope_max_len: 2048      # upper bound for cos/sin cache; 256 is typical n_frames
+  hrm_rope_theta: 10000.0     # standard RoPE base frequency
+
   # Two-level hierarchy: L (local, grounded) + H (global, abstract)
   hrm_L_layers: 3
   hrm_H_layers: 3
@@ -30,8 +37,16 @@ model:
   num_recordings: 1276
   recording_emb_dim: 64     # small — acts as a bias offset, not full 512-dim
 
+  # ── Q-loss soft target ───────────────────────────────────────────────────
+  # Sharpness of soft is_easy = sigmoid(-k * (loss - median)).
+  # k=5 approximates hard binary while giving gradient at the boundary.
+  # Increase for a harder target; set to ~50 to recover near-binary behaviour.
+  hrm_q_soft_k: 5.0
+
 training:
-  notes: "V5_HRM_encoder_batch26_SWIGLUetc"
+  notes: "V5_HRM_encoder_batch26_SWIGLUetc_RoPE"
+  # Q-loss weight. After switching to reduction='mean' (from 'sum') the
+  # absolute scale is smaller; may need tuning upward from 0.05 to ~0.1.
   hrm_q_loss_weight: 0.05   # increase to 0.1 after ~20k steps
 
   # Keep other training settings from V4 (batch, lr, etc.)

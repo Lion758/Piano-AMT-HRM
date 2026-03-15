@@ -1,36 +1,31 @@
 """
 HRM Encoder for AMT (Automatic Music Transcription)
 
-Ported from: external/HRM/models/hrm/hrm_act_v1.py
-Fixes vs first draft:
-  - BUG: z_H/z_L now detached between ACT steps (truncated BPTT was broken)
-  - BUG: target_q_continue computed correctly for last ACT step
-  - INIT: trunc_normal_init_ ported from HRM common.py (PyTorch's version is wrong)
-  - INIT: H_init/L_init std=1 (matching HRM) not 0.02
-  - INIT: H_init/L_init are nn.Buffer (non-trainable) matching HRM exactly
-  - LOSS: Q-loss weight 0.5 per HRM losses.py, reduction='sum' not 'mean'
 
-Intentional divergences from HRM (AMT-appropriate):
-  - Sinusoidal FixedEmbed rather than RoPE (matches your existing Encoder)
-  - float32 rather than bfloat16
-  - Per-example CE loss proxy for seq_is_correct (AMT has no exact-match signal)
-  - No puzzle_emb_len offset on output (no prepended puzzle tokens in AMT)
-
-Optional additions from HRM (see bottom of file):
-  - trunc_normal_init_ available as a utility
 """
 
 import math
-from contextlib import contextmanager
 from typing import Optional, Tuple, List, Dict, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# FA3 / FA2 compatibility — same pattern as hrm_layers.py
+try:
+    from flash_attn_interface import flash_attn_func as _flash_attn_func  # type: ignore[import]
+except ImportError:
+    from flash_attn import flash_attn_func as _flash_attn_func  # type: ignore[import]
+
 from model.Layers import LayerNorm, FixedEmbed
-from model.Attention import Multi_Head_Attention
-from model.layers.hrm_layers import rms_norm, SwiGLU
+from model.layers.hrm_layers import (
+    rms_norm,
+    SwiGLU,
+    Attention as HRMAttention,
+    RotaryEmbedding,
+    apply_rotary_pos_emb,
+    CosSin,
+)
 
 
 def trunc_normal_init_(
@@ -72,6 +67,14 @@ def trunc_normal_init_(
 class HRMTransformerLayer(nn.Module):
     """
     Single HRM-style transformer block: post-norm RMSNorm + SwiGLU.
+
+    Uses hrm_layers::Attention (correct separate Q/K/V projections via a combined
+    qkv_proj that is split, NOT a shared projection) with optional RoPE.
+
+    Two attention paths dispatched by self.window_size:
+      - window_size=None  → H-level global attention via HRMAttention.forward directly
+      - window_size=int   → L-level local window attention via manual QKV split +
+                            flash_attn_func(window_size=...), applying RoPE manually
     """
 
     def __init__(
@@ -85,50 +88,72 @@ class HRMTransformerLayer(nn.Module):
         window_size: Optional[int] = None,
     ):
         super().__init__()
-        self.attn = Multi_Head_Attention(
-            num_heads=num_heads,
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.window_size = window_size
+
+        # Correct attention: qkv_proj outputs 3×dim, split into independent Q, K, V
+        self.attn = HRMAttention(
+            hidden_size=emb_dim,
             head_dim=head_dim,
-            dropout_rate=dropout_rate,
-            window_size=window_size,  # None → global; int → flash-attn sliding window
-            is_causal=False,
+            num_heads=num_heads,
+            num_key_value_heads=num_heads,   # standard MHA, no GQA reduction
+            causal=False,
         )
         self.drop1 = nn.Dropout(dropout_rate)
         self.mlp = SwiGLU(hidden_size=emb_dim, expansion=expansion)
         self.drop2 = nn.Dropout(dropout_rate)
         self.norm_eps = rms_norm_eps
 
-    @contextmanager
-    def _force_attention_deterministic(self, force_no_attn_dropout: bool):
-        if not force_no_attn_dropout:
-            yield
-            return
-        old_dropout_rate = self.attn.dropout_rate
-        old_dropout_p = self.attn.dropout.p
-        self.attn.dropout_rate = 0.0
-        self.attn.dropout.p = 0.0
-        try:
-            yield
-        finally:
-            self.attn.dropout_rate = old_dropout_rate
-            self.attn.dropout.p = old_dropout_p
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos_sin: Optional[CosSin] = None,
+        deterministic: bool = False,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        B, T, _ = x.shape
 
-    def forward(self, x: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
-        force_no_attn_dropout = deterministic or (not self.training)
-        with self._force_attention_deterministic(force_no_attn_dropout):
-            attn_out = self.attn(x, x, deterministic=force_no_attn_dropout)
+        if self.window_size is None:
+            # ── H-level: global attention ────────────────────────────────────
+            # Delegate fully to HRMAttention which handles RoPE and flash-attn.
+            # attention_mask must be [B, T] bool (key-validity) or None.
+            attn_out = self.attn(cos_sin, x, attention_mask)
+        else:
+            # ── L-level: local sliding-window attention ───────────────────────
+            # HRMAttention.forward does not accept window_size, so we use its
+            # qkv_proj/o_proj directly and call flash_attn_func with window_size.
+            qkv = self.attn.qkv_proj(x)
+            # qkv: [B, T, (num_heads + 2*num_kv_heads) * head_dim]
+            # With num_key_value_heads == num_heads: [B, T, 3*H*D]
+            qkv = qkv.view(B, T, self.num_heads * 3, self.head_dim)
+            q = qkv[:, :, :self.num_heads]                              # [B, T, H, D]
+            k = qkv[:, :, self.num_heads: self.num_heads * 2]           # [B, T, H, D]
+            v = qkv[:, :, self.num_heads * 2:]                          # [B, T, H, D]
+
+            if cos_sin is not None:
+                cos, sin = cos_sin
+                q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+            w = self.window_size // 2
+            # flash_attn expects [B, T, H, D] in fp16
+            orig_dtype = x.dtype
+            q = q.to(torch.float16)
+            k = k.to(torch.float16)
+            v = v.to(torch.float16)
+            raw = _flash_attn_func(q, k, v, window_size=(w, w), causal=False)
+            if isinstance(raw, tuple):
+                raw = raw[0]   # FA3 returns (out, softmax_lse, ...)
+            raw = raw.to(orig_dtype)
+            attn_out = self.attn.o_proj(raw.reshape(B, T, self.num_heads * self.head_dim))
+
         if self.training and not deterministic:
             attn_out = self.drop1(attn_out)
-        x = rms_norm(
-            x + attn_out,
-            variance_epsilon=self.norm_eps,
-        )
+        x = rms_norm(x + attn_out, variance_epsilon=self.norm_eps)
         mlp_out = self.mlp(x)
         if self.training and not deterministic:
             mlp_out = self.drop2(mlp_out)
-        x = rms_norm(
-            x + mlp_out,
-            variance_epsilon=self.norm_eps,
-        )
+        x = rms_norm(x + mlp_out, variance_epsilon=self.norm_eps)
         return x
 
 
@@ -138,7 +163,7 @@ class HRMReasoningStack(nn.Module):
 
         hidden = hidden + injection   (grounds the stack in the input signal)
         for layer in layers:
-            hidden = layer(hidden)
+            hidden = layer(hidden, cos_sin=cos_sin, ...)
 
     This is exactly HRM's ReasoningModule pattern (hrm_act_v1.py line ~80).
     The injection for L-level is (z_H + audio_features), keeping L perpetually
@@ -153,11 +178,18 @@ class HRMReasoningStack(nn.Module):
         self,
         hidden: torch.Tensor,
         injection: torch.Tensor,
+        cos_sin: Optional[CosSin] = None,
         deterministic: bool = False,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden = hidden + injection
         for layer in self.layers:
-            hidden = layer(hidden, deterministic=deterministic)
+            hidden = layer(
+                hidden,
+                cos_sin=cos_sin,
+                deterministic=deterministic,
+                attention_mask=attention_mask,
+            )
         return hidden
 
 
@@ -178,17 +210,23 @@ class HRMEncoder(nn.Module):
     Q-logits + bootstrap targets during training for the Q-learning loss.
 
     Config fields (add to T5.yaml or experiment yaml):
-        use_hrm_encoder:       bool  (default False)
-        hrm_H_layers:          int   (default 3)
-        hrm_L_layers:          int   (default 3)
-        hrm_H_cycles:          int   (default 2)
-        hrm_L_cycles:          int   (default 2)
-        hrm_max_steps:         int   (default 4)
-        hrm_L_window_size:     int   (default 64)   — local attn window, L-level only
-        hrm_halt_explore_prob: float (default 0.1)
+        use_hrm_encoder:          bool  (default False)
+        hrm_H_layers:             int   (default 3)
+        hrm_L_layers:             int   (default 3)
+        hrm_H_cycles:             int   (default 2)
+        hrm_L_cycles:             int   (default 2)
+        hrm_max_steps:            int   (default 4)
+        hrm_L_window_size:        int   (default 64)   — local attn window, L-level only
+        hrm_halt_explore_prob:    float (default 0.1)
         use_recording_id_embedding: bool (default True) — hard switch to enable/disable
-        num_recordings:        int   (default 0)    — 0 disables recording embeddings
-        recording_emb_dim:     int   (default 64)
+        num_recordings:           int   (default 0)    — 0 disables recording embeddings
+        recording_emb_dim:        int   (default 64)
+
+        hrm_use_rope:             bool  (default True) — use RoPE instead of FixedEmbed
+        hrm_rope_max_len:         int   (default 2048) — upper bound for cos/sin cache
+        hrm_rope_theta:           float (default 10000.0) — RoPE base frequency
+        hrm_force_fixed_embed:    bool  (default False) — force sinusoidal even with RoPE
+        hrm_q_soft_k:             float (default 5.0)  — sharpness of soft is_easy target
     """
 
     def __init__(self, config):
@@ -211,15 +249,33 @@ class HRMEncoder(nn.Module):
         self.max_steps = getattr(config, "hrm_max_steps", 4)
         self.explore_p = getattr(config, "hrm_halt_explore_prob", 0.1)
 
-        # ── Input projection (matches Encoder.dense + Encoder.embed) ────────
+        # ── Positional encoding choice ────────────────────────────────────────
+        # hrm_use_rope=True (default): use RoPE inside attention; skip FixedEmbed
+        # hrm_use_rope=False or hrm_force_fixed_embed=True: use sinusoidal FixedEmbed
+        self.use_rope = getattr(config, "hrm_use_rope", True)
+        self.use_fixed_embed = (
+            (not self.use_rope)
+            or getattr(config, "hrm_force_fixed_embed", False)
+        )
+
+        if self.use_fixed_embed:
+            self.embed = FixedEmbed(features=emb_dim)
+
+        if self.use_rope:
+            rope_max_len = getattr(config, "hrm_rope_max_len", 2048)
+            rope_theta   = getattr(config, "hrm_rope_theta", 10000.0)
+            self.rotary_emb = RotaryEmbedding(
+                dim=head_dim,
+                max_position_embeddings=rope_max_len,
+                base=rope_theta,
+            )
+
+        # ── Input projection (matches Encoder.dense + Encoder.embed) ─────────
         self.dense    = nn.Linear(config.encoder_input_dim, emb_dim)
-        self.embed    = FixedEmbed(features=emb_dim)
         self.dropout  = nn.Dropout(dropout)
         self.input_norm = LayerNorm(emb_dim)
 
         # ── L-level: audio-grounded, local window attention ──────────────────
-        # window_size=L_window → flash_attn sliding window path in your
-        # Multi_Head_Attention (same as V1 encoder_window_size=64)
         self.L_level = HRMReasoningStack(
             nn.ModuleList([
                 HRMTransformerLayer(
@@ -231,7 +287,6 @@ class HRMEncoder(nn.Module):
         )
 
         # ── H-level: abstract planner, global attention ──────────────────────
-        # window_size=None → F.scaled_dot_product_attention (full attention)
         self.H_level = HRMReasoningStack(
             nn.ModuleList([
                 HRMTransformerLayer(
@@ -243,9 +298,6 @@ class HRMEncoder(nn.Module):
         )
 
         # ── Initial carry states ─────────────────────────────────────────────
-        # MATCHING HRM: nn.Buffer (non-trainable), std=1 (not 0.02),
-        # and using the correct truncated normal (not PyTorch's buggy version).
-        #
         self.register_buffer(
             "H_init",
             trunc_normal_init_(torch.empty(emb_dim), std=1.0),
@@ -256,18 +308,11 @@ class HRMEncoder(nn.Module):
         )
 
         # ── Q-head ───────────────────────────────────────────────────────────
-        # Reads z_H[:, 0] — position 0 acts as a CLS / global summary token.
-        # Output: [q_halt_logit, q_continue_logit] per example.
-        # Zero-weight + bias=-5 init: starts near-zero → forces exploration early.
-        # Matching HRM exactly.
         self.q_head = nn.Linear(emb_dim, 2, bias=True)
         nn.init.zeros_(self.q_head.weight)
         nn.init.constant_(self.q_head.bias, -5.0)
 
         # ── Per-recording embedding ──────────────────────────────────────────
-        # Directly analogous to HRM's puzzle_emb (CastedSparseEmbedding).
-        # audio_ids is already in your batch from dataset_Audio2Midi.py.
-        # Zero-init: model starts from unbiased baseline and learns offsets.
         self.use_recording_id_embedding = getattr(
             config, "use_recording_id_embedding", True
         )
@@ -279,7 +324,6 @@ class HRMEncoder(nn.Module):
         if self.has_recording_embedding:
             self.recording_embed = nn.Embedding(self.num_recordings, rec_dim)
             nn.init.zeros_(self.recording_embed.weight)
-            # Project rec_dim → emb_dim only if they differ
             if rec_dim != emb_dim:
                 self.recording_proj = nn.Linear(rec_dim, emb_dim, bias=False)
                 nn.init.zeros_(self.recording_proj.weight)
@@ -296,10 +340,6 @@ class HRMEncoder(nn.Module):
     def _init_carry(
         self, B: int, T: int, device: torch.device
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns (z_H, z_L) each [B, T, emb_dim], broadcast from H_init/L_init.
-        Equivalent to HRM's reset_carry() when halted=True for all examples.
-        """
         z_H = self.H_init.view(1, 1, -1).expand(B, T, -1).clone()
         z_L = self.L_init.view(1, 1, -1).expand(B, T, -1).clone()
         return z_H, z_L
@@ -310,10 +350,12 @@ class HRMEncoder(nn.Module):
 
     def _act_step(
         self,
-        z_H: torch.Tensor,          # [B, T, emb_dim] — detached on entry
-        z_L: torch.Tensor,          # [B, T, emb_dim] — detached on entry
-        audio_features: torch.Tensor,  # [B, T, emb_dim] — fixed, never changes
+        z_H: torch.Tensor,
+        z_L: torch.Tensor,
+        audio_features: torch.Tensor,
+        cos_sin: Optional[CosSin] = None,
         deterministic: bool = False,
+        encoder_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Runs H_cycles × L_cycles transformer passes with truncated BPTT.
@@ -326,17 +368,14 @@ class HRMEncoder(nn.Module):
             [with_grad] L pass (H=1, L=1) ← gradient window starts here
             [with_grad] H pass (H=1)       ← gradient window ends here
 
-        This exactly matches hrm_act_v1.py _Inner.forward() lines ~110-135.
-
         Returns:
             z_H  [B, T, emb_dim]  with gradient (from final H pass)
             z_L  [B, T, emb_dim]  with gradient (from final L pass)
-            q_halt    [B]         halt logit (positive = confident, should stop)
-            q_continue [B]        continue logit (positive = uncertain, keep going)
+            q_halt    [B]         halt logit
+            q_continue [B]        continue logit
 
         IMPORTANT: z_H and z_L returned here HAVE gradients.
         The caller MUST detach them before passing to the next ACT step.
-        See forward() for the detach pattern.
         """
         # Warm-up passes — no gradients (truncated BPTT window = 1 step)
         with torch.no_grad():
@@ -346,32 +385,41 @@ class HRMEncoder(nn.Module):
                         h == self.H_cycles - 1 and l == self.L_cycles - 1
                     )
                     if not is_last:
-                        # L receives z_H + raw audio (always grounded in input)
                         z_L = self.L_level(
                             z_L,
                             z_H + audio_features,
+                            cos_sin=cos_sin,
                             deterministic=deterministic,
+                            attention_mask=encoder_mask,
                         )
 
                 if h < self.H_cycles - 1:
-                    # H reads L's updated summary
-                    z_H = self.H_level(z_H, z_L, deterministic=deterministic)
+                    z_H = self.H_level(
+                        z_H, z_L,
+                        cos_sin=cos_sin,
+                        deterministic=deterministic,
+                        attention_mask=encoder_mask,
+                    )
 
         # Final L and H pass — gradient flows here
         z_L = self.L_level(
             z_L,
             z_H + audio_features,
+            cos_sin=cos_sin,
             deterministic=deterministic,
+            attention_mask=encoder_mask,
         )
-        z_H = self.H_level(z_H, z_L, deterministic=deterministic)
+        z_H = self.H_level(
+            z_H, z_L,
+            cos_sin=cos_sin,
+            deterministic=deterministic,
+            attention_mask=encoder_mask,
+        )
 
-        # Q-head: z_H[:, 0] as global summary token (same as HRM)
         q = self.q_head(z_H[:, 0])   # [B, 2]
         q_halt    = q[:, 0]           # [B]
         q_continue = q[:, 1]          # [B]
 
-        # NOTE: returns z_H/z_L WITH gradients.
-        # Caller must .detach() before feeding to next step.
         return z_H, z_L, q_halt, q_continue
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -380,10 +428,10 @@ class HRMEncoder(nn.Module):
 
     def forward(
         self,
-        encoder_input_tokens: torch.Tensor,       # [B, T, encoder_input_dim]
-        encoder_mask=None,                         # accepted, unused (HRM uses no mask)
+        encoder_input_tokens: torch.Tensor,
+        encoder_mask=None,
         deterministic: bool = False,
-        recording_ids: Optional[torch.Tensor] = None,  # [B] long — audio_ids_contiguous
+        recording_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[dict]]:
         """
         Returns:
@@ -397,10 +445,31 @@ class HRMEncoder(nn.Module):
         device = encoder_input_tokens.device
         deterministic_mode = bool(deterministic) or (not self.training)
 
-        # ── 1. Input projection + positional encoding ────────────────────────
-        x = self.dense(encoder_input_tokens)          # [B, T, emb_dim]
-        positions = torch.arange(T, device=device).unsqueeze(0)
-        x = x + self.embed(positions)
+        # ── Convert encoder_mask to key-validity [B, T] bool if needed ───────
+        # T5.encode() currently passes encoder_mask=None for HRMEncoder, so
+        # this conversion is a no-op in practice but makes the code correct
+        # for variable-length batches with padding.
+        attn_mask: Optional[torch.Tensor] = None
+        if encoder_mask is not None:
+            if encoder_mask.dim() == 4:
+                # [B, 1, T, T] → [B, T] key-validity
+                attn_mask = encoder_mask[:, 0, 0, :].bool()
+            elif encoder_mask.dim() == 2:
+                attn_mask = encoder_mask.bool()
+
+        # ── 1. Compute RoPE cos/sin once per forward ─────────────────────────
+        cos_sin: Optional[CosSin] = None
+        if self.use_rope and hasattr(self, "rotary_emb"):
+            cos_full, sin_full = self.rotary_emb()    # [max_len, head_dim]
+            cos_sin = (cos_full[:T], sin_full[:T])     # slice to actual seq len T
+
+        # ── 2. Input projection + optional positional encoding ───────────────
+        x = self.dense(encoder_input_tokens)           # [B, T, emb_dim]
+
+        if self.use_fixed_embed:
+            positions = torch.arange(T, device=device).unsqueeze(0)
+            x = x + self.embed(positions)
+
         x = self.input_norm(
             F.dropout(
                 x,
@@ -409,50 +478,38 @@ class HRMEncoder(nn.Module):
             )
         )
 
-        # ── 2. Per-recording embedding ───────────────────────────────────────
-        # Analogous to HRM's puzzle_emb. Zero-init means recordings start
-        # identical and diverge as the model learns recording-specific biases.
+        # ── 3. Per-recording embedding ────────────────────────────────────────
         if self.has_recording_embedding and recording_ids is not None:
             rec = self.recording_proj(
                 self.recording_embed(recording_ids)  # [B, rec_dim]
             )                                         # [B, emb_dim]
-            x = x + rec.unsqueeze(1)                 # broadcast over T
+            x = x + rec.unsqueeze(1)
 
         audio_features = x   # Fixed anchor — identical on every ACT step
 
-        # ── 3. Initialise carry ──────────────────────────────────────────────
-        # Both z_H and z_L start from their registered buffer values.
-        # No gradients yet (buffers are non-trainable; clone() gives a fresh tensor).
+        # ── 4. Initialise carry ───────────────────────────────────────────────
         z_H, z_L = self._init_carry(B, T, device)
 
-        # ── 4. ACT loop ──────────────────────────────────────────────────────
+        # ── 5. ACT loop ───────────────────────────────────────────────────────
         hrm_aux = None
 
         if deterministic_mode:
-            # ── Inference path ───────────────────────────────────────────────
-            # Always run exactly max_steps (no early halting, for batch uniformity).
-            # Matching HRM comment: "During evaluation, always use max steps,
-            # this is to guarantee the same halting steps inside a batch."
+            # ── Inference path ────────────────────────────────────────────────
             for _ in range(self.max_steps):
                 z_H, z_L, _, _ = self._act_step(
-                    z_H,
-                    z_L,
-                    audio_features,
+                    z_H, z_L, audio_features,
+                    cos_sin=cos_sin,
                     deterministic=True,
+                    encoder_mask=attn_mask,
                 )
-                # FIX: detach carry between steps.
-                # z_H/z_L from _act_step have gradients; detach before next step.
-                # (Moot in inference since torch.no_grad() wraps this, but
-                # kept explicit for clarity and safety.)
                 z_H = z_H.detach()
                 z_L = z_L.detach()
 
         else:
             # ── Training path ─────────────────────────────────────────────────
-            q_halt_list:  List[torch.Tensor] = []
-            q_cont_pairs: List[tuple]        = []
-            q_halt_last: Optional[torch.Tensor] = None
-            q_cont_last: Optional[torch.Tensor] = None
+            # Phase 1: run all steps, collect Q values — no bootstrap peek yet.
+            q_halt_list: List[torch.Tensor] = []
+            q_cont_list: List[torch.Tensor] = []
             steps_run = 0
 
             for step in range(self.max_steps):
@@ -460,42 +517,16 @@ class HRMEncoder(nn.Module):
                 steps_run = step + 1
 
                 z_H, z_L, q_halt, q_cont = self._act_step(
-                    z_H,
-                    z_L,
-                    audio_features,
+                    z_H, z_L, audio_features,
+                    cos_sin=cos_sin,
                     deterministic=False,
+                    encoder_mask=attn_mask,
                 )
-                q_halt_last = q_halt
-                q_cont_last = q_cont
                 q_halt_list.append(q_halt)
+                q_cont_list.append(q_cont)
 
-                # ── Bootstrap target for Q_continue ──────────────────────────
-                # Peek at next step's Q values to get the bootstrap target.
-                # MATCHING HRM losses.py and hrm_act_v1.py:
-                #   - non-last step: target = sigmoid(max(next_q_halt, next_q_cont))
-                #   - last step:     target = sigmoid(next_q_halt)   ← NOT None
-                # Both cases compute a target; only the formula differs.
-                with torch.no_grad():
-                    _, _, nq_halt, nq_cont = self._act_step(
-                        z_H.detach(),
-                        z_L.detach(),
-                        audio_features,
-                        deterministic=True,
-                    )
-                    if is_last:
-                        # Last step: can only halt next, so target uses q_halt only
-                        bootstrap = torch.sigmoid(nq_halt)
-                    else:
-                        # Non-last: take the best available action next step
-                        bootstrap = torch.sigmoid(torch.maximum(nq_halt, nq_cont))
-
-                q_cont_pairs.append((q_cont, bootstrap))
-
-                # ── Halting decision ──────────────────────────────────────────
                 if not is_last:
                     # Exploration: randomly require a minimum number of steps
-                    # before allowing halting. This prevents the model from
-                    # always halting at step 1 before learning anything.
                     min_steps = torch.where(
                         torch.rand(B, device=device) < self.explore_p,
                         torch.randint(2, self.max_steps + 1, (B,), device=device),
@@ -503,27 +534,48 @@ class HRMEncoder(nn.Module):
                     )
                     should_halt = (q_halt > q_cont) & ((step + 1) >= min_steps)
                     if should_halt.all():
-                        # All examples in batch are confident — stop early
                         break
-
-              
-                # a single call. Between calls, we always detach.
-                # Do not detach after the final step; keep gradient to encoded.
-                if not is_last:
+                    # Detach carry between steps (truncated BPTT).
+                    # Do NOT detach after the final step — keep gradient to encoded.
                     z_H = z_H.detach()
                     z_L = z_L.detach()
 
+            # Phase 2: build bootstrap targets post-loop (no extra forward pass
+            # for intermediate steps — reduces computation from 2×max_steps to
+            # max_steps+1 forward passes per training iteration).
+            n_steps = len(q_halt_list)
+            # One peek-ahead for the last step only
+            with torch.no_grad():
+                _, _, nq_halt_peek, _ = self._act_step(
+                    z_H.detach(), z_L.detach(), audio_features,
+                    cos_sin=cos_sin,
+                    deterministic=True,
+                    encoder_mask=attn_mask,
+                )
+                bootstrap_last = torch.sigmoid(nq_halt_peek)
+
+            q_cont_pairs: List[tuple] = []
+            for i in range(n_steps):
+                if i < n_steps - 1:
+                    # Next-step Q values are already in lists — no extra call needed
+                    nq_halt = q_halt_list[i + 1].detach()
+                    nq_cont = q_cont_list[i + 1].detach()
+                    bootstrap = torch.sigmoid(torch.maximum(nq_halt, nq_cont))
+                else:
+                    bootstrap = bootstrap_last
+                q_cont_pairs.append((q_cont_list[i], bootstrap))
+
             hrm_aux = {
-                "q_halt_list":  q_halt_list,   # List[Tensor[B]]
-                "q_cont_pairs": q_cont_pairs,  # List[(q_cont [B], bootstrap [B])]
+                "q_halt_list":  q_halt_list,
+                "q_cont_pairs": q_cont_pairs,
                 "steps_per_example": torch.full(
-                    (B,),
-                    steps_run,
-                    device=device,
-                    dtype=torch.long,
+                    (B,), steps_run, device=device, dtype=torch.long,
                 ),
-                "q_halt_last": None if q_halt_last is None else q_halt_last.detach(),
-                "q_continue_last": None if q_cont_last is None else q_cont_last.detach(),
+                "q_halt_last": q_halt_list[-1].detach() if q_halt_list else None,
+                "q_continue_last": q_cont_list[-1].detach() if q_cont_list else None,
+                # For Q-loss normalisation and soft target sharpness
+                "max_steps": self.max_steps,
+                "soft_k": float(getattr(self.config, "hrm_q_soft_k", 5.0)),
             }
 
         # z_H here has gradient from its last _act_step call (training)
@@ -535,7 +587,14 @@ class HRMEncoder(nn.Module):
                 training=self.training and (not deterministic_mode),
             )
         )
+
+        # Cast to config.dtype (e.g. bfloat16) to match what the decoder expects.
+        # Mirrors Encoder.forward: x = x.type(cfg.dtype)
+        if hasattr(self.config, "dtype") and self.config.dtype is not None:
+            encoded = encoded.to(self.config.dtype)
+
         return encoded, hrm_aux
+
 
 def compute_hrm_q_loss(
     hrm_aux: dict,
@@ -548,49 +607,60 @@ def compute_hrm_q_loss(
     Matching HRM losses.py:
         total = lm_loss + 0.5 * (q_halt_loss + q_continue_loss)
 
-    The 0.5 weight and reduction='sum' are from the original.
-    reduction='sum' is consistent with how lm_loss is summed over the batch.
+    halt target:    soft_is_easy = sigmoid(-soft_k * (per_example_loss - median))
+                    soft_k=5.0 by default; at large k this approaches the hard binary
+                    (loss < median) target from the original HRM. The soft version
+                    provides gradient signal for boundary examples.
+    continue target: bootstrapped from next step's Q values (deferred in forward).
 
-    halt target:    is_easy = (per_example_loss < batch_median)
-                    This is the AMT proxy for HRM's binary seq_is_correct.
-    continue target: bootstrap from next step's Q values (computed in forward).
+    Normalisation: divided by max_steps (not n_steps actually run), so early halting
+    does not inflate gradient magnitude.
+
+    reduction='mean': consistent per-step gradient magnitude across batch sizes and
+    step counts (original used 'sum' which coupled magnitude to batch size).
 
     Args:
         hrm_aux: dict from HRMEncoder containing
-            'q_halt_list':  List[Tensor[B]]          — one per ACT step run
-            'q_cont_pairs': List[(Tensor[B], Tensor[B])] — (logit, target)
+            'q_halt_list':  List[Tensor[B]]
+            'q_cont_pairs': List[(Tensor[B], Tensor[B])]  — (logit, target)
+            'max_steps':    int
+            'soft_k':       float
         decoder_loss_per_example: [B] per-example cross-entropy (detached)
 
     Returns:
-        scalar: 0.5 * (q_halt_loss + q_continue_loss)
-                (to be added to main CE loss: total = ce + q_loss)
+        scalar: 0.5 * (q_halt_term + q_cont_term)
     """
-    # "is_easy": below-median loss → encoder should be confident → halt
-    # Detached: Q-loss does not backprop through the decoder loss computation.
+    # Soft is_easy target: sigmoid(-k * (loss - median))
+    # Higher loss → lower is_easy (closer to 0 → continue)
+    # Lower loss  → higher is_easy (closer to 1 → halt)
+    soft_k = float(hrm_aux.get("soft_k", 5.0))
     median_loss = decoder_loss_per_example.median().detach()
-    is_easy = (decoder_loss_per_example.detach() < median_loss).float()
+    is_easy = torch.sigmoid(
+        -soft_k * (decoder_loss_per_example.detach() - median_loss)
+    )
 
     device = is_easy.device
     q_halt_loss = torch.tensor(0.0, device=device)
     q_cont_loss = torch.tensor(0.0, device=device)
     n_steps = len(hrm_aux["q_halt_list"])
+    # Normalise by max_steps so early halting does not inflate gradient magnitude
+    normalizer = max(int(hrm_aux.get("max_steps", n_steps)), 1)
 
     for q_halt in hrm_aux["q_halt_list"]:
-        # Matching HRM: reduction='sum' (consistent with lm_loss summing)
+        # reduction='mean': gradient magnitude is independent of batch size
         q_halt_loss = q_halt_loss + F.binary_cross_entropy_with_logits(
-            q_halt, is_easy, reduction="sum"
+            q_halt, is_easy, reduction="mean"
         )
 
     for q_cont, bootstrap in hrm_aux["q_cont_pairs"]:
-        # bootstrap is always a valid tensor (never None — see forward())
         q_cont_loss = q_cont_loss + F.binary_cross_entropy_with_logits(
-            q_cont, bootstrap, reduction="sum"
+            q_cont, bootstrap, reduction="mean"
         )
 
-    # Average over steps, then weight at 0.5 (matching HRM losses.py)
-    q_halt_term = 0.5 * q_halt_loss / max(n_steps, 1)
-    q_cont_term = 0.5 * q_cont_loss / max(n_steps, 1)
+    q_halt_term = 0.5 * q_halt_loss / normalizer
+    q_cont_term = 0.5 * q_cont_loss / normalizer
     q_loss_total = q_halt_term + q_cont_term
+
     if not return_components:
         return q_loss_total
 
