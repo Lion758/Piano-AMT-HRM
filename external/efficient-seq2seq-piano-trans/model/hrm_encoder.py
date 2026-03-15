@@ -114,13 +114,19 @@ class HRMTransformerLayer(nn.Module):
     ) -> torch.Tensor:
         B, T, _ = x.shape
 
+        # flash_attn requires fp16 or bf16; cast regardless of training dtype.
+        # We use float16 as the safe default; bf16 would also work.
+        orig_dtype = x.dtype
+        fa_dtype = torch.float16
+
         if self.window_size is None:
-            # ── H-level: global attention ────────────────────────────────────
-            # Delegate fully to HRMAttention which handles RoPE and flash-attn.
-            # attention_mask must be [B, T] bool (key-validity) or None.
-            attn_out = self.attn(cos_sin, x, attention_mask)
+            # ── H-level: global attention ─────────────────────────────────────
+            # hrm_layers::Attention calls flash_attn_func internally without
+            # casting, so we cast x here and restore after.
+            x_fa = x.to(fa_dtype)
+            attn_out = self.attn(cos_sin, x_fa, attention_mask).to(orig_dtype)
         else:
-            # ── L-level: local sliding-window attention ───────────────────────
+            # ── L-level: local sliding-window attention ────────────────────────
             # HRMAttention.forward does not accept window_size, so we use its
             # qkv_proj/o_proj directly and call flash_attn_func with window_size.
             qkv = self.attn.qkv_proj(x)
@@ -136,16 +142,13 @@ class HRMTransformerLayer(nn.Module):
                 q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
             w = self.window_size // 2
-            # flash_attn expects [B, T, H, D] in fp16
-            orig_dtype = x.dtype
-            q = q.to(torch.float16)
-            k = k.to(torch.float16)
-            v = v.to(torch.float16)
+            q = q.to(fa_dtype)
+            k = k.to(fa_dtype)
+            v = v.to(fa_dtype)
             raw = _flash_attn_func(q, k, v, window_size=(w, w), causal=False)
             if isinstance(raw, tuple):
                 raw = raw[0]   # FA3 returns (out, softmax_lse, ...)
-            raw = raw.to(orig_dtype)
-            attn_out = self.attn.o_proj(raw.reshape(B, T, self.num_heads * self.head_dim))
+            attn_out = self.attn.o_proj(raw.reshape(B, T, self.num_heads * self.head_dim)).to(orig_dtype)
 
         if self.training and not deterministic:
             attn_out = self.drop1(attn_out)
