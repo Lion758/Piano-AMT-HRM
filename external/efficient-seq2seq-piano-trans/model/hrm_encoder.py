@@ -28,6 +28,82 @@ from model.layers.hrm_layers import (
 )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Frequency-Aware Input Stem  (Change 1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FrequencyAwareStem(nn.Module):
+    """
+    Processes mel-spectrogram along the frequency axis before temporal attention.
+
+    For each time frame, applies a small 1D conv stack across the mel bins to
+    detect local spectral peaks and harmonic patterns, then projects to emb_dim.
+
+    A gated residual from the original dense path ensures backward compatibility:
+        output = gate * conv_path + (1 - gate) * dense_path
+    Gate is initialized to 0.0 so the module starts as the plain dense projection.
+
+    Input:  [B, T, input_dim]  (mel bins)
+    Output: [B, T, emb_dim]
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        emb_dim: int,
+        stem_channels: int = 64,
+    ):
+        super().__init__()
+        # Learned frequency positional embedding — tells the model which mel bin is which
+        self.freq_pos_emb = nn.Parameter(torch.zeros(1, 1, input_dim))
+
+        # Depthwise-separable 1D conv stack along frequency axis
+        # Kernel sizes chosen to capture local peaks (5), ~semitone neighborhoods (13), refinement (3)
+        self.conv_stack = nn.Sequential(
+            # Layer 1: expand to stem_channels
+            nn.Conv1d(1, stem_channels, kernel_size=5, padding=2),
+            nn.GELU(),
+            # Layer 2: capture wider harmonic relationships (depthwise + pointwise)
+            nn.Conv1d(stem_channels, stem_channels, kernel_size=13, padding=6, groups=stem_channels),
+            nn.Conv1d(stem_channels, stem_channels, kernel_size=1),
+            nn.GELU(),
+            # Layer 3: refine (depthwise + pointwise)
+            nn.Conv1d(stem_channels, stem_channels, kernel_size=3, padding=1, groups=stem_channels),
+            nn.Conv1d(stem_channels, stem_channels, kernel_size=1),
+            nn.GELU(),
+        )
+        # Reduce channels back to 1 to get [B*T, 1, input_dim], then project
+        self.channel_reduce = nn.Conv1d(stem_channels, 1, kernel_size=1)
+        self.conv_proj = nn.Linear(input_dim, emb_dim)
+
+        # Dense path (original projection)
+        self.dense = nn.Linear(input_dim, emb_dim)
+
+        # Gated residual: sigmoid(-5) ≈ 0.007 → conv path nearly off at init
+        self.gate_alpha = nn.Parameter(torch.tensor(-5.0))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [B, T, input_dim]"""
+        B, T, D = x.shape
+
+        # Dense path (original behavior)
+        dense_out = self.dense(x)  # [B, T, emb_dim]
+
+        # Conv path: process frequency axis per frame
+        x_freq = x + self.freq_pos_emb  # [B, T, D]
+        # Reshape to [B*T, 1, D] for 1D conv along frequency
+        x_freq = x_freq.reshape(B * T, 1, D)
+        conv_out = self.conv_stack(x_freq)    # [B*T, stem_channels, D]
+        conv_out = self.channel_reduce(conv_out)  # [B*T, 1, D]
+        conv_out = conv_out.squeeze(1)        # [B*T, D]
+        conv_out = conv_out.reshape(B, T, D)  # [B, T, D]
+        conv_out = self.conv_proj(conv_out)   # [B, T, emb_dim]
+
+        # Gated combination
+        gate = torch.sigmoid(self.gate_alpha)
+        return (1.0 - gate) * dense_out + gate * conv_out
+
+
 def trunc_normal_init_(
     tensor: torch.Tensor,
     std: float = 1.0,
@@ -230,6 +306,14 @@ class HRMEncoder(nn.Module):
         hrm_rope_theta:           float (default 10000.0) — RoPE base frequency
         hrm_force_fixed_embed:    bool  (default False) — force sinusoidal even with RoPE
         hrm_q_soft_k:             float (default 5.0)  — sharpness of soft is_easy target
+
+        # ── Pitch accuracy improvements (all default False for backward compat) ──
+        hrm_use_freq_stem:        bool  (default False) — frequency-aware input stem
+        hrm_freq_stem_channels:   int   (default 64)    — conv channels in freq stem
+        hrm_content_init:         bool  (default False) — content-conditioned carry init
+        hrm_injection_gate:       bool  (default False) — gated audio injection
+        hrm_pooled_qhead:         bool  (default False) — sequence-wide Q-head pooling
+        hrm_output_adapter:       bool  (default False) — output bottleneck adapter
     """
 
     def __init__(self, config):
@@ -274,7 +358,17 @@ class HRMEncoder(nn.Module):
             )
 
         # ── Input projection (matches Encoder.dense + Encoder.embed) ─────────
-        self.dense    = nn.Linear(config.encoder_input_dim, emb_dim)
+        # Change 1: Frequency-Aware Input Stem
+        self.use_freq_stem = getattr(config, "hrm_use_freq_stem", False)
+        if self.use_freq_stem:
+            stem_channels = getattr(config, "hrm_freq_stem_channels", 64)
+            self.freq_stem = FrequencyAwareStem(
+                input_dim=config.encoder_input_dim,
+                emb_dim=emb_dim,
+                stem_channels=stem_channels,
+            )
+        else:
+            self.dense = nn.Linear(config.encoder_input_dim, emb_dim)
         self.dropout  = nn.Dropout(dropout)
         self.input_norm = LayerNorm(emb_dim)
 
@@ -301,6 +395,17 @@ class HRMEncoder(nn.Module):
         )
 
         # ── Initial carry states ─────────────────────────────────────────────
+        # Change 2: Content-conditioned carry initialization
+        self.use_content_init = getattr(config, "hrm_content_init", False)
+        if self.use_content_init:
+            self.H_init_proj = nn.Linear(emb_dim, emb_dim, bias=True)
+            self.L_init_proj = nn.Linear(emb_dim, emb_dim, bias=True)
+            # Identity init so initial behavior matches the old static path
+            nn.init.eye_(self.H_init_proj.weight)
+            nn.init.zeros_(self.H_init_proj.bias)
+            nn.init.eye_(self.L_init_proj.weight)
+            nn.init.zeros_(self.L_init_proj.bias)
+        # Static fallback (always kept for backward compat / when content_init=False)
         self.register_buffer(
             "H_init",
             trunc_normal_init_(torch.empty(emb_dim), std=1.0),
@@ -311,9 +416,17 @@ class HRMEncoder(nn.Module):
         )
 
         # ── Q-head ───────────────────────────────────────────────────────────
+        # Change 4: Sequence-wide Q-head (pooled)
+        self.use_pooled_qhead = getattr(config, "hrm_pooled_qhead", False)
         self.q_head = nn.Linear(emb_dim, 2, bias=True)
         nn.init.zeros_(self.q_head.weight)
         nn.init.constant_(self.q_head.bias, -5.0)
+
+        # ── Change 3: Gated audio injection ──────────────────────────────────
+        self.use_injection_gate = getattr(config, "hrm_injection_gate", False)
+        if self.use_injection_gate:
+            # sigmoid(3.0) ≈ 0.95 → near pass-through at init
+            self.injection_alpha = nn.Parameter(torch.tensor(3.0))
 
         # ── Per-recording embedding ──────────────────────────────────────────
         self.use_recording_id_embedding = getattr(
@@ -336,15 +449,37 @@ class HRMEncoder(nn.Module):
         # ── Output norm (matches Encoder.layer_norm) ─────────────────────────
         self.layer_norm = LayerNorm(emb_dim)
 
+        # ── Change 5: Output adapter ─────────────────────────────────────────
+        self.use_output_adapter = getattr(config, "hrm_output_adapter", False)
+        if self.use_output_adapter:
+            adapter_dim = emb_dim // 4  # 128 for emb_dim=512
+            self.output_adapter = nn.Sequential(
+                nn.Linear(emb_dim, adapter_dim),
+                nn.GELU(),
+                nn.Linear(adapter_dim, emb_dim),
+            )
+            # Zero-init output projection → identity residual at start
+            nn.init.zeros_(self.output_adapter[-1].weight)
+            nn.init.zeros_(self.output_adapter[-1].bias)
+
     # ─────────────────────────────────────────────────────────────────────────
     # Carry initialisation
     # ─────────────────────────────────────────────────────────────────────────
 
     def _init_carry(
-        self, B: int, T: int, device: torch.device
+        self,
+        B: int,
+        T: int,
+        device: torch.device,
+        audio_features: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        z_H = self.H_init.view(1, 1, -1).expand(B, T, -1).clone()
-        z_L = self.L_init.view(1, 1, -1).expand(B, T, -1).clone()
+        # Change 2: content-conditioned carry initialization
+        if self.use_content_init and audio_features is not None:
+            z_H = self.H_init_proj(audio_features)  # [B, T, emb_dim]
+            z_L = self.L_init_proj(audio_features)   # [B, T, emb_dim]
+        else:
+            z_H = self.H_init.view(1, 1, -1).expand(B, T, -1).clone()
+            z_L = self.L_init.view(1, 1, -1).expand(B, T, -1).clone()
         return z_H, z_L
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -380,6 +515,13 @@ class HRMEncoder(nn.Module):
         IMPORTANT: z_H and z_L returned here HAVE gradients.
         The caller MUST detach them before passing to the next ACT step.
         """
+        # Change 3: gated audio injection
+        if self.use_injection_gate:
+            gate = torch.sigmoid(self.injection_alpha)
+            l_injection = z_H + gate * audio_features
+        else:
+            l_injection = z_H + audio_features
+
         # Warm-up passes — no gradients (truncated BPTT window = 1 step)
         with torch.no_grad():
             for h in range(self.H_cycles):
@@ -390,7 +532,7 @@ class HRMEncoder(nn.Module):
                     if not is_last:
                         z_L = self.L_level(
                             z_L,
-                            z_H + audio_features,
+                            l_injection,
                             cos_sin=cos_sin,
                             deterministic=deterministic,
                             attention_mask=encoder_mask,
@@ -403,11 +545,22 @@ class HRMEncoder(nn.Module):
                         deterministic=deterministic,
                         attention_mask=encoder_mask,
                     )
+                    # Recompute injection after H update
+                    if self.use_injection_gate:
+                        l_injection = z_H + gate * audio_features
+                    else:
+                        l_injection = z_H + audio_features
+
+        # Recompute injection for final pass (z_H may have changed in warm-up)
+        if self.use_injection_gate:
+            l_injection = z_H + gate * audio_features
+        else:
+            l_injection = z_H + audio_features
 
         # Final L and H pass — gradient flows here
         z_L = self.L_level(
             z_L,
-            z_H + audio_features,
+            l_injection,
             cos_sin=cos_sin,
             deterministic=deterministic,
             attention_mask=encoder_mask,
@@ -419,9 +572,18 @@ class HRMEncoder(nn.Module):
             attention_mask=encoder_mask,
         )
 
-        q = self.q_head(z_H[:, 0])   # [B, 2]
-        q_halt    = q[:, 0]           # [B]
-        q_continue = q[:, 1]          # [B]
+        # Change 4: sequence-wide Q-head with pooling
+        if self.use_pooled_qhead:
+            if encoder_mask is not None:
+                mask_float = encoder_mask.float().unsqueeze(-1)  # [B, T, 1]
+                pooled = (z_H * mask_float).sum(1) / mask_float.sum(1).clamp_min(1)
+            else:
+                pooled = z_H.mean(dim=1)  # [B, emb_dim]
+            q = self.q_head(pooled)       # [B, 2]
+        else:
+            q = self.q_head(z_H[:, 0])    # [B, 2]
+        q_halt    = q[:, 0]               # [B]
+        q_continue = q[:, 1]              # [B]
 
         return z_H, z_L, q_halt, q_continue
 
@@ -467,7 +629,11 @@ class HRMEncoder(nn.Module):
             cos_sin = (cos_full[:T], sin_full[:T])     # slice to actual seq len T
 
         # ── 2. Input projection + optional positional encoding ───────────────
-        x = self.dense(encoder_input_tokens)           # [B, T, emb_dim]
+        # Change 1: frequency-aware stem or plain dense
+        if self.use_freq_stem:
+            x = self.freq_stem(encoder_input_tokens)   # [B, T, emb_dim]
+        else:
+            x = self.dense(encoder_input_tokens)       # [B, T, emb_dim]
 
         if self.use_fixed_embed:
             positions = torch.arange(T, device=device).unsqueeze(0)
@@ -491,7 +657,8 @@ class HRMEncoder(nn.Module):
         audio_features = x   # Fixed anchor — identical on every ACT step
 
         # ── 4. Initialise carry ───────────────────────────────────────────────
-        z_H, z_L = self._init_carry(B, T, device)
+        # Change 2: pass audio_features for content-conditioned init
+        z_H, z_L = self._init_carry(B, T, device, audio_features=audio_features)
 
         # ── 5. ACT loop ───────────────────────────────────────────────────────
         hrm_aux = None
@@ -590,6 +757,10 @@ class HRMEncoder(nn.Module):
                 training=self.training and (not deterministic_mode),
             )
         )
+
+        # Change 5: output adapter — zero-init bottleneck for decoder alignment
+        if self.use_output_adapter:
+            encoded = encoded + self.output_adapter(encoded)
 
         # Cast to config.dtype (e.g. bfloat16) to match what the decoder expects.
         # Mirrors Encoder.forward: x = x.type(cfg.dtype)

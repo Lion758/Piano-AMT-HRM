@@ -43,6 +43,24 @@ model:
   # Increase for a harder target; set to ~50 to recover near-binary behaviour.
   hrm_q_soft_k: 5.0
 
+  # ── Pitch accuracy improvements ──────────────────────────────────────
+  # All default false for backward compat. Enable for fine-tuning.
+  # Change 1: Frequency-aware input stem — conv stack along mel bins
+  hrm_use_freq_stem: false
+  hrm_freq_stem_channels: 64     # conv channels in frequency stem
+
+  # Change 2: Content-conditioned carry init — identity-init projections
+  hrm_content_init: false
+
+  # Change 3: Gated audio injection — learnable decay for later ACT steps
+  hrm_injection_gate: false
+
+  # Change 4: Sequence-wide Q-head — mean-pool instead of position 0
+  hrm_pooled_qhead: false
+
+  # Change 5: Output adapter — zero-init bottleneck for decoder alignment
+  hrm_output_adapter: false
+
 training:
   notes: "V5_HRM_encoder_batch26_SWIGLUetc_RoPE"
   # Q-loss weight. After switching to reduction='mean' (from 'sum') the

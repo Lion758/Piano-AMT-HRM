@@ -172,7 +172,7 @@ cython_debug/
 
 external/efficient-seq2seq-piano-trans/dataset
 
-
+.claude/
 external/HRM/data
 separated/
 audio_output/

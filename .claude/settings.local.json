@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/Jnnei/OneDrive/Desktop/Piano-AMT-HRM/external/efficient-seq2seq-piano-trans -name *sweep* -o -name *grid*)",
+      "Bash(ls -la /c/Users/Jnnei/OneDrive/Desktop/Piano-AMT-HRM/external/efficient-seq2seq-piano-trans/config/experiment*.yaml)",
+      "Bash(python -c \":*)"
+    ]
+  }
+}
