@@ -17,6 +17,8 @@ from model.T5 import Transformer
 from model.HPPNet import HPPNet
 from model.GPT import GPT
 from model.trm_encoder import compute_trm_halt_loss
+from model.trm_encoder_v2 import TrmEncoderV2, compute_trm_v2_halt_loss, compute_trm_v2_aux_loss
+from model.layers.ema import EMAHelper
 
 from data.dataset_Audio2Midi import Audio2Midi_Dataset
 import pytorch_lightning as pl
@@ -85,6 +87,13 @@ class MT3Trainer(pl.LightningModule):
         self.last_time_stamp = std_time.time()
         self.validation_step_count = 0
         self._trm_training_warning_emitted = False
+
+        # EMA support (used with TrmEncoderV2)
+        self._ema_helper = None
+        if getattr(config.training, "use_ema", False):
+            ema_rate = float(getattr(config.training, "ema_rate", 0.999))
+            self._ema_helper = EMAHelper(mu=ema_rate)
+            # Registration deferred to on_train_start when model is on device
         self.criterion_list = []
         for loss_name, [outputs_name, targets_name, criterion_module] in config.training.losses.items():
             criterion_class_name = criterion_module.split(".")[-1]
@@ -243,8 +252,51 @@ class MT3Trainer(pl.LightningModule):
                     total_loss += loss
             loss_dict["loss"] = total_loss
 
-        # TRM halting loss (only when using the recursive encoder path)
-        if "trm_aux" in outputs_dict and outputs_dict["trm_aux"] is not None:
+        # TRM v2 losses (TrmEncoderV2 deep supervision + halt)
+        if "trm_aux" in outputs_dict and outputs_dict["trm_aux"] is not None and "all_aux_logits" in outputs_dict["trm_aux"]:
+            trm_aux = outputs_dict["trm_aux"]
+            all_aux_logits = trm_aux["all_aux_logits"]
+            all_halt_logits = trm_aux["all_halt_logits"]
+            actual_sup_steps = trm_aux.get("actual_sup_steps", len(all_aux_logits))
+
+            # --- Auxiliary head deep supervision loss ---
+            aux_loss_weight = float(getattr(self.config.training, "trm_aux_loss_weight", 0.1))
+            aux_warmup = int(getattr(self.config.training, "trm_aux_loss_warmup_steps", 1000))
+            if n_steps < aux_warmup:
+                aux_loss_weight = aux_loss_weight * (n_steps / max(aux_warmup, 1))
+
+            has_frame_index = decoder_targets_frame_index is not None
+            aux_loss, per_step_correct = compute_trm_v2_aux_loss(
+                all_aux_logits,
+                targets,
+                targets_mask,
+                decoder_targets_frame_index=decoder_targets_frame_index if has_frame_index else None,
+            )
+            aux_loss_scaled = aux_loss_weight * aux_loss
+            loss_dict["trm_v2_aux_loss"] = aux_loss.detach()
+            loss_dict["trm_v2_aux_loss_scaled"] = aux_loss_scaled.detach()
+            loss_dict["loss"] = loss_dict["loss"] + aux_loss_scaled
+
+            # --- Halt Q-learning loss (toggleable) ---
+            halt_loss_weight = float(getattr(self.config.training, "trm_halt_loss_weight", 0.05))
+            use_q_halt = trm_aux.get("use_q_halt", False)
+            if use_q_halt and any(h is not None for h in all_halt_logits):
+                halt_loss = compute_trm_v2_halt_loss(all_halt_logits, per_step_correct)
+                halt_loss_scaled = halt_loss_weight * halt_loss
+                loss_dict["trm_v2_halt_loss"] = halt_loss.detach()
+                loss_dict["trm_v2_halt_loss_scaled"] = halt_loss_scaled.detach()
+                loss_dict["loss"] = loss_dict["loss"] + halt_loss_scaled
+
+                # Log last halt logit
+                last_halt = all_halt_logits[-1]
+                if last_halt is not None:
+                    loss_dict["trm_v2_halt_logit_mean"] = last_halt.detach().mean()
+
+            loss_dict["trm_v2_actual_sup_steps"] = torch.tensor(float(actual_sup_steps), device=targets.device)
+            self.log_time_event("loss_cal_done")
+
+        # TRM v1 halting loss (only when using the old TrmEncoder path)
+        elif "trm_aux" in outputs_dict and outputs_dict["trm_aux"] is not None and "halt_logits" in outputs_dict["trm_aux"]:
             # Use the decoder cross-entropy as a proxy for per-example difficulty.
             with torch.no_grad():
                 decoder_outputs_for_q = outputs_dict["decoder_outputs"].detach()  # [B, T, vocab]
@@ -383,6 +435,12 @@ class MT3Trainer(pl.LightningModule):
         metrics_dict.update(metrict_ret)
     
 
+    def on_train_start(self):
+        """Register EMA after model is on device."""
+        if self._ema_helper is not None and not self._ema_helper.shadow:
+            self._ema_helper.register(self.model)
+        return super().on_train_start()
+
     def training_step(self, batch, batch_idx, dataloader_idx = None): # This batch_indx will be reseted to 0 in a new epoch.
         cal_metrics = False
         if self.global_rank == 0 and self.global_step % self.config.training.cal_metrics_every_n_steps == 0:
@@ -397,6 +455,10 @@ class MT3Trainer(pl.LightningModule):
                     os.system("mkdir -p %s"%cpt_dir)
                     checkpoint_path = cpt_dir + '/steps_' + str(self.global_step)+'.ckpt'
                     torch.save(self.model.state_dict(), checkpoint_path)
+                    # Save EMA weights alongside if available
+                    if self._ema_helper is not None and self._ema_helper.shadow:
+                        ema_path = checkpoint_path.replace('.ckpt', '_ema.ckpt')
+                        torch.save(self._ema_helper.state_dict(), ema_path)
                     if hasattr(self, "previous_cpt_path"):
                         if self.prev_checkpoint_step in [10000, 50000, 100000, 200000]:
                             pass
@@ -421,9 +483,14 @@ class MT3Trainer(pl.LightningModule):
                     log_memory_usage.log_gpu_memory_usage(self)
 
         self.log_time_event("forward_step_done")
-        
+
         return loss_dict["loss"]
-    
+
+    def on_before_zero_grad(self, optimizer):
+        """Update EMA weights after optimizer step, before zero_grad."""
+        if self._ema_helper is not None:
+            self._ema_helper.update(self.model)
+
     @rank_zero_only
     def on_train_epoch_end(self,):
         # Save checkpoint.
@@ -437,7 +504,11 @@ class MT3Trainer(pl.LightningModule):
         
     @torch.no_grad()
     def on_validation_start(self):
-        
+        # Swap to EMA weights for validation if available
+        if self._ema_helper is not None and self._ema_helper.shadow:
+            self._ema_original_state = {k: v.clone() for k, v in self.model.state_dict().items() if k in self._ema_helper.shadow}
+            self._ema_helper.ema(self.model)
+
         # Manually call test_steps (online testing).
         if self.global_step > 1 and self.config.training.online_testing: # skip the validation step in the init epoch.
             self.test_outputs_dict = defaultdict(list)
@@ -451,6 +522,15 @@ class MT3Trainer(pl.LightningModule):
         
         return super().on_validation_start()
     
+    def on_validation_end(self):
+        """Restore original (non-EMA) weights after validation."""
+        if hasattr(self, "_ema_original_state") and self._ema_original_state:
+            for name, param in self.model.named_parameters():
+                if name in self._ema_original_state:
+                    param.data.copy_(self._ema_original_state[name])
+            self._ema_original_state = {}
+        return super().on_validation_end()
+
     @torch.no_grad()
     def validation_step(self, batch, batch_idx, dataloader_idx = None):
         outputs_dict, targets_dict, loss_dict, metrics_dict = self.forward_step(batch, batch_idx, "validation", cal_metrics=True)

@@ -10,6 +10,7 @@ from model.Encoder import Encoder
 from model.Decoder import Decoder, CompoundDecoder
 from model.hrm_encoder import HRMEncoder
 from model.trm_encoder import TrmEncoder
+from model.trm_encoder_v2 import TrmEncoderV2
 from model.Layers import *
 from model.Mask import *
 from model.HPPNet import HPPNet
@@ -33,16 +34,18 @@ class Transformer(nn.Module):
         # select encoder
         encoder_name = getattr(config, "encoder_name", None)
         use_hrm_flag = getattr(config, "use_hrm_encoder", None)
-        is_recursive_encoder_name = encoder_name in ("HrmEncoder", "TrmEncoder")
+        is_recursive_encoder_name = encoder_name in ("HrmEncoder", "TrmEncoder", "TrmEncoderV2")
         if use_hrm_flag is not None and bool(use_hrm_flag) != is_recursive_encoder_name:
             raise ValueError(
                 "Conflicting recursive encoder config: "
                 f"encoder_name={encoder_name}, use_hrm_encoder={use_hrm_flag}. "
-                "Set encoder_name to 'TrmEncoder' or 'HrmEncoder' when the legacy "
-                "use_hrm_encoder flag is true, or disable both."
+                "Set encoder_name to 'TrmEncoder', 'TrmEncoderV2', or 'HrmEncoder' "
+                "when the legacy use_hrm_encoder flag is true, or disable both."
             )
 
-        if encoder_name == "TrmEncoder":
+        if encoder_name == "TrmEncoderV2":
+            self.encoder = TrmEncoderV2(config)
+        elif encoder_name == "TrmEncoder":
             self.encoder = TrmEncoder(config)
         elif encoder_name == "HrmEncoder":
             self.encoder = HRMEncoder(config)
@@ -85,13 +88,13 @@ class Transformer(nn.Module):
             f"encoder_class={self.encoder.__class__.__name__},",
             f"use_hrm_encoder={getattr(self.config, 'use_hrm_encoder', None)}",
         )
-        if isinstance(self.encoder, TrmEncoder):
-            assert self.config.encoder_name in ("HrmEncoder", "TrmEncoder")
-        
+        if isinstance(self.encoder, (TrmEncoder, TrmEncoderV2)):
+            assert self.config.encoder_name in ("HrmEncoder", "TrmEncoder", "TrmEncoderV2")
+
     def encode(
-            self, 
-            encoder_input_tokens, 
-            encoder_segment_ids=None, 
+            self,
+            encoder_input_tokens,
+            encoder_segment_ids=None,
             enable_dropout=True,
             recording_ids=None
             ):
@@ -103,6 +106,44 @@ class Transformer(nn.Module):
         assert encoder_input_tokens.ndim == 3  # (batch, length, depth)
         self._log_encoder_contract_once()
 
+        # --- TrmEncoderV2: deep supervision loop ---
+        if isinstance(self.encoder, TrmEncoderV2):
+            n_sup = max(1, self.encoder.n_sup if (enable_dropout and self.training) else 1)
+            carry = None
+            all_aux_logits = []
+            all_halt_logits = []
+            _sup_step = 0
+
+            for _sup_step in range(n_sup):
+                encoder_outputs, trm_aux = self.encoder(
+                    encoder_input_tokens,
+                    deterministic=not enable_dropout,
+                    recording_ids=recording_ids,
+                    carry=carry,
+                )
+                carry = (trm_aux["carry_z_H"], trm_aux["carry_z_L"])
+                all_aux_logits.append(trm_aux.get("aux_logits"))
+                all_halt_logits.append(trm_aux.get("halt_logit"))
+
+                # ACT early stopping during training (when Q-halt enabled)
+                if self.training and trm_aux.get("use_q_halt") and trm_aux.get("halt_logit") is not None:
+                    halt_logit = trm_aux["halt_logit"]
+                    halted = halt_logit > 0  # [B]
+                    # Exploration: sometimes force continuation
+                    explore_prob = self.encoder.halt_exploration_prob
+                    if explore_prob > 0 and _sup_step < n_sup - 1:
+                        explore = torch.rand_like(halt_logit) < explore_prob
+                        halted = halted & ~explore
+                    if halted.all() and (_sup_step + 1) >= 2:
+                        break
+
+            # Bundle all supervision step info into trm_aux
+            trm_aux["all_aux_logits"] = all_aux_logits
+            trm_aux["all_halt_logits"] = all_halt_logits
+            trm_aux["actual_sup_steps"] = _sup_step + 1
+            return encoder_outputs, trm_aux
+
+        # --- TrmEncoder (v1): single forward ---
         if isinstance(self.encoder, TrmEncoder):
             encoder_outputs, encoder_aux = self.encoder(
                 encoder_input_tokens,
@@ -110,14 +151,15 @@ class Transformer(nn.Module):
                 recording_ids=recording_ids,
             )
             return encoder_outputs, encoder_aux
-    
+
+        # --- Standard encoders ---
         encoder_mask = make_attention_mask(
             torch.ones(encoder_input_tokens.shape[:-1]),
             torch.ones(encoder_input_tokens.shape[:-1]),
             dtype=self.config.dtype
         )
 
-    
+
         if encoder_segment_ids is not None:
             encoder_mask = combine_masks(
                 encoder_mask,
@@ -128,9 +170,9 @@ class Transformer(nn.Module):
                     dtype=self.config.dtype
                 )
             )
-        
+
         encoder_mask = encoder_mask.to(encoder_input_tokens.device)
-            
+
         if self.config.froze_encoder:
             with torch.no_grad():
                 encoder_outputs = self.encoder(encoder_input_tokens, encoder_mask, deterministic=not enable_dropout)
