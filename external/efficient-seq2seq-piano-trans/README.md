@@ -81,9 +81,29 @@ python train.py --config-name=$config\
 
 - Config files is managed with [hydra](http://hydra.cc/).
 
-### HRM refiner configuration
+### TRM encoder configuration
 
-When `model.use_hrm_refiner=true`, the HRM encoder adapter can be configured via the
+When `model.encoder_name="TrmEncoder"`, the canonical recursive encoder uses a
+single shared network with repeated refinement steps. The primary knobs are:
+
+- `model.trm_layers` (default: 2)
+- `model.trm_recursions` (default: 6)
+- `model.trm_local_window_size` (default: 64)
+- `model.trm_use_rope` (default: true)
+- `model.trm_rope_max_len` (default: 2048)
+- `model.trm_rope_theta` (default: 10000.0)
+- `model.trm_min_recursions` (default: 2)
+- `model.trm_halt_threshold` (default: 0.5)
+- `model.trm_halt_target_sharpness` (default: 4.0)
+- `training.trm_halt_loss_weight` (default: 0.05)
+
+`encoder_name="HrmEncoder"` is still accepted as a deprecated alias to
+`TrmEncoder`, but a fresh training run is required because the architecture and
+auxiliary halting loss changed.
+
+### Legacy HRM refiner configuration
+
+When `model.use_hrm_refiner=true`, the legacy HRM refiner path can be configured via the
 following knobs in the model config (defaults aligned with `external/HRM/config/arch/hrm_v1.yaml`):
 
 - `model.hrm_H_cycles` (default: 2)
@@ -125,8 +145,6 @@ python inference.py model.checkpoint_path="$checkpoint_path" audio_path="'audio/
 
 - rlax59us' [MT3-pytorch](https://github.com/rlax59us/MT3-pytorch)
 - Official [PyTorch Lightning](https://github.com/PyTorchLightning/pytorch-lightning)
-
-
 
 
 

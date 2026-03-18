@@ -9,6 +9,7 @@ import torch.nn.functional as Functional
 from model.Encoder import Encoder
 from model.Decoder import Decoder, CompoundDecoder
 from model.hrm_encoder import HRMEncoder
+from model.trm_encoder import TrmEncoder
 from model.Layers import *
 from model.Mask import *
 from model.HPPNet import HPPNet
@@ -31,17 +32,19 @@ class Transformer(nn.Module):
 
         # select encoder
         encoder_name = getattr(config, "encoder_name", None)
-        use_hrm_flag = bool(getattr(config, "use_hrm_encoder", encoder_name == "HrmEncoder"))
-        is_hrm_encoder_name = encoder_name == "HrmEncoder"
-        if use_hrm_flag != is_hrm_encoder_name:
+        use_hrm_flag = getattr(config, "use_hrm_encoder", None)
+        is_recursive_encoder_name = encoder_name in ("HrmEncoder", "TrmEncoder")
+        if use_hrm_flag is not None and bool(use_hrm_flag) != is_recursive_encoder_name:
             raise ValueError(
-                "Conflicting HRM encoder config: "
+                "Conflicting recursive encoder config: "
                 f"encoder_name={encoder_name}, use_hrm_encoder={use_hrm_flag}. "
-                "Set encoder_name='HrmEncoder' and use_hrm_encoder=true together, "
-                "or disable both."
+                "Set encoder_name to 'TrmEncoder' or 'HrmEncoder' when the legacy "
+                "use_hrm_encoder flag is true, or disable both."
             )
 
-        if is_hrm_encoder_name:
+        if encoder_name == "TrmEncoder":
+            self.encoder = TrmEncoder(config)
+        elif encoder_name == "HrmEncoder":
             self.encoder = HRMEncoder(config)
         elif encoder_name == "TransformerEncoder":
             self.encoder = Encoder(config)
@@ -82,8 +85,8 @@ class Transformer(nn.Module):
             f"encoder_class={self.encoder.__class__.__name__},",
             f"use_hrm_encoder={getattr(self.config, 'use_hrm_encoder', None)}",
         )
-        if isinstance(self.encoder, HRMEncoder):
-            assert self.config.encoder_name == "HrmEncoder"
+        if isinstance(self.encoder, TrmEncoder):
+            assert self.config.encoder_name in ("HrmEncoder", "TrmEncoder")
         
     def encode(
             self, 
@@ -95,18 +98,18 @@ class Transformer(nn.Module):
         """
         Returns:
             encoder_outputs [B, T, emb_dim]
-            hrm_aux dict | None
+            encoder_aux dict | None
         """
         assert encoder_input_tokens.ndim == 3  # (batch, length, depth)
         self._log_encoder_contract_once()
 
-        if isinstance(self.encoder, HRMEncoder):
-            encoder_outputs, hrm_aux = self.encoder(
+        if isinstance(self.encoder, TrmEncoder):
+            encoder_outputs, encoder_aux = self.encoder(
                 encoder_input_tokens,
                 deterministic=not enable_dropout,
                 recording_ids=recording_ids,
             )
-            return encoder_outputs, hrm_aux
+            return encoder_outputs, encoder_aux
     
         encoder_mask = make_attention_mask(
             torch.ones(encoder_input_tokens.shape[:-1]),
@@ -259,9 +262,9 @@ class Transformer(nn.Module):
         if decoder_input_tokens is None:
             decoder_input_tokens = self._shift_right(decoder_target_tokens, shift_step=1)
             
-        encoder_outputs, hrm_aux = self.encode(encoder_input_tokens, encoder_segment_ids=encoder_segment_ids, enable_dropout=enable_dropout, recording_ids=recording_ids)
-        if hrm_aux is not None:
-            res_dict['hrm_aux'] = hrm_aux   # ← carry through 
+        encoder_outputs, encoder_aux = self.encode(encoder_input_tokens, encoder_segment_ids=encoder_segment_ids, enable_dropout=enable_dropout, recording_ids=recording_ids)
+        if encoder_aux is not None:
+            res_dict["trm_aux"] = encoder_aux
 
         decoder_output_dict = self.decode(encoder_outputs, encoder_outputs, decoder_input_tokens, decoder_target_tokens, encoder_segment_ids=encoder_segment_ids, decoder_segment_ids=decoder_segment_ids, decoder_positions=decoder_positions, enable_dropout=enable_dropout, decode=decode, 
             decoder_targets_frame_index=decoder_targets_frame_index,

@@ -1,70 +1,34 @@
 # config/experiment_T5_V5_HRM.yaml
+# Legacy file name retained for compatibility; the active encoder is now TRM-style.
 defaults:
-  - experiment_T5_V4_HierarchyPool   # inherit everything from V4
+  - experiment_T5_V4_HierarchyPool
 
 model:
-  # ── Replace TransformerEncoder with HRMEncoder ──────────────────────────
-  use_hrm_encoder: true
+  # Canonical recursive encoder.
+  encoder_name: "TrmEncoder"
 
-  # ── Rotary Positional Encoding (RoPE) ────────────────────────────────────
-  # Replaces sinusoidal FixedEmbed. Applied inside attention to Q and K.
-  # Requires a fresh training run (attention weight shapes change).
-  hrm_use_rope: true
-  hrm_rope_max_len: 2048      # upper bound for cos/sin cache; 256 is typical n_frames
-  hrm_rope_theta: 10000.0     # standard RoPE base frequency
+  # Rotary Positional Encoding (RoPE).
+  trm_use_rope: true
+  trm_rope_max_len: 2048
+  trm_rope_theta: 10000.0
 
-  # Two-level hierarchy: L (local, grounded) + H (global, abstract)
-  hrm_L_layers: 3
-  hrm_H_layers: 3
+  # Shared recursive block: first local layer, then global layers.
+  trm_layers: 2
+  trm_recursions: 6
+  trm_local_window_size: 64
 
-  # Inner cycles per ACT step (truncated BPTT window = 1)
-  hrm_L_cycles: 2
-  hrm_H_cycles: 2
-
-  # ACT refinement depth. Start conservative — increase after validation.
-  hrm_max_steps: 4          # Phase 1-2: 4 steps; Phase 3+: increase to 8
-
-  # L-level local attention window — matches your V1 encoder_window_size: 64
-  hrm_L_window_size: 64     # H-level always uses global attention
-
-  # Halting exploration probability during training
-  hrm_halt_explore_prob: 0.1
+  # Adaptive halting during inference only.
+  trm_min_recursions: 2
+  trm_halt_threshold: 0.5
+  trm_halt_target_sharpness: 4.0
 
   # Per-recording embeddings.
-  # MAESTRO v3 total: 1276 recordings across all splits.
-  # Set use_recording_id_embedding: false to force-disable this feature.
   use_recording_id_embedding: false
   num_recordings: 1276
-  recording_emb_dim: 64     # small — acts as a bias offset, not full 512-dim
-
-  # ── Q-loss soft target ───────────────────────────────────────────────────
-  # Sharpness of soft is_easy = sigmoid(-k * (loss - median)).
-  # k=5 approximates hard binary while giving gradient at the boundary.
-  # Increase for a harder target; set to ~50 to recover near-binary behaviour.
-  hrm_q_soft_k: 5.0
-
-  # ── Pitch accuracy improvements ──────────────────────────────────────
-  # All default false for backward compat. Enable for fine-tuning.
-  # Change 1: Frequency-aware input stem — conv stack along mel bins
-  hrm_use_freq_stem: false
-  hrm_freq_stem_channels: 64     # conv channels in frequency stem
-
-  # Change 2: Content-conditioned carry init — identity-init projections
-  hrm_content_init: false
-
-  # Change 3: Gated audio injection — learnable decay for later ACT steps
-  hrm_injection_gate: false
-
-  # Change 4: Sequence-wide Q-head — mean-pool instead of position 0
-  hrm_pooled_qhead: false
-
-  # Change 5: Output adapter — zero-init bottleneck for decoder alignment
-  hrm_output_adapter: false
+  recording_emb_dim: 64
 
 training:
-  notes: "V5_HRM_encoder_batch26_SWIGLUetc_RoPE"
-  # Q-loss weight. After switching to reduction='mean' (from 'sum') the
-  # absolute scale is smaller; may need tuning upward from 0.05 to ~0.1.
-  hrm_q_loss_weight: 0.05   # increase to 0.1 after ~20k steps
+  notes: "V5_TRM_encoder_batch26_recursive"
+  trm_halt_loss_weight: 0.05
 
   # Keep other training settings from V4 (batch, lr, etc.)

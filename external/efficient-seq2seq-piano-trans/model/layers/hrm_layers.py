@@ -8,8 +8,11 @@ import torch.nn.functional as F
 try:
     from flash_attn_interface import flash_attn_func  # type: ignore[import]
 except ImportError:
-    # Fallback to FlashAttention 2
-    from flash_attn import flash_attn_func  # type: ignore[import]
+    try:
+        # Fallback to FlashAttention 2
+        from flash_attn import flash_attn_func  # type: ignore[import]
+    except ImportError:
+        flash_attn_func = None
 
 from model.layers.hrm_common import trunc_normal_init_
 
@@ -132,29 +135,39 @@ class Attention(nn.Module):
             cos, sin = cos_sin
             query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-        if attention_mask is None:
-            # flash attn
+        if attention_mask is None and flash_attn_func is not None:
             attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal)
             if isinstance(attn_output, tuple):  # fa2 and fa3 compatibility
                 attn_output = attn_output[0]
         else:
-            valid_mask = attention_mask.to(torch.bool)
-            q = query.transpose(1, 2)
-            k = key.transpose(1, 2)
-            v = value.transpose(1, 2)
+            q = query.transpose(1, 2).to(torch.float32)
+            k = key.transpose(1, 2).to(torch.float32)
+            v = value.transpose(1, 2).to(torch.float32)
 
-            scale = 1.0 / math.sqrt(self.head_dim)
-            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+            attn_bias = None
+            if attention_mask is not None:
+                valid_mask = attention_mask.to(torch.bool)
+                attn_bias = torch.zeros(
+                    batch_size,
+                    1,
+                    seq_len,
+                    seq_len,
+                    device=hidden_states.device,
+                    dtype=q.dtype,
+                )
+                attn_bias = attn_bias.masked_fill(
+                    ~valid_mask[:, None, None, :],
+                    float("-inf"),
+                )
 
-            key_mask = valid_mask[:, None, None, :]
-            query_mask = valid_mask[:, None, :, None]
-            attn_scores = attn_scores.masked_fill(~key_mask, torch.finfo(attn_scores.dtype).min)
-            has_valid_key = key_mask.any(dim=-1, keepdim=True)
-            attn_scores = torch.where(has_valid_key, attn_scores, torch.zeros_like(attn_scores))
-
-            attn_probs = torch.softmax(attn_scores, dim=-1)
-            attn_probs = attn_probs * query_mask.to(attn_probs.dtype)
-            attn_output = torch.matmul(attn_probs, v).transpose(1, 2)
+            attn_output = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_bias,
+                dropout_p=0.0,
+                is_causal=self.causal,
+            ).transpose(1, 2).to(hidden_states.dtype)
 
         # `attn_output` can be non-contiguous after transpose/matmul paths.
         # Use reshape to avoid RuntimeError from view on strided tensors.

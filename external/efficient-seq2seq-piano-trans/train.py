@@ -1,6 +1,7 @@
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as Functional
@@ -15,7 +16,7 @@ import hydra
 from model.T5 import Transformer
 from model.HPPNet import HPPNet
 from model.GPT import GPT
-from model.hrm_encoder import compute_hrm_q_loss
+from model.trm_encoder import compute_trm_halt_loss
 
 from data.dataset_Audio2Midi import Audio2Midi_Dataset
 import pytorch_lightning as pl
@@ -83,6 +84,7 @@ class MT3Trainer(pl.LightningModule):
             self.model = Transformer(config=config.model)
         self.last_time_stamp = std_time.time()
         self.validation_step_count = 0
+        self._trm_training_warning_emitted = False
         self.criterion_list = []
         for loss_name, [outputs_name, targets_name, criterion_module] in config.training.losses.items():
             criterion_class_name = criterion_module.split(".")[-1]
@@ -125,20 +127,30 @@ class MT3Trainer(pl.LightningModule):
                 print("time/%s"%event_name, "%.3f"%dur)
             self.last_time_stamp = curr_time
 
-    def _get_hrm_q_loss_weight(self) -> float:
-        target_weight = float(getattr(self.config.training, "hrm_q_loss_weight", 0.05))
-        init_weight = float(getattr(self.config.training, "hrm_q_loss_init_weight", 0.0))
-        warmup_steps = int(getattr(self.config.training, "hrm_q_loss_warmup_steps", 1000))
-        ramp_steps = int(getattr(self.config.training, "hrm_q_loss_ramp_steps", 4000))
-        step = int(self.global_step)
+    def _get_trm_halt_loss_weight(self) -> float:
+        if hasattr(self.config.training, "trm_halt_loss_weight"):
+            return float(getattr(self.config.training, "trm_halt_loss_weight"))
 
-        if step < warmup_steps:
-            return init_weight
-        if ramp_steps <= 0:
-            return target_weight
+        legacy_keys = [
+            key
+            for key in (
+                "hrm_q_loss_weight",
+                "hrm_q_loss_init_weight",
+                "hrm_q_loss_warmup_steps",
+                "hrm_q_loss_ramp_steps",
+            )
+            if hasattr(self.config.training, key)
+        ]
+        if legacy_keys and not self._trm_training_warning_emitted:
+            warnings.warn(
+                "Deprecated HRM Q-loss schedule keys detected; use "
+                "training.trm_halt_loss_weight instead. Warmup/ramp scheduling is ignored.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self._trm_training_warning_emitted = True
 
-        progress = min(1.0, max(0.0, (step - warmup_steps) / float(ramp_steps)))
-        return init_weight + (target_weight - init_weight) * progress
+        return float(getattr(self.config.training, "hrm_q_loss_weight", 0.05))
     
     def forward_step(self, batch, batch_idx, forward_type, cal_metrics=False):
         """_summary_
@@ -231,13 +243,11 @@ class MT3Trainer(pl.LightningModule):
                     total_loss += loss
             loss_dict["loss"] = total_loss
 
-        # HRM Q-loss (only when using HRMEncoder)
-        if 'hrm_aux' in outputs_dict and outputs_dict['hrm_aux'] is not None:
-            # Compute per-example decoder loss as the Q-learning reward signal.
-            # Using the cross-entropy loss over non-PAD tokens as a proxy for
-            # "how hard was this example for the decoder".
+        # TRM halting loss (only when using the recursive encoder path)
+        if "trm_aux" in outputs_dict and outputs_dict["trm_aux"] is not None:
+            # Use the decoder cross-entropy as a proxy for per-example difficulty.
             with torch.no_grad():
-                decoder_outputs_for_q = outputs_dict['decoder_outputs'].detach()  # [B, T, vocab]
+                decoder_outputs_for_q = outputs_dict["decoder_outputs"].detach()  # [B, T, vocab]
                 targets_for_q = targets.clone()
                 targets_for_q[targets_mask == 0] = TOKEN_PAD
                 token_level_loss = Functional.cross_entropy(
@@ -249,35 +259,32 @@ class MT3Trainer(pl.LightningModule):
                 valid_token_count = targets_mask.sum(dim=1).clamp_min(1).to(token_level_loss.dtype)
                 per_example_loss = token_level_loss.sum(dim=1) / valid_token_count
 
-            q_loss, q_components = compute_hrm_q_loss(
-                outputs_dict['hrm_aux'],
+            halt_loss, halt_components = compute_trm_halt_loss(
+                outputs_dict["trm_aux"],
                 per_example_loss,
                 return_components=True,
             )
 
-            q_loss_weight = self._get_hrm_q_loss_weight()
-            ce_loss_value = loss_dict['loss'].detach()
-            q_loss_scaled = q_loss_weight * q_loss
-            loss_dict['hrm_q_loss'] = q_loss
-            loss_dict['hrm_q_halt_term'] = q_components['q_halt_term']
-            loss_dict['hrm_q_cont_term'] = q_components['q_cont_term']
-            loss_dict['hrm_q_steps'] = q_components['q_steps']
-            loss_dict['hrm_q_loss_weight'] = torch.tensor(q_loss_weight, device=q_loss.device)
-            loss_dict['hrm_q_loss_scaled'] = q_loss_scaled.detach()
-            loss_dict['hrm_q_to_ce_ratio'] = q_loss_scaled.detach() / (ce_loss_value + 1e-8)
-            loss_dict['loss'] = loss_dict['loss'] + q_loss_scaled
+            halt_loss_weight = self._get_trm_halt_loss_weight()
+            ce_loss_value = loss_dict["loss"].detach()
+            halt_loss_scaled = halt_loss_weight * halt_loss
+            loss_dict["trm_halt_loss"] = halt_loss
+            loss_dict["trm_halt_term"] = halt_components["halt_term"]
+            loss_dict["trm_target_step_mean"] = halt_components["target_step_mean"]
+            loss_dict["trm_halt_loss_weight"] = torch.tensor(
+                halt_loss_weight,
+                device=halt_loss.device,
+            )
+            loss_dict["trm_halt_loss_scaled"] = halt_loss_scaled.detach()
+            loss_dict["trm_halt_to_ce_ratio"] = halt_loss_scaled.detach() / (ce_loss_value + 1e-8)
+            loss_dict["loss"] = loss_dict["loss"] + halt_loss_scaled
 
-            steps_per_example = outputs_dict['hrm_aux'].get('steps_per_example')
+            steps_per_example = outputs_dict["trm_aux"].get("steps_per_example")
             if steps_per_example is not None:
-                loss_dict['hrm_steps_mean'] = steps_per_example.float().mean()
-            q_halt_last = outputs_dict['hrm_aux'].get('q_halt_last')
-            if q_halt_last is not None:
-                loss_dict['hrm_q_halt_logit_mean'] = q_halt_last.mean()
-                loss_dict['hrm_q_halt_logit_std'] = q_halt_last.std(unbiased=False)
-            q_continue_last = outputs_dict['hrm_aux'].get('q_continue_last')
-            if q_continue_last is not None:
-                loss_dict['hrm_q_continue_logit_mean'] = q_continue_last.mean()
-                loss_dict['hrm_q_continue_logit_std'] = q_continue_last.std(unbiased=False)
+                loss_dict["trm_predicted_steps_mean"] = steps_per_example.float().mean()
+            halt_logits_last = outputs_dict["trm_aux"].get("halt_logits_last")
+            if halt_logits_last is not None:
+                loss_dict["trm_halt_logit_mean"] = halt_logits_last.mean()
 
             self.log_time_event("loss_cal_done")
         

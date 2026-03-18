@@ -1,24 +1,19 @@
 # training:
   mode: train # train, test
-  learning_rate: 2e-4
-  training_steps: 8001 #50001 #1000000
+  learning_rate: 1e-4
+  training_steps: 4001 #50001 #1000000
   checking_steps: 10000
   evaluation_epochs: 1 #5
   evaluate_every_n_steps: 50
   save_pianoroll_every_n_steps: [10, 20, 50, 100, 200, 500, 1000, 2000] # should be evaluate_every_n_steps * n
   cal_metrics_every_n_steps: 50
   log_hrm_scale_metrics: false
-  batch: 25 #24
+  batch: 32 #24
   num_workers: 4 
   losses:
     loss_decoder: [decoder_outputs, decoder_targets, loss.CrossEntropyLoss]
   log_dir:
   debug_log_offline: false
 
-
-
-  # HRM encoder Q-loss schedule for T5+HRM path.
-  # The effective weight linearly ramps from init->target after warmup.
-  hrm_q_loss_init_weight: 0.0
-  hrm_q_loss_warmup_steps: 1000
-  hrm_q_loss_ramp_steps: 4000
+  # TRM halting auxiliary loss for the recursive encoder path.
+  trm_halt_loss_weight: 0.05
