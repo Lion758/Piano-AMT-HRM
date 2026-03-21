@@ -179,3 +179,7 @@ audio_output/
 requirementOGs.txt
 requirementsdemucs.txt
 reference/
+external/efficient-seq2seq-piano-trans/root_extras
+external/pretrained_models/5stems
+external/separated/
+external/uploads/

@@ -21,7 +21,7 @@ model:
   trm_L_cycles: 6            # n: z_L updates per process before z_H update
 
   # Deep supervision
-  trm_n_sup: 4               # N_sup: supervision steps reusing detached carry
+  trm_n_sup: 3               # N_sup: supervision steps reusing detached carry
 
   # Learned initial states
   trm_learned_init: true

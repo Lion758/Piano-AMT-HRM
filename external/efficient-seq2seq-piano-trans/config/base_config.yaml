@@ -53,9 +53,9 @@ training:
   batch_inference: 64
   learning_rate: 1e-4
   evaluation_epochs: 1 #5
-  online_testing: true
+  online_testing: false
 
-  debug_log_offline: false
+  debug_log_offline: true
   losses:
     loss_decoder: [decoder_outputs, decoder_targets, loss.CrossEntropyLoss]
 

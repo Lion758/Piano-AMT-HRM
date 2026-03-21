@@ -4,6 +4,7 @@ mir-eval==0.6
 numpy==1.23.5
 pretty-midi==0.2.9
 pytorch-lightning
+typing_extensions>=4.12.2
 torchsummary==1.5.1
 tqdm==4.64.1
 librosa
