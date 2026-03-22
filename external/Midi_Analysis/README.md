@@ -206,17 +206,3 @@ Cause:
 Fix:
 - Run compare command first:
   `python -c "from src.analyzer import compare_performance; compare_performance('sample_files/reference.mid','sample_files/performance.mid','analysis_results')"`
-
-## Optional Legacy Script
-
-There is also a CLI smoke-test script:
-
-```bash
-python test_midi_analysis.py list
-python test_midi_analysis.py solo --midi sample_files/performance.mid
-python test_midi_analysis.py compare --reference sample_files/reference.mid --performance sample_files/performance.mid
-```
-
-Note:
-- It uses relative paths by default and supports explicit path overrides.
-- For production usage, prefer the direct commands above.
