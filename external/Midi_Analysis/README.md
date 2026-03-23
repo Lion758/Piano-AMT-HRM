@@ -75,6 +75,15 @@ python -c "import os; k=os.getenv('OPENAI_API_KEY',''); print('set=',bool(k), 'l
 ```
 
 ## Run the Analysis Pipeline
+### native
+```bash
+python -m analyzer compare-tutor --reference reference.midi --performance performance.midi --output analysis_results_native --alignment-backend native --question "Give me constructive feedback."
+```
+
+### paper_best
+```bash
+python -m analyzer compare-tutor --reference TESTB.midi --performance TESTA.midi --output analysis_results_paper --alignment-backend paper_best --alignment-model automatic_hdtw_sym --question "Give me constructive feedback."
+```
 
 ### 1) Reference vs Performance Analysis
 
