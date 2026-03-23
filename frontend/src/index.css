@@ -9,6 +9,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 2rem;
 }
 
 .card {
@@ -17,16 +18,8 @@ body {
   border-radius: 14px;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
   text-align: center;
-  width: 400px;
-}
-
-h1 {
-  margin-bottom: 0.5rem;
-}
-
-p {
-  margin-bottom: 1.5rem;
-  color: #555;
+  width: 700px;
+  max-width: 100%;
 }
 
 .transcribe-btn {
@@ -41,4 +34,9 @@ p {
 
 .transcribe-btn:hover {
   opacity: 0.9;
+}
+
+audio {
+  width: 100%;
+  margin-top: 0.5rem;
 }

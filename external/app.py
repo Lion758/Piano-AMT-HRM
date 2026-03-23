@@ -1,17 +1,29 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import shutil
 import uuid
+from fastapi.middleware.cors import CORSMiddleware
 
 from separation_service import run_spleeter
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://134.208.3.192:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 UPLOAD_DIR = Path("uploads")
 SEPARATED_DIR = Path("separated")
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 SEPARATED_DIR.mkdir(exist_ok=True)
+
+app.mount("/separated", StaticFiles(directory="separated"), name="separated")
 
 
 @app.get("/")

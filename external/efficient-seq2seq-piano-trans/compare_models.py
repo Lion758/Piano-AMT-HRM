@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import torch
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 
@@ -88,15 +89,14 @@ def find_default_config(checkpoint_path: Path) -> Optional[Path]:
 
 
 def load_config(config_path: Path, checkpoint_path: Path, overrides: List[str], batch_size: Optional[int]) -> Any:
-    config = OmegaConf.load(config_path)
-    config = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
+    config_file = Path(config_path).expanduser().resolve()
+    with initialize_config_dir(config_dir=str(config_file.parent), version_base=None):
+        config = compose(config_name=config_file.stem, overrides=overrides)
     config.model.checkpoint_path = str(checkpoint_path)
     config.training.mode = "test"
     if batch_size is not None:
         config.training.batch_inference = batch_size
         config.training.batch_test = batch_size
-    if overrides:
-        config = OmegaConf.merge(config, OmegaConf.from_dotlist(overrides))
     return config
 
 
