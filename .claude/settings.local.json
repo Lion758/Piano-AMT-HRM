@@ -6,7 +6,8 @@
       "Bash(python -c \":*)",
       "Bash(xargs wc:*)",
       "Bash(grep -E \"\\\\.py$|^d\")",
-      "Bash(xargs grep:*)"
+      "Bash(xargs grep:*)",
+      "WebFetch(domain:docs.pytorch.org)"
     ]
   }
 }
