@@ -14,7 +14,7 @@ model:
 
   # Shared recursive block: first local layer, then global layers.
   trm_layers: 2
-  trm_recursions: 6
+  trm_recursions: 3
   trm_local_window_size: 64
 
   # Adaptive halting during inference only.
@@ -28,7 +28,7 @@ model:
   recording_emb_dim: 64
 
 training:
-  notes: "V5_TRM_encoder_batch26_recursive"
+  notes: "V5_TRMV1_Recusion:4"
   trm_halt_loss_weight: 0.05
 
   # Keep other training settings from V4 (batch, lr, etc.)

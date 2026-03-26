@@ -2,6 +2,8 @@ import json
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 import statistics
+from collections import defaultdict
+from bisect import bisect_left
 
 class JSONSummarization:
     """
@@ -642,12 +644,587 @@ class JSONSummarization:
             return "Beginner"
     
     def _identify_challenging_sections(self) -> List[Dict]:
-        """Identify challenging sections based on error density."""
-        # This would be implemented with actual section data
-        return [
-            {'section': 'Measures 5-8', 'reason': 'Fast arpeggios', 'difficulty': 'high'},
-            {'section': 'Measures 12-15', 'reason': 'Complex rhythm', 'difficulty': 'medium'}
-        ]
+        """
+        Identify challenging measures/sections using computed signals from:
+        - note-level alignment pairs
+        - error categories/metrics
+        - reference score measure metadata (when available)
+
+        Returns:
+            Top challenging spans with stable keys:
+            `section`, `reason`, `difficulty`
+        """
+        pairs = [p for p in self.alignment if isinstance(p, dict)]
+        if not pairs:
+            return []
+
+        reference_notes = [n for n in self.reference_data.get('notes', []) if isinstance(n, dict)]
+        performance_notes = [n for n in self.performance_data.get('notes', []) if isinstance(n, dict)]
+
+        def _as_float(v: Any, default: Optional[float] = 0.0) -> Optional[float]:
+            if isinstance(v, (int, float)):
+                return float(v)
+            return default
+
+        def _as_int(v: Any, default: Optional[int] = 0) -> Optional[int]:
+            if isinstance(v, bool):
+                return int(v)
+            if isinstance(v, int):
+                return v
+            if isinstance(v, float):
+                return int(v)
+            return default
+
+        def _measure_from_note(note: Any) -> Optional[int]:
+            if not isinstance(note, dict):
+                return None
+            mp = note.get('measure_position', {})
+            if isinstance(mp, dict):
+                m = mp.get('measure')
+                if isinstance(m, (int, float)):
+                    m_int = int(m)
+                    if m_int > 0:
+                        return m_int
+            return None
+
+        def _note_key(note: Any) -> Optional[tuple]:
+            if not isinstance(note, dict):
+                return None
+            pitch = _as_int(note.get('pitch'), None)
+            start = _as_float(note.get('start'), None)
+            duration = _as_float(note.get('duration'), None)
+            if pitch is None or start is None:
+                return None
+            dur_ms = int(round((duration if duration is not None else 0.0) * 1000))
+            return (int(pitch), int(round(start * 1000)), dur_ms)
+
+        def _loose_note_key(note: Any) -> Optional[tuple]:
+            if not isinstance(note, dict):
+                return None
+            pitch = _as_int(note.get('pitch'), None)
+            start = _as_float(note.get('start'), None)
+            if pitch is None or start is None:
+                return None
+            return (int(pitch), int(round(start * 1000)))
+
+        def _build_measure_lookup(notes: List[Dict]) -> tuple:
+            exact = defaultdict(list)
+            loose = defaultdict(list)
+            ordered_measures: List[int] = []
+            for note in sorted(
+                notes,
+                key=lambda n: (
+                    _as_float(n.get('start'), 0.0),
+                    _as_int(n.get('pitch'), 0),
+                    _as_float(n.get('duration'), 0.0)
+                )
+            ):
+                measure = _measure_from_note(note)
+                if measure is None:
+                    continue
+                k = _note_key(note)
+                lk = _loose_note_key(note)
+                if k is not None:
+                    exact[k].append(measure)
+                if lk is not None:
+                    loose[lk].append(measure)
+                ordered_measures.append(measure)
+            return exact, loose, ordered_measures
+
+        def _timing_abs(pair: Dict[str, Any]) -> Optional[float]:
+            td = pair.get('time_difference')
+            if isinstance(td, (int, float)):
+                return abs(float(td))
+            return None
+
+        def _difficulty_label(score: float, p60: float, p85: float) -> str:
+            if score >= p85:
+                return 'high'
+            if score >= p60:
+                return 'medium'
+            return 'low'
+
+        def _fallback_phrase_sections() -> List[Dict]:
+            phrase_stats = defaultdict(lambda: {
+                'count': 0,
+                'missing': 0,
+                'extra': 0,
+                'wrong': 0,
+                'timing_bad': 0,
+                'timing_samples': 0,
+                'error_score': 0.0,
+            })
+
+            for pair in pairs:
+                phrase_idx = pair.get('phrase_index')
+                if not isinstance(phrase_idx, int):
+                    continue
+                s = phrase_stats[int(phrase_idx)]
+                s['count'] += 1
+
+                ref_note = pair.get('reference_note')
+                perf_note = pair.get('performance_note')
+                err = str(pair.get('error_type', 'none'))
+                pitch_diff = _as_int(pair.get('pitch_difference'), 0) or 0
+
+                if isinstance(ref_note, dict) and not isinstance(perf_note, dict):
+                    s['missing'] += 1
+                    s['error_score'] += 2.5
+                elif isinstance(perf_note, dict) and not isinstance(ref_note, dict):
+                    s['extra'] += 1
+                    s['error_score'] += 1.2 if err == 'extra_note' else 0.8
+                else:
+                    if pitch_diff != 0:
+                        s['wrong'] += 1
+                        s['error_score'] += 2.0
+                    abs_td = _timing_abs(pair)
+                    if abs_td is not None:
+                        s['timing_samples'] += 1
+                        if abs_td > 0.08:
+                            s['timing_bad'] += 1
+                            s['error_score'] += 0.8
+                        elif abs_td > 0.05:
+                            s['error_score'] += 0.4
+
+            if not phrase_stats:
+                return []
+
+            scored = []
+            for phrase_idx, s in phrase_stats.items():
+                denom = max(1, s['count'])
+                score = s['error_score'] / denom
+                scored.append((phrase_idx, score, s))
+            scored.sort(key=lambda x: x[1], reverse=True)
+
+            scores = [x[1] for x in scored]
+            if len(scores) >= 4:
+                q = statistics.quantiles(scores, n=100, method='inclusive')
+                p60 = q[59]
+                p85 = q[84]
+            elif len(scores) >= 2:
+                p60 = statistics.mean(scores)
+                p85 = max(scores)
+            else:
+                p60 = p85 = scores[0]
+
+            out = []
+            for phrase_idx, score, s in scored[:3]:
+                reasons = []
+                if s['missing'] > 0:
+                    reasons.append("missing notes cluster")
+                if s['wrong'] > 0:
+                    reasons.append("pitch mismatches")
+                if s['timing_bad'] > 0:
+                    reasons.append("timing instability")
+                if s['extra'] > 0 and len(reasons) < 2:
+                    reasons.append("extra-note insertions")
+                if not reasons:
+                    reasons = ["elevated combined error density"]
+
+                out.append({
+                    'section': f"Phrase {int(phrase_idx) + 1}",
+                    'reason': "; ".join(reasons[:2]),
+                    'difficulty': _difficulty_label(score, p60, p85),
+                    'score': round(float(score), 3),
+                })
+            return out
+
+        ref_exact_lookup, ref_loose_lookup, ref_ordered_measures = _build_measure_lookup(reference_notes)
+        perf_exact_lookup, perf_loose_lookup, perf_ordered_measures = _build_measure_lookup(performance_notes)
+        ref_exact_cursor = defaultdict(int)
+        ref_loose_cursor = defaultdict(int)
+        perf_exact_cursor = defaultdict(int)
+        perf_loose_cursor = defaultdict(int)
+
+        reference_measure_meta = defaultdict(lambda: {
+            'note_count': 0,
+            'min_pitch': 127,
+            'max_pitch': 0,
+        })
+        for note in reference_notes:
+            m = _measure_from_note(note)
+            if m is None:
+                continue
+            pitch = _as_int(note.get('pitch'), 60) or 60
+            meta = reference_measure_meta[m]
+            meta['note_count'] += 1
+            meta['min_pitch'] = min(meta['min_pitch'], pitch)
+            meta['max_pitch'] = max(meta['max_pitch'], pitch)
+
+        performance_measures = []
+        for note in performance_notes:
+            m = _measure_from_note(note)
+            if m is not None:
+                performance_measures.append(m)
+
+        reference_max_measure = max(reference_measure_meta.keys()) if reference_measure_meta else 0
+        performance_max_measure = max(performance_measures) if performance_measures else 0
+
+        def _pair_anchor_time(pair: Dict[str, Any]) -> float:
+            rn = pair.get('reference_note')
+            pn = pair.get('performance_note')
+            if isinstance(rn, dict):
+                t = _as_float(rn.get('start'), None)
+                if t is not None:
+                    return t
+            if isinstance(pn, dict):
+                t = _as_float(pn.get('start'), None)
+                if t is not None:
+                    return t
+            return 0.0
+
+        pairs_sorted = sorted(
+            pairs,
+            key=lambda p: (
+                _pair_anchor_time(p),
+                _as_int((p.get('reference_note') or p.get('performance_note') or {}).get('pitch'), 0)
+            )
+        )
+
+        total_ref_pairs = sum(1 for p in pairs_sorted if isinstance(p.get('reference_note'), dict))
+
+        def _consume_lookup_measure(note: Dict[str, Any], is_reference: bool) -> Optional[int]:
+            exact_lookup = ref_exact_lookup if is_reference else perf_exact_lookup
+            loose_lookup = ref_loose_lookup if is_reference else perf_loose_lookup
+            exact_cursor = ref_exact_cursor if is_reference else perf_exact_cursor
+            loose_cursor = ref_loose_cursor if is_reference else perf_loose_cursor
+
+            k = _note_key(note)
+            if k is not None and k in exact_lookup:
+                idx = exact_cursor[k]
+                vals = exact_lookup[k]
+                if idx < len(vals):
+                    exact_cursor[k] += 1
+                    return int(vals[idx])
+
+            lk = _loose_note_key(note)
+            if lk is not None and lk in loose_lookup:
+                idx = loose_cursor[lk]
+                vals = loose_lookup[lk]
+                if idx < len(vals):
+                    loose_cursor[lk] += 1
+                    return int(vals[idx])
+            return None
+
+        def _fallback_reference_measure(ref_seen: int) -> Optional[int]:
+            if not ref_ordered_measures:
+                return None
+            if total_ref_pairs <= 1:
+                return int(ref_ordered_measures[0])
+            ratio = max(0.0, min(1.0, ref_seen / max(1, total_ref_pairs - 1)))
+            idx = int(round(ratio * (len(ref_ordered_measures) - 1)))
+            return int(ref_ordered_measures[idx])
+
+        measure_stats = defaultdict(lambda: {
+            'reference_notes': 0,
+            'matched': 0,
+            'missing': 0,
+            'extra': 0,
+            'wrong': 0,
+            'timing_moderate': 0,
+            'timing_severe': 0,
+            'timing_abs_sum': 0.0,
+            'timing_samples': 0,
+            'confidence_penalty': 0.0,
+            'error_score': 0.0,
+            'phrase_ids': set(),
+        })
+
+        perf_anchors: List[tuple] = []
+        ref_seen = 0
+
+        for pair in pairs_sorted:
+            ref_note = pair.get('reference_note')
+            perf_note = pair.get('performance_note')
+            phrase_idx = pair.get('phrase_index')
+
+            if not isinstance(ref_note, dict):
+                continue
+
+            measure = _measure_from_note(ref_note)
+            if measure is None:
+                measure = _consume_lookup_measure(ref_note, is_reference=True)
+            if measure is None:
+                measure = _fallback_reference_measure(ref_seen)
+            ref_seen += 1
+
+            if measure is None:
+                continue
+
+            s = measure_stats[measure]
+            if isinstance(phrase_idx, int):
+                s['phrase_ids'].add(int(phrase_idx))
+            s['reference_notes'] += 1
+
+            err = str(pair.get('error_type', 'none'))
+            pitch_diff = _as_int(pair.get('pitch_difference'), 0) or 0
+
+            if isinstance(perf_note, dict):
+                s['matched'] += 1
+                if pitch_diff != 0:
+                    s['wrong'] += 1
+                    s['error_score'] += 2.1
+
+                abs_td = _timing_abs(pair)
+                if abs_td is not None:
+                    s['timing_abs_sum'] += float(abs_td)
+                    s['timing_samples'] += 1
+                    if abs_td > 0.10:
+                        s['timing_severe'] += 1
+                        s['error_score'] += 1.0
+                    elif abs_td > 0.05:
+                        s['timing_moderate'] += 1
+                        s['error_score'] += 0.5
+
+                conf = pair.get('alignment_confidence')
+                if isinstance(conf, (int, float)):
+                    c = max(0.0, min(1.0, float(conf)))
+                    penalty = (1.0 - c) * 0.35
+                    s['confidence_penalty'] += penalty
+                    s['error_score'] += penalty
+
+                if err not in {'none', 'missing_note', 'extra_note', 'ornament_insertion'} and pitch_diff == 0:
+                    s['error_score'] += 0.6
+
+                perf_start = _as_float(perf_note.get('start'), None)
+                if perf_start is not None:
+                    perf_anchors.append((float(perf_start), int(measure)))
+            else:
+                s['missing'] += 1
+                missing_weight = 2.6
+                reason = str(pair.get('reason', ''))
+                if 'phrase_no_perf' in reason:
+                    missing_weight += 0.4
+                s['error_score'] += missing_weight
+
+        perf_anchors.sort(key=lambda x: x[0])
+        perf_anchor_times = [x[0] for x in perf_anchors]
+
+        def _resolve_extra_measure(perf_note: Dict[str, Any]) -> Optional[int]:
+            perf_start = _as_float(perf_note.get('start'), None)
+            if perf_start is not None and perf_anchors:
+                i = bisect_left(perf_anchor_times, perf_start)
+                candidates = []
+                if i < len(perf_anchors):
+                    candidates.append(perf_anchors[i])
+                if i > 0:
+                    candidates.append(perf_anchors[i - 1])
+                if candidates:
+                    best = min(candidates, key=lambda x: abs(x[0] - perf_start))
+                    return int(best[1])
+
+            perf_measure = _measure_from_note(perf_note)
+            if perf_measure is None:
+                perf_measure = _consume_lookup_measure(perf_note, is_reference=False)
+
+            if perf_measure is not None:
+                if reference_max_measure > 0 and performance_max_measure > 0:
+                    scaled = int(round((perf_measure / max(1, performance_max_measure)) * reference_max_measure))
+                    return max(1, min(reference_max_measure, scaled))
+                return int(perf_measure)
+
+            if reference_max_measure > 0:
+                return int(reference_max_measure)
+            return None
+
+        for pair in pairs_sorted:
+            ref_note = pair.get('reference_note')
+            perf_note = pair.get('performance_note')
+            if isinstance(ref_note, dict) or not isinstance(perf_note, dict):
+                continue
+
+            measure = _resolve_extra_measure(perf_note)
+            if measure is None:
+                continue
+
+            s = measure_stats[measure]
+            phrase_idx = pair.get('phrase_index')
+            if isinstance(phrase_idx, int):
+                s['phrase_ids'].add(int(phrase_idx))
+            s['extra'] += 1
+
+            err = str(pair.get('error_type', 'extra_note'))
+            if err == 'ornament_insertion':
+                s['error_score'] += 0.9
+            elif err == 'extra_note':
+                s['error_score'] += 1.4
+            else:
+                s['error_score'] += 1.1
+
+        if not measure_stats:
+            return _fallback_phrase_sections()
+
+        complexity_values = []
+        for measure, meta in reference_measure_meta.items():
+            note_count = max(1, int(meta.get('note_count', 0)))
+            span = int(meta.get('max_pitch', 0)) - int(meta.get('min_pitch', 0))
+            complexity_values.append((measure, note_count, span))
+
+        median_measure_notes = 1.0
+        if complexity_values:
+            note_counts = [x[1] for x in complexity_values]
+            median_measure_notes = statistics.median(note_counts) if note_counts else 1.0
+            if median_measure_notes <= 0:
+                median_measure_notes = 1.0
+
+        measure_scores: Dict[int, float] = {}
+        measure_complexity: Dict[int, float] = {}
+        for measure, s in measure_stats.items():
+            ref_note_count = int(
+                reference_measure_meta.get(measure, {}).get('note_count', s.get('reference_notes', 0))
+            )
+            ref_note_count = max(1, ref_note_count)
+
+            err_density = float(s['error_score']) / ref_note_count
+
+            meta = reference_measure_meta.get(measure, {})
+            measure_note_count = int(meta.get('note_count', ref_note_count))
+            pitch_span = int(meta.get('max_pitch', 0)) - int(meta.get('min_pitch', 0)) if meta else 0
+            density_factor = measure_note_count / max(1.0, median_measure_notes)
+            span_factor = min(2.0, max(0.0, pitch_span / 12.0))
+            complexity = (0.7 * density_factor) + (0.3 * span_factor)
+
+            score = err_density + (0.2 * complexity)
+
+            measure_complexity[measure] = complexity
+            measure_scores[measure] = score
+
+        if not measure_scores:
+            return _fallback_phrase_sections()
+
+        ranked_measures = sorted(measure_scores.items(), key=lambda x: x[1], reverse=True)
+        score_values = [x[1] for x in ranked_measures]
+
+        if len(score_values) >= 4:
+            q = statistics.quantiles(score_values, n=100, method='inclusive')
+            p60 = q[59]
+            p75 = q[74]
+            p85 = q[84]
+        elif len(score_values) >= 2:
+            p60 = statistics.mean(score_values)
+            p75 = max(score_values)
+            p85 = max(score_values)
+        else:
+            p60 = p75 = p85 = score_values[0]
+
+        mean_score = statistics.mean(score_values)
+        std_score = statistics.stdev(score_values) if len(score_values) > 1 else 0.0
+        threshold = max(p75, mean_score + 0.35 * std_score)
+
+        selected = [m for m, score in ranked_measures if score >= threshold]
+        if len(selected) < 2:
+            selected = [m for m, _ in ranked_measures[:min(4, len(ranked_measures))]]
+        selected = sorted(set(selected))
+
+        if not selected:
+            return _fallback_phrase_sections()
+
+        groups = []
+        g_start = selected[0]
+        g_end = selected[0]
+        for m in selected[1:]:
+            if m <= g_end + 1:
+                g_end = m
+            else:
+                groups.append((g_start, g_end))
+                g_start = m
+                g_end = m
+        groups.append((g_start, g_end))
+
+        def _build_reason(agg: Dict[str, Any], ref_notes_in_span: int, complexity: float) -> str:
+            reasons = []
+            ref_base = max(1, ref_notes_in_span)
+            matched_base = max(1, int(agg['matched']))
+
+            if (agg['missing'] / ref_base) >= 0.12:
+                reasons.append("high missing-note density")
+            if (agg['wrong'] / ref_base) >= 0.06:
+                reasons.append("frequent pitch mismatches")
+            if (agg['timing_severe'] / matched_base) >= 0.20:
+                reasons.append("unstable timing")
+            elif agg['timing_samples'] > 0:
+                avg_ms = (agg['timing_abs_sum'] / agg['timing_samples']) * 1000.0
+                if avg_ms >= 80:
+                    reasons.append("large timing deviations")
+            if (agg['extra'] / ref_base) >= 0.10 and len(reasons) < 2:
+                reasons.append("extra-note insertions")
+            if complexity >= 1.35 and len(reasons) < 2:
+                reasons.append("dense/wide-range writing")
+            if not reasons:
+                reasons.append("elevated combined error density")
+            return "; ".join(reasons[:2])
+
+        sections: List[Dict[str, Any]] = []
+        for start_m, end_m in groups:
+            span_measures = list(range(start_m, end_m + 1))
+            agg = {
+                'reference_notes': 0,
+                'matched': 0,
+                'missing': 0,
+                'extra': 0,
+                'wrong': 0,
+                'timing_moderate': 0,
+                'timing_severe': 0,
+                'timing_abs_sum': 0.0,
+                'timing_samples': 0,
+                'phrase_ids': set(),
+            }
+            scores = []
+            complexities = []
+            for m in span_measures:
+                s = measure_stats.get(m)
+                if s is None:
+                    continue
+                agg['reference_notes'] += int(s['reference_notes'])
+                agg['matched'] += int(s['matched'])
+                agg['missing'] += int(s['missing'])
+                agg['extra'] += int(s['extra'])
+                agg['wrong'] += int(s['wrong'])
+                agg['timing_moderate'] += int(s['timing_moderate'])
+                agg['timing_severe'] += int(s['timing_severe'])
+                agg['timing_abs_sum'] += float(s['timing_abs_sum'])
+                agg['timing_samples'] += int(s['timing_samples'])
+                agg['phrase_ids'].update(s['phrase_ids'])
+                if m in measure_scores:
+                    scores.append(float(measure_scores[m]))
+                if m in measure_complexity:
+                    complexities.append(float(measure_complexity[m]))
+
+            if not scores:
+                continue
+
+            score = statistics.mean(scores)
+            complexity = statistics.mean(complexities) if complexities else 0.0
+            difficulty = _difficulty_label(score, p60, p85)
+            reason = _build_reason(agg, agg['reference_notes'], complexity)
+
+            if start_m == end_m:
+                section_label = f"Measure {start_m}"
+            else:
+                section_label = f"Measures {start_m}-{end_m}"
+
+            out_entry = {
+                'section': section_label,
+                'reason': reason,
+                'difficulty': difficulty,
+                'score': round(float(score), 3),
+            }
+
+            if agg['phrase_ids']:
+                phrase_ids = sorted(int(x) for x in agg['phrase_ids'])
+                if len(phrase_ids) == 1:
+                    out_entry['phrase'] = f"Phrase {phrase_ids[0] + 1}"
+                else:
+                    out_entry['phrase'] = f"Phrases {phrase_ids[0] + 1}-{phrase_ids[-1] + 1}"
+
+            sections.append(out_entry)
+
+        sections.sort(key=lambda d: d.get('score', 0), reverse=True)
+        if sections:
+            return sections[:3]
+
+        return _fallback_phrase_sections()
+
     def _find_fastest_passage(self, notes: List[Dict]) -> Dict:
         """Find the fastest local passage based on note density and local IOI."""
         if len(notes) < 4:
@@ -730,16 +1307,208 @@ class JSONSummarization:
         }
 
     def _analyze_tempo_profile(self) -> str:
-        """Analyze tempo profile."""
-        return "Generally steady tempo with slight rubato in expressive sections"
+        """Analyze tempo profile from timing and rhythm metrics."""
+        error_metrics = self.error_analysis.get('metrics', {})
+        timing = error_metrics.get('timing_errors', {}) if isinstance(error_metrics, dict) else {}
+        rhythm = error_metrics.get('rhythmic_consistency', {}) if isinstance(error_metrics, dict) else {}
+        perf_timing = (
+            self.performance_data.get('performance_data', {}).get('timing_consistency', {})
+            if isinstance(self.performance_data, dict)
+            else {}
+        )
+        parsed_timing = self.performance_data.get('timing', {}) if isinstance(self.performance_data, dict) else {}
+
+        def _num(v: Any, default: Optional[float] = 0.0) -> Optional[float]:
+            if isinstance(v, (int, float)):
+                return float(v)
+            return default
+
+        avg_tempo = _num(parsed_timing.get('average_tempo'), None)
+        tempo_anchor = f" around {int(round(avg_tempo))} BPM" if isinstance(avg_tempo, (int, float)) else ""
+
+        # Prefer reference-comparison timing metrics when available.
+        if timing.get('available', True):
+            std_ms = _num(timing.get('std_error_ms'), 0.0) or 0.0
+            mean_ms = _num(timing.get('mean_error_ms'), 0.0) or 0.0
+            rushing = _num(timing.get('rushing_percentage'), 0.0) or 0.0
+            dragging = _num(timing.get('dragging_percentage'), 0.0) or 0.0
+
+            if std_ms < 30 and abs(mean_ms) < 20:
+                stability = "Very steady tempo control"
+            elif std_ms < 60:
+                stability = "Generally steady tempo"
+            elif std_ms < 120:
+                stability = "Noticeable tempo fluctuation"
+            else:
+                stability = "Large tempo inconsistency"
+
+            if rushing > dragging + 12:
+                tendency = "with a forward (rushing) tendency"
+            elif dragging > rushing + 12:
+                tendency = "with a behind-the-beat (dragging) tendency"
+            else:
+                tendency = "with balanced early/late timing"
+
+            tempo_stability = rhythm.get('tempo_stability', {}) if isinstance(rhythm, dict) else {}
+            rubato_count = 0
+            if isinstance(tempo_stability, dict):
+                rubato = tempo_stability.get('rubato_patterns', [])
+                rubato_count = len(rubato) if isinstance(rubato, list) else 0
+
+            rubato_text = ""
+            if rubato_count >= 2:
+                rubato_text = ", including recurring rubato-like shaping"
+            elif rubato_count == 1:
+                rubato_text = ", with occasional rubato-like shaping"
+
+            return f"{stability}{tempo_anchor} {tendency}{rubato_text}."
+
+        # Fallback to solo timing-consistency metrics from parser output.
+        if perf_timing.get('available', False):
+            stability_score = _num(perf_timing.get('stability_score'), 0.5) or 0.5
+            drift = _num(perf_timing.get('tempo_drift_ratio'), 0.0) or 0.0
+            tendency = str(perf_timing.get('tempo_tendency', 'stable')).replace('_', ' ')
+
+            if stability_score >= 0.85:
+                stability = "Stable internal pulse"
+            elif stability_score >= 0.7:
+                stability = "Moderately stable pulse"
+            else:
+                stability = "Variable pulse control"
+
+            drift_text = ""
+            if abs(drift) >= 0.08:
+                drift_text = f"; tempo drift ~{drift * 100:.1f}% ({tendency})"
+
+            return f"{stability}{tempo_anchor}{drift_text}."
+
+        return "Tempo profile unavailable (insufficient timing data)."
     
     def _analyze_dynamic_contour(self) -> str:
-        """Analyze dynamic contour/shape."""
-        return "Clear dynamic shaping with peak at climax sections"
+        """Analyze dynamic contour/shape from velocity and expression metrics."""
+        error_metrics = self.error_analysis.get('metrics', {})
+        dynamics = error_metrics.get('dynamic_control', {}) if isinstance(error_metrics, dict) else {}
+        velocity_profile = (
+            self.performance_data.get('performance_data', {}).get('velocity_profile', {})
+            if isinstance(self.performance_data, dict)
+            else {}
+        )
+
+        def _num(v: Any, default: Optional[float] = 0.0) -> Optional[float]:
+            if isinstance(v, (int, float)):
+                return float(v)
+            return default
+
+        dynamic_range = _num(dynamics.get('dynamic_range'), None)
+        if dynamic_range is None:
+            vr = velocity_profile.get('dynamic_range', {}) if isinstance(velocity_profile, dict) else {}
+            if isinstance(vr, dict):
+                vmin = _num(vr.get('min'), None)
+                vmax = _num(vr.get('max'), None)
+                if vmin is not None and vmax is not None:
+                    dynamic_range = max(0.0, vmax - vmin)
+        if dynamic_range is None:
+            dynamic_range = 0.0
+
+        reference_range = _num(dynamics.get('reference_dynamic_range'), None)
+        avg_vel = _num(dynamics.get('average_velocity'), None)
+        if avg_vel is None:
+            avg_vel = _num(velocity_profile.get('mean_velocity'), 0.0) or 0.0
+
+        patterns = dynamics.get('dynamic_patterns', [])
+        cresc = 0
+        decresc = 0
+        if isinstance(patterns, list):
+            for p in patterns:
+                if not isinstance(p, dict):
+                    continue
+                kind = str(p.get('type', ''))
+                if kind == 'crescendo':
+                    cresc += 1
+                elif kind == 'decrescendo':
+                    decresc += 1
+
+        if dynamic_range >= 65:
+            contour = "Wide dynamic contour"
+        elif dynamic_range >= 40:
+            contour = "Clear dynamic contour"
+        elif dynamic_range >= 25:
+            contour = "Moderate dynamic contour"
+        else:
+            contour = "Limited dynamic contour"
+
+        if cresc > 0 and decresc > 0:
+            shaping = "with both crescendo and decrescendo gestures"
+        elif cresc > 0:
+            shaping = "with mostly crescendo shaping"
+        elif decresc > 0:
+            shaping = "with mostly decrescendo shaping"
+        else:
+            shaping = "with minimal large-scale shaping"
+
+        center = ""
+        if avg_vel >= 90:
+            center = " and a forte-leaning center"
+        elif avg_vel <= 50:
+            center = " and a piano-leaning center"
+
+        ref_text = ""
+        if isinstance(reference_range, (int, float)) and reference_range > 1:
+            ratio = dynamic_range / reference_range
+            if ratio < 0.65:
+                ref_text = " (below reference contrast)"
+            elif ratio > 1.25:
+                ref_text = " (broader than reference contrast)"
+
+        return f"{contour} {shaping}{center}{ref_text}."
     
     def _analyze_articulation_style(self) -> str:
-        """Analyze articulation style."""
-        return "Mixed articulation suitable for Classical style"
+        """Analyze articulation style from articulation metrics."""
+        error_metrics = self.error_analysis.get('metrics', {})
+        articulation = error_metrics.get('articulation', {}) if isinstance(error_metrics, dict) else {}
+        perf_art = (
+            self.performance_data.get('performance_data', {}).get('articulation_patterns', {})
+            if isinstance(self.performance_data, dict)
+            else {}
+        )
+
+        def _num(v: Any, default: Optional[float] = 0.0) -> Optional[float]:
+            if isinstance(v, (int, float)):
+                return float(v)
+            return default
+
+        staccato = _num(articulation.get('staccato_percentage'), None)
+        legato = _num(articulation.get('legato_percentage'), None)
+        consistency = _num(articulation.get('articulation_consistency'), None)
+        detached = _num(perf_art.get('detached_percentage'), None)
+
+        if staccato is None:
+            staccato = _num(perf_art.get('staccato_percentage'), 0.0) or 0.0
+        if legato is None:
+            legato = _num(perf_art.get('legato_percentage'), 0.0) or 0.0
+
+        if legato >= 70 and staccato <= 20:
+            base = "Predominantly legato articulation"
+        elif staccato >= 70 and legato <= 20:
+            base = "Predominantly staccato articulation"
+        else:
+            base = "Mixed articulation profile"
+
+        if consistency is not None:
+            if consistency >= 0.8:
+                consistency_text = "with high consistency"
+            elif consistency >= 0.6:
+                consistency_text = "with moderate consistency"
+            else:
+                consistency_text = "with variable consistency"
+        else:
+            consistency_text = "with uncalibrated consistency"
+
+        detached_text = ""
+        if isinstance(detached, (int, float)) and detached >= 20:
+            detached_text = f"; detached touch appears on {detached:.1f}% of transitions"
+
+        return f"{base} ({staccato:.1f}% staccato, {legato:.1f}% legato) {consistency_text}{detached_text}."
     
     def _create_benchmarks(self) -> Dict[str, float]:
         """Create benchmark scores for comparison."""
@@ -768,20 +1537,118 @@ class JSONSummarization:
         return priorities[:2] if priorities else ["Musical expression"]
     
     def _identify_quick_wins(self) -> List[str]:
-        """Identify areas that could improve quickly."""
-        return [
-            "Dynamic contrast in repeated sections",
-            "Articulation consistency in scales",
-            "Tempo stability in familiar passages"
+        """Identify areas that could improve quickly from near-threshold metrics."""
+        error_metrics = self.error_analysis.get('metrics', {})
+        note_acc = error_metrics.get('note_accuracy', {}) if isinstance(error_metrics, dict) else {}
+        timing = error_metrics.get('timing_errors', {}) if isinstance(error_metrics, dict) else {}
+        rhythm = error_metrics.get('rhythmic_consistency', {}) if isinstance(error_metrics, dict) else {}
+        dynamics = error_metrics.get('dynamic_control', {}) if isinstance(error_metrics, dict) else {}
+        articulation = error_metrics.get('articulation', {}) if isinstance(error_metrics, dict) else {}
+
+        def _num(v: Any, default: Optional[float] = 0.0) -> Optional[float]:
+            if isinstance(v, (int, float)):
+                return float(v)
+            return default
+
+        quick: List[str] = []
+
+        accuracy = _num(note_acc.get('accuracy_percentage'), 0.0) or 0.0
+        if 75 <= accuracy < 95:
+            quick.append("Raise note accuracy with slow blocked practice on the top 1-2 weak passages")
+
+        if timing.get('available', True):
+            std_ms = _num(timing.get('std_error_ms'), 0.0) or 0.0
+            rushing = _num(timing.get('rushing_percentage'), 0.0) or 0.0
+            dragging = _num(timing.get('dragging_percentage'), 0.0) or 0.0
+
+            if 35 <= std_ms <= 120:
+                quick.append("Reduce timing spread by looping short fragments with metronome subdivision")
+            if rushing > dragging + 10 and rushing <= 60:
+                quick.append("Trim rushing tendency by delaying right-hand entries against a steady click")
+            elif dragging > rushing + 10 and dragging <= 60:
+                quick.append("Trim dragging tendency by practicing phrase pickups with forward motion")
+
+        rhythm_score = _num(rhythm.get('duration_consistency_score'), 0.0) or 0.0
+        if 0.6 <= rhythm_score < 0.85:
+            quick.append("Improve rhythmic consistency through counted subdivision on transitions")
+
+        dyn_range = _num(dynamics.get('dynamic_range'), 0.0) or 0.0
+        ref_range = _num(dynamics.get('reference_dynamic_range'), None)
+        if isinstance(ref_range, (int, float)) and ref_range > 1 and dyn_range < ref_range * 0.75:
+            quick.append("Expand dynamic contrast in repeated ideas to better match the reference profile")
+        elif 20 <= dyn_range < 45:
+            quick.append("Add clearer dynamic contrast between phrase peaks and releases")
+
+        art_cons = _num(articulation.get('articulation_consistency'), 0.0) or 0.0
+        if 0.55 <= art_cons < 0.8:
+            quick.append("Tighten articulation consistency with short staccato/legato contrast drills")
+
+        # Tie quick wins to currently detected high-impact section if available.
+        challenging = self._identify_challenging_sections()
+        if challenging:
+            section = challenging[0].get('section')
+            if isinstance(section, str) and section.strip():
+                quick.append(f"Isolate {section} in 2-4 bar loops before full-run integration")
+
+        deduped = self._dedupe_text_list(quick)
+        if len(deduped) >= 3:
+            return deduped[:3]
+
+        fillers = [
+            "Stabilize one short section with metronome layering",
+            "Refine one articulation pattern at slow tempo",
+            "Shape one phrase with clearer dynamic contrast",
         ]
+        for item in fillers:
+            if len(deduped) >= 3:
+                break
+            if item not in deduped:
+                deduped.append(item)
+        return deduped[:3]
     
     def _identify_long_term_goals(self) -> List[str]:
-        """Identify long-term development goals."""
-        return [
-            "Develop consistent touch across all dynamics",
-            "Improve sight-reading fluency",
-            "Expand repertoire in this style"
-        ]
+        """Identify long-term development goals from persistent gaps."""
+        error_metrics = self.error_analysis.get('metrics', {})
+        note_acc = error_metrics.get('note_accuracy', {}) if isinstance(error_metrics, dict) else {}
+        timing = error_metrics.get('timing_errors', {}) if isinstance(error_metrics, dict) else {}
+        rhythm = error_metrics.get('rhythmic_consistency', {}) if isinstance(error_metrics, dict) else {}
+        dynamics = error_metrics.get('dynamic_control', {}) if isinstance(error_metrics, dict) else {}
+        articulation = error_metrics.get('articulation', {}) if isinstance(error_metrics, dict) else {}
+        score_data = error_metrics.get('performance_score', {}) if isinstance(error_metrics, dict) else {}
+
+        def _num(v: Any, default: Optional[float] = 0.0) -> Optional[float]:
+            if isinstance(v, (int, float)):
+                return float(v)
+            return default
+
+        goals: List[str] = []
+
+        accuracy = _num(note_acc.get('accuracy_percentage'), 0.0) or 0.0
+        if accuracy < 90:
+            goals.append("Build dependable note accuracy at performance tempo through staged tempo ramps")
+
+        std_ms = _num(timing.get('std_error_ms'), 0.0) or 0.0
+        rhythm_score = _num(rhythm.get('duration_consistency_score'), 0.0) or 0.0
+        if std_ms > 60 or rhythm_score < 0.75:
+            goals.append("Develop durable tempo/rhythm control across full phrases, not only isolated bars")
+
+        dyn_range = _num(dynamics.get('dynamic_range'), 0.0) or 0.0
+        ref_range = _num(dynamics.get('reference_dynamic_range'), None)
+        if dyn_range < 40 or (isinstance(ref_range, (int, float)) and ref_range > 1 and dyn_range < ref_range * 0.75):
+            goals.append("Expand and stabilize dynamic range while preserving tone quality")
+
+        art_cons = _num(articulation.get('articulation_consistency'), 0.0) or 0.0
+        if art_cons < 0.75:
+            goals.append("Improve articulation control so touch remains consistent through tempo changes")
+
+        score = _num(score_data.get('overall_score'), 0.0) or 0.0
+        if score >= 80:
+            goals.append("Expand repertoire complexity while maintaining current technical reliability")
+        else:
+            goals.append("Establish a sustainable weekly practice cycle with measured metric targets")
+
+        deduped = self._dedupe_text_list(goals)
+        return deduped[:3]
     
     def _set_target_scores(self, current_score: float) -> Dict[str, float]:
         """

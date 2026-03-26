@@ -17,17 +17,17 @@ model:
   trm_local_window_size: 64
 
   # Two-state recursion structure
-  trm_H_cycles: 3            # T: full recursion processes (T-1 no-grad + 1 with-grad)
-  trm_L_cycles: 6            # n: z_L updates per process before z_H update
+  trm_H_cycles: 2            # T: full recursion processes (T-1 no-grad + 1 with-grad)
+  trm_L_cycles: 4            # n: z_L updates per process before z_H update
 
   # Deep supervision
-  trm_n_sup: 3               # N_sup: supervision steps reusing detached carry
+  trm_n_sup: 2               # N_sup: supervision steps reusing detached carry
 
   # Learned initial states
   trm_learned_init: true
 
   # ACT / halt mechanism (Q-learning, toggleable)
-  trm_use_q_halt: true        # set to false to disable Q-learning halt entirely
+  trm_use_q_halt: false        # set to false to disable Q-learning halt entirely
   trm_halt_exploration_prob: 0.1
 
   # Auxiliary head for encoder-level deep supervision
@@ -35,7 +35,7 @@ model:
   trm_aux_vocab_size: ${model.vocab_size}
 
   # Gradient checkpointing for memory efficiency (enable on tight GPUs)
-  trm_gradient_checkpointing: false
+  trm_gradient_checkpointing: true
 
   # Per-recording embeddings (disabled by default)
   use_recording_id_embedding: false
@@ -43,13 +43,13 @@ model:
   recording_emb_dim: 64
 
 training:
-  notes: "V6_TRMv2_two_state_deep_sup"
+  notes: "V6_TRMv2_4-2cycle-5recursions"
 
   # EMA for training stability (paper: mu=0.999)
   use_ema: true
   ema_rate: 0.999
 
   # Loss weights
-  trm_aux_loss_weight: 0.1          # auxiliary head deep supervision loss
+  trm_aux_loss_weight: 0.15          # auxiliary head deep supervision loss
   trm_halt_loss_weight: 0.05        # Q-learning halt loss
   trm_aux_loss_warmup_steps: 1000   # warmup steps before full aux loss weight

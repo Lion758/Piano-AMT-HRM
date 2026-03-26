@@ -13,9 +13,12 @@ Also supports backend selection:
 - native: src.time_alignment.TimeAlignment (default)
 - paper_best: src.paper_time_alignment.PaperBestTimeAlignment (parangonar)
 """
-
+import argparse
 import os
 import json
+import sys
+import argparse
+from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
 from midi_parser import MIDIParser
@@ -487,3 +490,219 @@ def compare_performance(
         alignment_backend=alignment_backend,
         alignment_model=alignment_model,
     )
+
+def _resolve_default_path(*parts: str) -> Path:
+    return Path(__file__).resolve().parent.parent.joinpath(*parts)
+
+
+def _run_cli_compare(args: argparse.Namespace) -> int:
+    reference = args.reference.resolve()
+    performance = args.performance.resolve()
+    output_dir = args.output.resolve()
+
+    if not reference.exists():
+        print(f"Reference file not found: {reference}", file=sys.stderr)
+        return 2
+    if not performance.exists():
+        print(f"Performance file not found: {performance}", file=sys.stderr)
+        return 2
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result = compare_performance(
+        reference_path=str(reference),
+        performance_path=str(performance),
+        output_dir=str(output_dir),
+        alignment_backend=args.alignment_backend,
+        alignment_model=args.alignment_model,
+    )
+
+    print(f"Analysis complete. Results saved to: {output_dir}")
+    metrics = result.get("performance_analysis", {}).get("metrics", {})
+    if "performance_score" in metrics:
+        score = metrics["performance_score"].get("overall_score", 0)
+        grade = metrics["performance_score"].get("grade", "N/A")
+        print(f"Performance Score: {score:.1f}%")
+        print(f"Grade: {grade}")
+    return 0
+
+
+def _run_cli_compare_tutor(args: argparse.Namespace) -> int:
+    compare_status = _run_cli_compare(args)
+    if compare_status != 0:
+        return compare_status
+
+    output_dir = args.output.resolve()
+    summary_path = output_dir / "gpt_summary.json"
+    if not summary_path.exists():
+        print(f"Expected summary file not found: {summary_path}", file=sys.stderr)
+        return 2
+
+    try:
+        from openai import (
+            APIConnectionError,
+            APITimeoutError,
+            APIStatusError,
+            AuthenticationError,
+            BadRequestError,
+            RateLimitError,
+        )
+    except ModuleNotFoundError:
+        print(
+            "[analyzer compare-tutor] Missing dependency 'openai'. Install it with: pip install openai",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        from gpt_tutor import GPTTutor
+    except ModuleNotFoundError as exc:
+        missing = exc.name or "unknown"
+        print(
+            f"[analyzer compare-tutor] Missing dependency '{missing}'. Install required packages and retry.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        selected_model = (args.model or os.getenv("OPENAI_MODEL", "gpt-5-mini")).strip()
+        tutor = GPTTutor(model=selected_model)
+        first = tutor.start_session(
+            summary=str(summary_path),
+            user_prompt=args.prompt,
+            student_question=args.question,
+            max_output_tokens=args.max_output_tokens,
+            temperature=args.temperature,
+        )
+
+        print("\nGPT tutor feedback:\n")
+        print(first.get("text", "").strip())
+
+        state_path = args.state.resolve() if args.state else (output_dir / "tutor_session.json")
+        tutor.save_state(state_path)
+        print(f"\nTutor session saved: {state_path}")
+        return 0
+    except RuntimeError as exc:
+        print(f"[analyzer compare-tutor] Configuration error: {exc}", file=sys.stderr)
+        return 2
+    except AuthenticationError:
+        print(
+            "[analyzer compare-tutor] Authentication failed. Set a valid OPENAI_API_KEY and retry.",
+            file=sys.stderr,
+        )
+        return 2
+    except RateLimitError:
+        print(
+            "[analyzer compare-tutor] Rate limit or quota reached. Check billing/quota and retry.",
+            file=sys.stderr,
+        )
+        return 2
+    except BadRequestError as exc:
+        print(f"[analyzer compare-tutor] Bad request: {exc}", file=sys.stderr)
+        return 2
+    except (APIConnectionError, APITimeoutError):
+        print(
+            "[analyzer compare-tutor] Network/API connectivity error. Check internet and retry.",
+            file=sys.stderr,
+        )
+        return 2
+    except APIStatusError as exc:
+        print(f"[analyzer compare-tutor] API error (status {exc.status_code}): {exc}", file=sys.stderr)
+        return 2
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Analyzer CLI for MIDI comparison and tutor feedback.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    default_reference = _resolve_default_path("sample_files", "reference.mid")
+    default_performance = _resolve_default_path("sample_files", "performance.mid")
+    default_output = _resolve_default_path("analysis_results")
+
+    p_compare = sub.add_parser("compare", help="Run reference vs performance analysis")
+    p_compare.add_argument("--reference", type=Path, default=default_reference)
+    p_compare.add_argument("--performance", type=Path, default=default_performance)
+    p_compare.add_argument("--output", type=Path, default=default_output)
+    p_compare.add_argument(
+        "--alignment-backend",
+        type=str,
+        default="native",
+        choices=["native", "paper_best"],
+        help="Choose alignment engine.",
+    )
+    p_compare.add_argument(
+        "--alignment-model",
+        type=str,
+        default="automatic_hdtw_sym",
+        help="Paper backend model (used only when --alignment-backend=paper_best).",
+    )
+
+    p_compare_tutor = sub.add_parser(
+        "compare-tutor",
+        help="Run analyzer comparison, then immediately return GPT tutor feedback",
+    )
+    p_compare_tutor.add_argument("--reference", type=Path, default=default_reference)
+    p_compare_tutor.add_argument("--performance", type=Path, default=default_performance)
+    p_compare_tutor.add_argument("--output", type=Path, default=default_output)
+    p_compare_tutor.add_argument(
+        "--alignment-backend",
+        type=str,
+        default="native",
+        choices=["native", "paper_best"],
+        help="Choose alignment engine.",
+    )
+    p_compare_tutor.add_argument(
+        "--alignment-model",
+        type=str,
+        default="automatic_hdtw_sym",
+        help="Paper backend model (used only when --alignment-backend=paper_best).",
+    )
+    p_compare_tutor.add_argument(
+        "--prompt",
+        type=str,
+        default="",
+        help="Optional extra steering prompt for the tutor.",
+    )
+    p_compare_tutor.add_argument(
+        "--question",
+        type=str,
+        default="Please provide full constructive feedback for this performance.",
+        help="Student question for the first tutor response.",
+    )
+    p_compare_tutor.add_argument(
+        "--model",
+        type=str,
+        default=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+        help="OpenAI Responses API model for tutor output.",
+    )
+    p_compare_tutor.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=900,
+        help="Maximum output tokens for the first tutor response.",
+    )
+    p_compare_tutor.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Optional temperature. Omit for model default.",
+    )
+    p_compare_tutor.add_argument(
+        "--state",
+        type=Path,
+        default=None,
+        help="Optional path for saved tutor session state (defaults to output/tutor_session.json).",
+    )
+    return parser
+
+
+def main() -> int:
+    args = _build_arg_parser().parse_args()
+    if args.command == "compare":
+        return _run_cli_compare(args)
+    if args.command == "compare-tutor":
+        return _run_cli_compare_tutor(args)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

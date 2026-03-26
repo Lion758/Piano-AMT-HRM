@@ -53,8 +53,17 @@ package_info = {
 
 
 def __getattr__(name):
+    if name in {"MIDIAnalyzer", "quick_analyze", "compare_performance"}:
+        from analyzer import MIDIAnalyzer, quick_analyze, compare_performance
+
+        exports = {
+            "MIDIAnalyzer": MIDIAnalyzer,
+            "quick_analyze": quick_analyze,
+            "compare_performance": compare_performance,
+        }
+        return exports[name]
     if name in {"GPTTutor", "create_tutor_feedback"}:
-        from .gpt_tutor import GPTTutor, create_tutor_feedback
+        from gpt_tutor import GPTTutor, create_tutor_feedback
 
         exports = {
             "GPTTutor": GPTTutor,
