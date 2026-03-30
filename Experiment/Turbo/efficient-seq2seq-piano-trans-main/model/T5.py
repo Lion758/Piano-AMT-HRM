@@ -175,6 +175,7 @@ class Transformer(nn.Module):
             encoder_decoder_mask=encoder_decoder_mask,
             deterministic=not enable_dropout,
             decode=decode,
+            sliding_window_size=getattr(self.config, "decoder_window_size", None),
             decoder_targets_frame_index=decoder_targets_frame_index,
             )
         return decoder_output_dict
@@ -263,6 +264,7 @@ class Transformer(nn.Module):
             pred_step = 2
             
         use_kv_cache = True
+        decoder_window_size = getattr(self.config, "decoder_window_size", None)
         curr_token = torch.ones([batch_size, pred_step]).to(encoder_inputs) * TOKEN_START  # [batch_size, pred_step]
         for i in tqdm(range(0, target_seq_length, pred_step), desc="Generating tokens (rank %d)" % global_rank):
             encoded_i = encoded[:, :T, :]  # [batch_size, T, n_mel]
@@ -314,6 +316,7 @@ class Transformer(nn.Module):
                 encoder_decoder_mask=encoder_decoder_mask_i,
                 deterministic=True,
                 decode=use_kv_cache,
+                sliding_window_size=decoder_window_size,
                 )
             
             logits = decoder_output_dict["decoder_outputs"]
@@ -397,6 +400,5 @@ class Transformer(nn.Module):
 
     
     
-
 
 

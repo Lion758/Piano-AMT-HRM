@@ -117,6 +117,28 @@ def count_parameters(model: torch.nn.Module) -> Dict[str, int]:
     }
 
 
+def extract_turbo_quant_config(config: Any) -> Dict[str, Any]:
+    model_cfg = getattr(config, "model", None)
+    turbo_cfg = getattr(model_cfg, "turbo_quant", None) if model_cfg is not None else None
+    result: Dict[str, Any] = {
+        "decoder_window_size": getattr(model_cfg, "decoder_window_size", None) if model_cfg is not None else None,
+        "turbo_quant_enabled": False,
+    }
+    if turbo_cfg is None:
+        return result
+
+    result.update(
+        {
+            "turbo_quant_enabled": bool(getattr(turbo_cfg, "enabled", False)),
+            "turbo_quant_n_bits": getattr(turbo_cfg, "n_bits", None),
+            "turbo_quant_qjl_projection_dim": getattr(turbo_cfg, "qjl_projection_dim", None),
+            "turbo_quant_enable_qjl": getattr(turbo_cfg, "enable_qjl", None),
+            "turbo_quant_min_cache_len": getattr(turbo_cfg, "min_cache_len", None),
+        }
+    )
+    return result
+
+
 def locate_metrics_csv(checkpoint_path: Path) -> Optional[Path]:
     for candidate in (
         Path(str(checkpoint_path) + "_test") / "test_metrics_summary.csv",
@@ -196,6 +218,48 @@ def prepare_test_benchmark_batches(trainer, device: torch.device, num_batches: i
     return batches
 
 
+def reset_turbo_quant_runtime_stats(model: torch.nn.Module) -> None:
+    for module in model.modules():
+        cache = getattr(module, "turbo_quant_cache", None)
+        if cache is not None and hasattr(cache, "reset_stats"):
+            cache.reset_stats()
+
+
+def collect_turbo_quant_runtime_stats(model: torch.nn.Module) -> Dict[str, Any]:
+    caches = []
+    for module in model.modules():
+        cache = getattr(module, "turbo_quant_cache", None)
+        if cache is not None and hasattr(cache, "get_stats"):
+            caches.append(cache)
+
+    if not caches:
+        return {}
+
+    short_prefix_steps = 0
+    quantized_steps = 0
+    max_cache_len = 0
+    observed_window = None
+
+    for cache in caches:
+        stats = cache.get_stats()
+        short_prefix_steps += int(stats.get("short_prefix_steps", 0))
+        quantized_steps += int(stats.get("quantized_steps", 0))
+        max_cache_len = max(max_cache_len, int(stats.get("max_cache_len", 0)))
+        window_size = stats.get("last_window_size")
+        if window_size is not None:
+            observed_window = window_size if observed_window is None else max(observed_window, window_size)
+
+    return {
+        "turbo_quant_layers": len(caches),
+        "turbo_quant_short_prefix_steps": short_prefix_steps,
+        "turbo_quant_quantized_steps": quantized_steps,
+        "turbo_quant_bypass_observed": short_prefix_steps > 0,
+        "turbo_quant_path_observed": quantized_steps > 0,
+        "turbo_quant_max_cache_len": max_cache_len if max_cache_len > 0 else None,
+        "turbo_quant_observed_window": observed_window,
+    }
+
+
 def benchmark_generate(trainer, benchmark_batches: List[Dict[str, Any]], warmup_runs: int, device: torch.device) -> Dict[str, Any]:
     model = trainer.model.to(device).eval()
     total_tokens = 0
@@ -218,6 +282,8 @@ def benchmark_generate(trainer, benchmark_batches: List[Dict[str, Any]], warmup_
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
 
+        reset_turbo_quant_runtime_stats(model)
+
         for batch in benchmark_batches:
             if device.type == "cuda":
                 torch.cuda.empty_cache()
@@ -239,7 +305,7 @@ def benchmark_generate(trainer, benchmark_batches: List[Dict[str, Any]], warmup_
             total_tokens += int(output_tokens.numel())
             total_examples += int(output_tokens.shape[0])
 
-    return {
+    result = {
         "benchmark_source": benchmark_batches[0]["benchmark_source"],
         "benchmark_batches": len(benchmark_batches),
         "benchmark_examples": total_examples,
@@ -250,6 +316,8 @@ def benchmark_generate(trainer, benchmark_batches: List[Dict[str, Any]], warmup_
         "cuda_peak_allocated_mb": (peak_allocated_bytes / (1024 ** 2)) if peak_allocated_bytes is not None else None,
         "cuda_peak_reserved_mb": (peak_reserved_bytes / (1024 ** 2)) if peak_reserved_bytes is not None else None,
     }
+    result.update(collect_turbo_quant_runtime_stats(model))
+    return result
 
 
 def compare_one(
@@ -274,6 +342,7 @@ def compare_one(
         "device": str(device),
     }
     result.update(count_parameters(trainer.model))
+    result.update(extract_turbo_quant_config(config))
     result.update(load_average_metrics(locate_metrics_csv(checkpoint_path)))
 
     benchmark_batches = (
@@ -327,12 +396,23 @@ def main() -> None:
         "config",
         "encoder_name",
         "notes",
+        "turbo_quant_enabled",
+        "turbo_quant_n_bits",
+        "turbo_quant_qjl_projection_dim",
+        "turbo_quant_min_cache_len",
+        "decoder_window_size",
         "total_params",
         "trainable_params",
         "tokens_per_second",
         "examples_per_second",
         "cuda_peak_allocated_mb",
         "cuda_peak_reserved_mb",
+        "turbo_quant_bypass_observed",
+        "turbo_quant_path_observed",
+        "turbo_quant_short_prefix_steps",
+        "turbo_quant_quantized_steps",
+        "turbo_quant_max_cache_len",
+        "turbo_quant_observed_window",
         "benchmark_seconds",
         "generated_tokens",
         "benchmark_batches",
@@ -346,7 +426,20 @@ def main() -> None:
     df = df[[c for c in preferred_columns if c in df.columns] + [c for c in df.columns if c not in preferred_columns]]
 
     printable = df.copy()
-    for column in ("total_params", "trainable_params", "generated_tokens"):
+    for column in (
+        "total_params",
+        "trainable_params",
+        "generated_tokens",
+        "turbo_quant_layers",
+        "turbo_quant_short_prefix_steps",
+        "turbo_quant_quantized_steps",
+        "turbo_quant_max_cache_len",
+        "turbo_quant_observed_window",
+        "turbo_quant_n_bits",
+        "turbo_quant_qjl_projection_dim",
+        "turbo_quant_min_cache_len",
+        "decoder_window_size",
+    ):
         if column in printable.columns:
             printable[column] = printable[column].map(format_int)
     for column in ("tokens_per_second", "examples_per_second", "cuda_peak_allocated_mb", "cuda_peak_reserved_mb", "benchmark_seconds"):

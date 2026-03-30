@@ -33,5 +33,6 @@
   # turbo_quant:
   #   enabled: false
   #   n_bits: 4                # PolarQuant quantization bits (3 or 4)
-  #   qjl_projection_dim: 128  # QJL projection dimensionality
+  #   qjl_projection_dim: 64   # Keep <= head_dim for the speed-focused profile
   #   enable_qjl: true         # Enable QJL residual correction stage
+  #   min_cache_len: 32        # Bypass compression on very short decode prefixes

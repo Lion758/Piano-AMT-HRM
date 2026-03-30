@@ -153,7 +153,7 @@ class Decoder(nn.Module):
             layer.initialize_decoder_cache()
 
         
-    def forward(self, encoded, decoder_input_tokens, encoded_pooling_dict=None, decoder_positions=None, decoder_mask=None, encoder_decoder_mask=None, deterministic=False, decode=False, max_decode_length=None, decoder_targets_frame_index=None):
+    def forward(self, encoded, decoder_input_tokens, encoded_pooling_dict=None, decoder_positions=None, decoder_mask=None, encoder_decoder_mask=None, deterministic=False, decode=False, max_decode_length=None, sliding_window_size=None, decoder_targets_frame_index=None):
         cfg = self.config
         assert decoder_input_tokens.ndim == 2  # [batch, len]
         res_dict = {}
@@ -186,7 +186,15 @@ class Decoder(nn.Module):
             if encoder_decoder_mask_i is not None:
                 encoder_decoder_mask_i = encoder_decoder_mask_i[:, :, :seq_length, :encoded_i.size(1)]  # [batch, num_heads, length, encoded_length]
 
-            y = layer(y, encoded_i, decoder_mask=decoder_mask, encoder_decoder_mask=encoder_decoder_mask_i, decode=decode, decoder_targets_frame_index=decoder_targets_frame_index)
+            y = layer(
+                y,
+                encoded_i,
+                decoder_mask=decoder_mask,
+                encoder_decoder_mask=encoder_decoder_mask_i,
+                decode=decode,
+                sliding_window_size=sliding_window_size,
+                decoder_targets_frame_index=decoder_targets_frame_index,
+            )
             
             if hasattr(self.config, "get_encder_decoder_attention_weights") and self.config.get_encder_decoder_attention_weights:
                 res_dict[f"decoder_layer_cross_attention_weights_{layer_idx}"] = None  # Save attention weights for each layer

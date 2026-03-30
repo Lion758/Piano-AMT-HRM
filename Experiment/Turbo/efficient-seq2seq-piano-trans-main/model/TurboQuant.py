@@ -122,11 +122,27 @@ class TurboQuantCache(nn.Module):
     """
 
     def __init__(self, head_dim, num_heads, n_bits=4,
-                 qjl_projection_dim=128, layer_idx=0, enable_qjl=True):
+                 qjl_projection_dim=128, layer_idx=0, enable_qjl=True,
+                 min_cache_len=32):
         super().__init__()
+        if n_bits not in (3, 4):
+            raise ValueError(f"TurboQuant only supports 3-bit or 4-bit quantization, got {n_bits}.")
+        if min_cache_len < 0:
+            raise ValueError(f"TurboQuant min_cache_len must be >= 0, got {min_cache_len}.")
+        if enable_qjl:
+            if qjl_projection_dim <= 0:
+                raise ValueError(f"TurboQuant qjl_projection_dim must be > 0, got {qjl_projection_dim}.")
+            if qjl_projection_dim > head_dim:
+                raise ValueError(
+                    "TurboQuant qjl_projection_dim must be <= head_dim for the current speed profile: "
+                    f"got qjl_projection_dim={qjl_projection_dim}, head_dim={head_dim}."
+                )
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.enable_qjl = enable_qjl
+        self.n_bits = n_bits
+        self.qjl_projection_dim = qjl_projection_dim
+        self.min_cache_len = min_cache_len
 
         # PolarQuant instances for key and value (different seeds)
         self.key_pq = PolarQuant(head_dim, n_bits, seed=layer_idx * 2)
@@ -152,6 +168,7 @@ class TurboQuantCache(nn.Module):
         self.cached_key_qjl_norms = None
         self.cached_value_qjl_signs = None
         self.cached_value_qjl_norms = None
+        self.reset_stats()
 
     def _compress_role(self, x, pq, qjl):
         """Compress a single role (key or value) through PolarQuant + optional QJL."""
@@ -181,6 +198,53 @@ class TurboQuantCache(nn.Module):
         if cached is None:
             return new
         return torch.cat([cached, new], dim=1)
+
+    def should_quantize(self, cache_len):
+        return cache_len >= self.min_cache_len
+
+    def has_cached_values(self):
+        return self.cached_key_quantized is not None
+
+    def get_cache_len(self):
+        if self.cached_key_quantized is None:
+            return 0
+        return int(self.cached_key_quantized.size(1))
+
+    def reset_stats(self):
+        self.short_prefix_steps = 0
+        self.quantized_steps = 0
+        self.max_cache_len = 0
+        self.last_cache_len = 0
+        self.last_window_size = None
+
+    def _record_step(self, cache_len, window_size, used_quantized):
+        cache_len = int(cache_len)
+        if used_quantized:
+            self.quantized_steps += 1
+        else:
+            self.short_prefix_steps += 1
+        self.max_cache_len = max(self.max_cache_len, cache_len)
+        self.last_cache_len = cache_len
+        self.last_window_size = int(window_size) if window_size is not None else None
+
+    def note_short_prefix_step(self, cache_len, window_size=None):
+        self._record_step(cache_len, window_size, used_quantized=False)
+
+    def note_quantized_step(self, cache_len, window_size=None):
+        self._record_step(cache_len, window_size, used_quantized=True)
+
+    def get_stats(self):
+        return {
+            "short_prefix_steps": int(self.short_prefix_steps),
+            "quantized_steps": int(self.quantized_steps),
+            "max_cache_len": int(self.max_cache_len),
+            "last_cache_len": int(self.last_cache_len),
+            "last_window_size": self.last_window_size,
+            "min_cache_len": int(self.min_cache_len),
+            "n_bits": int(self.n_bits),
+            "enable_qjl": bool(self.enable_qjl),
+            "qjl_projection_dim": int(self.qjl_projection_dim),
+        }
 
     def compress_and_cache(self, key, value):
         """
@@ -244,6 +308,8 @@ class TurboQuantCache(nn.Module):
 
     def apply_sliding_window(self, window_size):
         """Truncate cache to last window_size entries along the sequence dim."""
+        if self.cached_key_quantized is None:
+            return
         self.cached_key_quantized = self.cached_key_quantized[:, -window_size:]
         self.cached_key_scale = self.cached_key_scale[:, -window_size:]
         self.cached_key_zp = self.cached_key_zp[:, -window_size:]

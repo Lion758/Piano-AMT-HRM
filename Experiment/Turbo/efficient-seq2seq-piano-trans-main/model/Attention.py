@@ -45,6 +45,7 @@ class Multi_Head_Attention(nn.Module):
                 qjl_projection_dim=turbo_quant_config.get('qjl_projection_dim', 128),
                 layer_idx=layer_idx,
                 enable_qjl=turbo_quant_config.get('enable_qjl', True),
+                min_cache_len=turbo_quant_config.get('min_cache_len', 32),
             )
             
 
@@ -112,14 +113,43 @@ class Multi_Head_Attention(nn.Module):
         
     def initialize_decoder_cache(self):
         """Initializes the cache for autoregressive decoding."""
+        self._clear_raw_cache()
+        if self.turbo_quant_cache is not None:
+            self.turbo_quant_cache.clear()
+
+    def _clear_raw_cache(self):
         if hasattr(self, 'cached_key'):
             delattr(self, 'cached_key')
         if hasattr(self, 'cached_value'):
             delattr(self, 'cached_value')
         if hasattr(self, 'cache_index'):
             delattr(self, 'cache_index')
-        if self.turbo_quant_cache is not None:
-            self.turbo_quant_cache.clear()
+
+    def _append_to_raw_cache(self, key, value, sliding_window_size=None):
+        if hasattr(self, 'cached_key'):
+            cached_key = getattr(self, 'cached_key')
+            cached_value = getattr(self, 'cached_value')
+            cached_index = getattr(self, 'cache_index')
+            key = torch.concat([cached_key, key], dim=1)
+            value = torch.concat([cached_value, value], dim=1)
+        else:
+            cached_index = 0
+
+        if sliding_window_size is not None:
+            key = key[:, -sliding_window_size:, :, :]
+            value = value[:, -sliding_window_size:, :, :]
+
+        setattr(self, 'cached_key', key)
+        setattr(self, 'cached_value', value)
+        setattr(self, 'cache_index', cached_index + 1)
+        return key, value
+
+    def _get_decode_cache_window(self, sliding_window_size):
+        if sliding_window_size is not None:
+            return sliding_window_size
+        if self.is_causal and self.window_size is not None:
+            return self.window_size
+        return None
 
     def forward(self, inputs_q, inputs_kv, mask=None, bias=None, decode=False, deterministic=False, return_attn_weights=False, sliding_window_size=None):
         #In Original MT3, they initialize the parameter with query_init, using customized Dense Layer
@@ -135,31 +165,30 @@ class Multi_Head_Attention(nn.Module):
                                 'expected query shape %s instead got %s.' %
                                 (expected_shape, query.size()))
 
+            cache_window_size = self._get_decode_cache_window(sliding_window_size)
             if self.turbo_quant_cache is not None:
-                # TurboQuant compressed KV cache path
-                self.turbo_quant_cache.compress_and_cache(key, value)
-                if sliding_window_size is not None:
-                    self.turbo_quant_cache.apply_sliding_window(sliding_window_size)
-                key, value = self.turbo_quant_cache.get_decompressed()
+                if self.turbo_quant_cache.has_cached_values():
+                    self.turbo_quant_cache.compress_and_cache(key, value)
+                    if cache_window_size is not None:
+                        self.turbo_quant_cache.apply_sliding_window(cache_window_size)
+                    key, value = self.turbo_quant_cache.get_decompressed()
+                    self.turbo_quant_cache.note_quantized_step(self.turbo_quant_cache.get_cache_len(), cache_window_size)
+                else:
+                    key, value = self._append_to_raw_cache(key, value, sliding_window_size=cache_window_size)
+                    raw_cache_len = key.size(1)
+                    if self.turbo_quant_cache.should_quantize(raw_cache_len):
+                        self.turbo_quant_cache.clear()
+                        self.turbo_quant_cache.compress_and_cache(key, value)
+                        if cache_window_size is not None:
+                            self.turbo_quant_cache.apply_sliding_window(cache_window_size)
+                        self._clear_raw_cache()
+                        key, value = self.turbo_quant_cache.get_decompressed()
+                        self.turbo_quant_cache.note_quantized_step(self.turbo_quant_cache.get_cache_len(), cache_window_size)
+                    else:
+                        self.turbo_quant_cache.note_short_prefix_step(raw_cache_len, cache_window_size)
             else:
                 # Original uncompressed cache path
-                if hasattr(self, 'cached_key'):
-                    cached_key = getattr(self, 'cached_key')
-                    cached_value = getattr(self, 'cached_value')
-                    cached_index = getattr(self, 'cache_index')
-                    key = torch.concat([cached_key, key], dim=1)  # Append new key
-                    value = torch.concat([cached_value, value], dim=1)  # Append
-                else:
-                    cached_index = 0
-
-                # Sliding window handling
-                if sliding_window_size is not None:
-                    key = key[:, -sliding_window_size:, :, :]
-                    value = value[:, -sliding_window_size:, :, :]
-
-                setattr(self, 'cached_key', key)
-                setattr(self, 'cached_value', value)
-                setattr(self, 'cache_index', cached_index + 1)
+                key, value = self._append_to_raw_cache(key, value, sliding_window_size=cache_window_size)
 
         if mask is not None:
             attention_bias = torch.where(mask > 0,

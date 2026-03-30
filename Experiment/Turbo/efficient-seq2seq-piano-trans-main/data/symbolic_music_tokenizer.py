@@ -578,7 +578,8 @@ class SymbolicMusicTokenizer:
         
         # Group by pitch and calculate the duration
         grouped = df.groupby(['pitch'])
-        for (pitch,), group in grouped:
+        for pitch_key, group in grouped:
+            pitch = pitch_key[0] if isinstance(pitch_key, tuple) else pitch_key
             # group = group.sort_values(by=['time', "type_id", "velocity"], ascending=[True, True, True])
             for i in range(len(group)):
                 event = group.iloc[i]
