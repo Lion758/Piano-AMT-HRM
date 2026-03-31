@@ -1,11 +1,9 @@
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as Functional
-import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -16,9 +14,6 @@ import hydra
 from model.T5 import Transformer
 from model.HPPNet import HPPNet
 from model.GPT import GPT
-from model.trm_encoder import compute_trm_halt_loss
-from model.trm_encoder_v2 import TrmEncoderV2, compute_trm_v2_halt_loss, compute_trm_v2_aux_loss
-from model.layers.ema import EMAHelper
 
 from data.dataset_Audio2Midi import Audio2Midi_Dataset
 import pytorch_lightning as pl
@@ -75,7 +70,6 @@ import utils.log_memory_usage as log_memory_usage
 import utils.sequence_processing as sequence_processing
 
 import shutil
-
 class MT3Trainer(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
@@ -86,14 +80,6 @@ class MT3Trainer(pl.LightningModule):
             self.model = Transformer(config=config.model)
         self.last_time_stamp = std_time.time()
         self.validation_step_count = 0
-        self._trm_training_warning_emitted = False
-
-        # EMA support (used with TrmEncoderV2)
-        self._ema_helper = None
-        if getattr(config.training, "use_ema", False):
-            ema_rate = float(getattr(config.training, "ema_rate", 0.999))
-            self._ema_helper = EMAHelper(mu=ema_rate)
-            # Registration deferred to on_train_start when model is on device
         self.criterion_list = []
         for loss_name, [outputs_name, targets_name, criterion_module] in config.training.losses.items():
             criterion_class_name = criterion_module.split(".")[-1]
@@ -122,10 +108,10 @@ class MT3Trainer(pl.LightningModule):
             self.features_extracter = log_stft_extracter
     
 
-    def forward(self, encoder_input_tokens, decoder_target_tokens, decode, decoder_input_tokens = None, decoder_positions=None, decoder_targets_frame_index=None, encoder_decoder_mask=None, recording_ids=None):
+    def forward(self, encoder_input_tokens, decoder_target_tokens, decode, decoder_input_tokens = None, decoder_positions=None, decoder_targets_frame_index=None, encoder_decoder_mask=None):
         return self.model.forward(encoder_input_tokens, decoder_target_tokens, decode=decode, decoder_input_tokens=decoder_input_tokens, decoder_positions=decoder_positions, 
                 decoder_targets_frame_index=decoder_targets_frame_index,
-                encoder_decoder_mask=encoder_decoder_mask, recording_ids=recording_ids)
+                encoder_decoder_mask=encoder_decoder_mask)
     
     def log_time_event(self, event_name):
         if self.global_rank == 0:
@@ -135,31 +121,6 @@ class MT3Trainer(pl.LightningModule):
                 self.log("time/%s"%event_name, dur)
                 print("time/%s"%event_name, "%.3f"%dur)
             self.last_time_stamp = curr_time
-
-    def _get_trm_halt_loss_weight(self) -> float:
-        if hasattr(self.config.training, "trm_halt_loss_weight"):
-            return float(getattr(self.config.training, "trm_halt_loss_weight"))
-
-        legacy_keys = [
-            key
-            for key in (
-                "hrm_q_loss_weight",
-                "hrm_q_loss_init_weight",
-                "hrm_q_loss_warmup_steps",
-                "hrm_q_loss_ramp_steps",
-            )
-            if hasattr(self.config.training, key)
-        ]
-        if legacy_keys and not self._trm_training_warning_emitted:
-            warnings.warn(
-                "Deprecated HRM Q-loss schedule keys detected; use "
-                "training.trm_halt_loss_weight instead. Warmup/ramp scheduling is ignored.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self._trm_training_warning_emitted = True
-
-        return float(getattr(self.config.training, "hrm_q_loss_weight", 0.05))
     
     def forward_step(self, batch, batch_idx, forward_type, cal_metrics=False):
         """_summary_
@@ -226,7 +187,7 @@ class MT3Trainer(pl.LightningModule):
         # => [B*T, n_token, vocab_size], [B, T, 128]
         outputs_dict = self.forward(encoder_input_tokens=inputs, decoder_target_tokens=decoder_target_tokens, decode=False, decoder_input_tokens = decoder_inputs, 
                                     decoder_targets_frame_index=decoder_targets_frame_index,
-                                    encoder_decoder_mask=encoder_decoder_mask, recording_ids=batch.get('audio_ids_contiguous', None))
+                                    encoder_decoder_mask=encoder_decoder_mask)
         self.log_time_event("forward_done")
 
         # cal losses
@@ -251,94 +212,7 @@ class MT3Trainer(pl.LightningModule):
                     loss_dict[dic["loss_name"]] = loss
                     total_loss += loss
             loss_dict["loss"] = total_loss
-
-        # TRM v2 losses (TrmEncoderV2 deep supervision + halt)
-        if "trm_aux" in outputs_dict and outputs_dict["trm_aux"] is not None and "all_aux_logits" in outputs_dict["trm_aux"]:
-            trm_aux = outputs_dict["trm_aux"]
-            all_aux_logits = trm_aux["all_aux_logits"]
-            all_halt_logits = trm_aux["all_halt_logits"]
-            actual_sup_steps = trm_aux.get("actual_sup_steps", len(all_aux_logits))
-
-            # --- Auxiliary head deep supervision loss ---
-            aux_loss_weight = float(getattr(self.config.training, "trm_aux_loss_weight", 0.1))
-            aux_warmup = int(getattr(self.config.training, "trm_aux_loss_warmup_steps", 1000))
-            if n_steps < aux_warmup:
-                aux_loss_weight = aux_loss_weight * (n_steps / max(aux_warmup, 1))
-
-            has_frame_index = decoder_targets_frame_index is not None
-            aux_loss, per_step_correct = compute_trm_v2_aux_loss(
-                all_aux_logits,
-                targets,
-                targets_mask,
-                decoder_targets_frame_index=decoder_targets_frame_index if has_frame_index else None,
-            )
-            aux_loss_scaled = aux_loss_weight * aux_loss
-            loss_dict["trm_v2_aux_loss"] = aux_loss.detach()
-            loss_dict["trm_v2_aux_loss_scaled"] = aux_loss_scaled.detach()
-            loss_dict["loss"] = loss_dict["loss"] + aux_loss_scaled
-
-            # --- Halt Q-learning loss (toggleable) ---
-            halt_loss_weight = float(getattr(self.config.training, "trm_halt_loss_weight", 0.05))
-            use_q_halt = trm_aux.get("use_q_halt", False)
-            if use_q_halt and any(h is not None for h in all_halt_logits):
-                halt_loss = compute_trm_v2_halt_loss(all_halt_logits, per_step_correct)
-                halt_loss_scaled = halt_loss_weight * halt_loss
-                loss_dict["trm_v2_halt_loss"] = halt_loss.detach()
-                loss_dict["trm_v2_halt_loss_scaled"] = halt_loss_scaled.detach()
-                loss_dict["loss"] = loss_dict["loss"] + halt_loss_scaled
-
-                # Log last halt logit
-                last_halt = all_halt_logits[-1]
-                if last_halt is not None:
-                    loss_dict["trm_v2_halt_logit_mean"] = last_halt.detach().mean()
-
-            loss_dict["trm_v2_actual_sup_steps"] = torch.tensor(float(actual_sup_steps), device=targets.device)
-            self.log_time_event("loss_cal_done")
-
-        # TRM v1 halting loss (only when using the old TrmEncoder path)
-        elif "trm_aux" in outputs_dict and outputs_dict["trm_aux"] is not None and "halt_logits" in outputs_dict["trm_aux"]:
-            # Use the decoder cross-entropy as a proxy for per-example difficulty.
-            with torch.no_grad():
-                decoder_outputs_for_q = outputs_dict["decoder_outputs"].detach()  # [B, T, vocab]
-                targets_for_q = targets.clone()
-                targets_for_q[targets_mask == 0] = TOKEN_PAD
-                token_level_loss = Functional.cross_entropy(
-                    decoder_outputs_for_q.transpose(1, 2).float(),
-                    targets_for_q,
-                    ignore_index=TOKEN_PAD,
-                    reduction='none'
-                )  # [B, T]
-                valid_token_count = targets_mask.sum(dim=1).clamp_min(1).to(token_level_loss.dtype)
-                per_example_loss = token_level_loss.sum(dim=1) / valid_token_count
-
-            halt_loss, halt_components = compute_trm_halt_loss(
-                outputs_dict["trm_aux"],
-                per_example_loss,
-                return_components=True,
-            )
-
-            halt_loss_weight = self._get_trm_halt_loss_weight()
-            ce_loss_value = loss_dict["loss"].detach()
-            halt_loss_scaled = halt_loss_weight * halt_loss
-            loss_dict["trm_halt_loss"] = halt_loss
-            loss_dict["trm_halt_term"] = halt_components["halt_term"]
-            loss_dict["trm_target_step_mean"] = halt_components["target_step_mean"]
-            loss_dict["trm_halt_loss_weight"] = torch.tensor(
-                halt_loss_weight,
-                device=halt_loss.device,
-            )
-            loss_dict["trm_halt_loss_scaled"] = halt_loss_scaled.detach()
-            loss_dict["trm_halt_to_ce_ratio"] = halt_loss_scaled.detach() / (ce_loss_value + 1e-8)
-            loss_dict["loss"] = loss_dict["loss"] + halt_loss_scaled
-
-            steps_per_example = outputs_dict["trm_aux"].get("steps_per_example")
-            if steps_per_example is not None:
-                loss_dict["trm_predicted_steps_mean"] = steps_per_example.float().mean()
-            halt_logits_last = outputs_dict["trm_aux"].get("halt_logits_last")
-            if halt_logits_last is not None:
-                loss_dict["trm_halt_logit_mean"] = halt_logits_last.mean()
-
-            self.log_time_event("loss_cal_done")
+        self.log_time_event("loss_cal_done")
         
         decoder_outputs = outputs_dict["decoder_outputs"]
         decoder_outputs_probs = torch.softmax(decoder_outputs, dim=-1)[..., :VOCAB_SIZE]
@@ -435,12 +309,6 @@ class MT3Trainer(pl.LightningModule):
         metrics_dict.update(metrict_ret)
     
 
-    def on_train_start(self):
-        """Register EMA after model is on device."""
-        if self._ema_helper is not None and not self._ema_helper.shadow:
-            self._ema_helper.register(self.model)
-        return super().on_train_start()
-
     def training_step(self, batch, batch_idx, dataloader_idx = None): # This batch_indx will be reseted to 0 in a new epoch.
         cal_metrics = False
         if self.global_rank == 0 and self.global_step % self.config.training.cal_metrics_every_n_steps == 0:
@@ -455,10 +323,6 @@ class MT3Trainer(pl.LightningModule):
                     os.system("mkdir -p %s"%cpt_dir)
                     checkpoint_path = cpt_dir + '/steps_' + str(self.global_step)+'.ckpt'
                     torch.save(self.model.state_dict(), checkpoint_path)
-                    # Save EMA weights alongside if available
-                    if self._ema_helper is not None and self._ema_helper.shadow:
-                        ema_path = checkpoint_path.replace('.ckpt', '_ema.ckpt')
-                        torch.save(self._ema_helper.state_dict(), ema_path)
                     if hasattr(self, "previous_cpt_path"):
                         if self.prev_checkpoint_step in [10000, 50000, 100000, 200000]:
                             pass
@@ -483,14 +347,9 @@ class MT3Trainer(pl.LightningModule):
                     log_memory_usage.log_gpu_memory_usage(self)
 
         self.log_time_event("forward_step_done")
-
+        
         return loss_dict["loss"]
-
-    def on_before_zero_grad(self, optimizer):
-        """Update EMA weights after optimizer step, before zero_grad."""
-        if self._ema_helper is not None:
-            self._ema_helper.update(self.model)
-
+    
     @rank_zero_only
     def on_train_epoch_end(self,):
         # Save checkpoint.
@@ -504,11 +363,7 @@ class MT3Trainer(pl.LightningModule):
         
     @torch.no_grad()
     def on_validation_start(self):
-        # Swap to EMA weights for validation if available
-        if self._ema_helper is not None and self._ema_helper.shadow:
-            self._ema_original_state = {k: v.clone() for k, v in self.model.state_dict().items() if k in self._ema_helper.shadow}
-            self._ema_helper.ema(self.model)
-
+        
         # Manually call test_steps (online testing).
         if self.global_step > 1 and self.config.training.online_testing: # skip the validation step in the init epoch.
             self.test_outputs_dict = defaultdict(list)
@@ -522,15 +377,6 @@ class MT3Trainer(pl.LightningModule):
         
         return super().on_validation_start()
     
-    def on_validation_end(self):
-        """Restore original (non-EMA) weights after validation."""
-        if hasattr(self, "_ema_original_state") and self._ema_original_state:
-            for name, param in self.model.named_parameters():
-                if name in self._ema_original_state:
-                    param.data.copy_(self._ema_original_state[name])
-            self._ema_original_state = {}
-        return super().on_validation_end()
-
     @torch.no_grad()
     def validation_step(self, batch, batch_idx, dataloader_idx = None):
         outputs_dict, targets_dict, loss_dict, metrics_dict = self.forward_step(batch, batch_idx, "validation", cal_metrics=True)
@@ -759,28 +605,12 @@ class MT3Trainer(pl.LightningModule):
 
 
     def configure_optimizers(self):
-    # Separate recording embedding parameters for higher LR.
-        rec_emb_params = []
-        main_params = []
-        for name, param in self.model.named_parameters():
-            if 'recording_embed' in name or 'recording_proj' in name:
-                rec_emb_params.append(param)
-            else:
-                main_params.append(param)
+        optimizer = AdamW(self.model.parameters(), self.config.training.learning_rate)
 
-        optimizer_groups = [{
-            'params': main_params,
-            'lr': self.config.training.learning_rate,    # e.g. 1e-4
-        }]
-        if len(rec_emb_params) > 0:
-            rec_lr_mult = getattr(self.config.training, 'recording_emb_lr_multiplier', 100.0)
-            optimizer_groups.append({
-                'params': rec_emb_params,
-                'lr': self.config.training.learning_rate * rec_lr_mult,
-                'weight_decay': 0.01,
-            })
-
-        optimizer = AdamW(optimizer_groups)
+        # scheduler = CosineAnnealingLR(optimizer, T_max=10)
+        # scheduler.get_lr()
+        # return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler}}
+        
         return optimizer
     
     
@@ -910,11 +740,10 @@ def my_main(config: OmegaConf):
     # model.model = torch.compile(model.model)
     
     # Create logger.
-    wandb_offline = bool(getattr(config.training, "debug_log_offline", False))
     if "DEBUG" in os.environ and os.environ["DEBUG"] == "True":
-        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="mt3-score-pytorch-debug", offline=wandb_offline, save_dir=log_dir) #, rank_zero_only=True
+        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="mt3-score-pytorch-debug", offline=config.training.debug_log_offline, save_dir=log_dir) #, rank_zero_only=True
     else:
-        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="AMT-audio-to-midi", offline=wandb_offline, save_dir=log_dir, notes=config.training.notes) #, rank_zero_only=True
+        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="AMT-audio-to-midi", offline=False, save_dir=log_dir, notes=config.training.notes) #, rank_zero_only=True
     tensorboard_logger = TensorBoardLogger(save_dir=log_dir)
 
     # Save informations to log dir.

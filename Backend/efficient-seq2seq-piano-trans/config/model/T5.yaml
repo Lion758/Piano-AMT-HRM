@@ -11,7 +11,7 @@
   # 6) End Tie Section(1 value)
   # 7) EOS(1 value)
   # """
-  encoder_name: "TrmEncoder" # "TrmEncoder" # "TransformerEncoder" # "CNNFreqTransEncoder" # "CNNEncoder", "TransformerEncoder"
+  encoder_name: "TransformerEncoder" # "TrmEncoder" # "TransformerEncoder" # "CNNFreqTransEncoder" # "CNNEncoder", "TransformerEncoder"
   decoder_name: "TransformerDecoder" # "TransformerDecoder", "FrameLvTransDec"
   encoder_attention: "Multi_Head_Attention" # Multi_Head_Attention, RelativeGlobalAttention
   encoder_position_emb: true

@@ -1,10 +1,7 @@
 defaults:
-  - experiment_T5_V3_HybridGlobalLocalCrossAttn
-
-audio_path: "${hydra:runtime.cwd}/../../../external/efficient-seq2seq-piano-trans/audio/Franz-Liszt_Liebestraum.mp3"
+  - experiment_T5_V4_HierarchyPool
 
 model:
-  checkpoint_path: "${hydra:runtime.cwd}/../../../external/efficient-seq2seq-piano-trans/checkpoints/T5_V4_steps_200000.ckpt"
   turbo_quant:
     enabled: true
     n_bits: 4

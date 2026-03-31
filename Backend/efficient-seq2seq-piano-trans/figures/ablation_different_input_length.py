@@ -25,11 +25,12 @@ batch_size=64
 tokens_per_sec_baseline = [38.04, 22.25, 14.84]
 memory_usage_baseline = [4.91, 10.95, 19.01]
 
+memory_usage  = [10.2]
 tokens_per_sec_v5 = [80.75, 66.74, 53.92]
 memory_usage_v5 = [2.89, 7.17, 10.15]
 
 # baseline, local encoder attention, local encoder and hierarchical pooling, local encoder & decoder attention and hierarchical pooling
-# tokens_per_sec = [20.86, , 23.76, 30.40]
+tokens_per_sec = [20.86,  23.76, 30.40]
 # batch_size 64
 # [,, , ,48.34]
 # batchsize 256

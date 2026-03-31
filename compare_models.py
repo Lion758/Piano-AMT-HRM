@@ -1,4 +1,5 @@
 import argparse
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -8,10 +9,25 @@ import torch
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+ROOT_DIR = Path(__file__).resolve().parent
+DEFAULT_BACKEND_DIR = ROOT_DIR / "Backend" / "efficient-seq2seq-piano-trans"
+
+
+def ensure_backend_on_path(backend_dir: Path) -> None:
+    backend_dir_str = str(backend_dir)
+    if backend_dir_str not in sys.path:
+        sys.path.insert(0, backend_dir_str)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare efficient-seq2seq checkpoints by params, speed, and available test metrics."
+        description="Compare efficient-seq2seq checkpoints by config, parameter counts, and decode benchmark results."
+    )
+    parser.add_argument(
+        "--backend-dir",
+        type=str,
+        default=str(DEFAULT_BACKEND_DIR),
+        help="Path to the efficient-seq2seq-piano-trans backend directory.",
     )
     parser.add_argument(
         "--checkpoint",
@@ -25,7 +41,14 @@ def parse_args() -> argparse.Namespace:
         action="append",
         dest="configs",
         default=None,
-        help="Optional config path matching a checkpoint by position. If omitted, auto-detect experiment_config.yaml.",
+        help="Optional config YAML path matching a checkpoint by position. If omitted, auto-detect experiment_config.yaml.",
+    )
+    parser.add_argument(
+        "--config-name",
+        action="append",
+        dest="config_names",
+        default=None,
+        help="Optional Hydra config name under <backend-dir>/config, such as experiment_T5_V4_HierarchyPool.",
     )
     parser.add_argument(
         "--audio-path",
@@ -56,6 +79,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Optional path to save the comparison table as CSV.",
+    )
+    parser.add_argument(
+        "--include-historical-metrics",
+        action="store_true",
+        help="Include checkpoint-side historical test metrics from test_metrics_summary.csv.",
     )
     parser.add_argument(
         "--device",
@@ -98,6 +126,22 @@ def load_config(config_path: Path, checkpoint_path: Path, overrides: List[str], 
         config.training.batch_inference = batch_size
         config.training.batch_test = batch_size
     return config
+
+
+def resolve_config_reference(
+    checkpoint_path: Path,
+    config_ref: Optional[str],
+    config_name: Optional[str],
+    backend_dir: Path,
+) -> Path:
+    if config_ref is not None:
+        return Path(config_ref).expanduser().resolve()
+    if config_name is not None:
+        return (backend_dir / "config" / f"{config_name}.yaml").resolve()
+    default_config = find_default_config(checkpoint_path)
+    if default_config is None:
+        raise FileNotFoundError(f"Could not find a config for {checkpoint_path}. Pass --config or --config-name explicitly.")
+    return default_config.resolve()
 
 
 def load_checkpoint(trainer, checkpoint_path: Path, strict: bool = False) -> None:
@@ -150,17 +194,33 @@ def locate_metrics_csv(checkpoint_path: Path) -> Optional[Path]:
 
 
 def load_average_metrics(metrics_csv: Optional[Path]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "historical_metrics_available": False,
+        "historical_metrics_csv": None,
+    }
     if metrics_csv is None or not metrics_csv.exists():
-        return {}
+        return out
     df = pd.read_csv(metrics_csv)
     if df.empty:
-        return {}
+        return out
     avg_row = df.iloc[0].to_dict()
-    out: Dict[str, Any] = {}
-    for key, value in avg_row.items():
-        if key != "midi_path":
-            out[f"metric_{key}"] = value
-    out["metrics_csv"] = str(metrics_csv)
+    key_map = {
+        "batch_size": "historical_batch_size",
+        "note_precision": "historical_note_onset_precision",
+        "note_recall": "historical_note_onset_recall",
+        "note_f1": "historical_note_onset_f1",
+        "note+offset_precision": "historical_note_with_offset_precision",
+        "note+offset_recall": "historical_note_with_offset_recall",
+        "note+offset_f1": "historical_note_with_offset_f1",
+        "note+offset+velocity_precision": "historical_note_with_offset_velocity_precision",
+        "note+offset+velocity_recall": "historical_note_with_offset_velocity_recall",
+        "note+offset+velocity_f1": "historical_note_with_offset_velocity_f1",
+        "target_length": "historical_target_length",
+    }
+    for old_key, new_key in key_map.items():
+        out[new_key] = avg_row.get(old_key)
+    out["historical_metrics_available"] = True
+    out["historical_metrics_csv"] = str(metrics_csv)
     return out
 
 
@@ -190,7 +250,7 @@ def prepare_audio_benchmark_batch(trainer, audio_path: Path, device: torch.devic
         "encoder_inputs": encoder_inputs,
         "target_seq_length": int(trainer.config.data.max_token_length),
         "benchmark_source": str(audio_path),
-        "num_examples": int(encoder_inputs.shape[0]),
+        "num_clips": int(encoder_inputs.shape[0]),
     }
 
 
@@ -212,7 +272,7 @@ def prepare_test_benchmark_batches(trainer, device: torch.device, num_batches: i
                 "encoder_inputs": encoder_inputs,
                 "target_seq_length": int(batch["decoder_targets"].size(1)),
                 "benchmark_source": "test_dataloader:first_batches",
-                "num_examples": int(encoder_inputs.shape[0]),
+                "num_clips": int(encoder_inputs.shape[0]),
             }
         )
     return batches
@@ -260,11 +320,34 @@ def collect_turbo_quant_runtime_stats(model: torch.nn.Module) -> Dict[str, Any]:
     }
 
 
+def count_decoded_tokens(output_tokens: torch.Tensor) -> int:
+    from data.constants import TOKEN_END, TOKEN_PAD
+
+    if output_tokens.ndim != 2:
+        return int(output_tokens.numel())
+
+    decoded_tokens = 0
+    for sequence in output_tokens:
+        eos_positions = (sequence == TOKEN_END).nonzero(as_tuple=False)
+        if eos_positions.numel() > 0:
+            decoded_tokens += int(eos_positions[0].item()) + 1
+            continue
+
+        pad_positions = (sequence == TOKEN_PAD).nonzero(as_tuple=False)
+        if pad_positions.numel() > 0:
+            decoded_tokens += int(pad_positions[0].item())
+            continue
+
+        decoded_tokens += int(sequence.numel())
+
+    return decoded_tokens
+
+
 def benchmark_generate(trainer, benchmark_batches: List[Dict[str, Any]], warmup_runs: int, device: torch.device) -> Dict[str, Any]:
     model = trainer.model.to(device).eval()
-    total_tokens = 0
-    total_examples = 0
-    total_seconds = 0.0
+    total_decoded_tokens = 0
+    total_clips = 0
+    total_decode_seconds = 0.0
     peak_allocated_bytes = None
     peak_reserved_bytes = None
 
@@ -301,20 +384,20 @@ def benchmark_generate(trainer, benchmark_batches: List[Dict[str, Any]], warmup_
                 batch_peak_reserved = int(torch.cuda.max_memory_reserved(device))
                 peak_allocated_bytes = batch_peak_allocated if peak_allocated_bytes is None else max(peak_allocated_bytes, batch_peak_allocated)
                 peak_reserved_bytes = batch_peak_reserved if peak_reserved_bytes is None else max(peak_reserved_bytes, batch_peak_reserved)
-            total_seconds += time.perf_counter() - start
-            total_tokens += int(output_tokens.numel())
-            total_examples += int(output_tokens.shape[0])
+            total_decode_seconds += time.perf_counter() - start
+            total_decoded_tokens += count_decoded_tokens(output_tokens)
+            total_clips += int(batch["num_clips"])
 
     result = {
         "benchmark_source": benchmark_batches[0]["benchmark_source"],
         "benchmark_batches": len(benchmark_batches),
-        "benchmark_examples": total_examples,
-        "benchmark_seconds": total_seconds,
-        "generated_tokens": total_tokens,
-        "tokens_per_second": (total_tokens / total_seconds) if total_seconds > 0 else None,
-        "examples_per_second": (total_examples / total_seconds) if total_seconds > 0 else None,
-        "cuda_peak_allocated_mb": (peak_allocated_bytes / (1024 ** 2)) if peak_allocated_bytes is not None else None,
-        "cuda_peak_reserved_mb": (peak_reserved_bytes / (1024 ** 2)) if peak_reserved_bytes is not None else None,
+        "benchmark_clips": total_clips,
+        "decode_seconds": total_decode_seconds,
+        "decoded_tokens": total_decoded_tokens,
+        "decoded_tokens_per_second": (total_decoded_tokens / total_decode_seconds) if total_decode_seconds > 0 else None,
+        "clips_per_second": (total_clips / total_decode_seconds) if total_decode_seconds > 0 else None,
+        "cuda_generate_peak_allocated_mb": (peak_allocated_bytes / (1024 ** 2)) if peak_allocated_bytes is not None else None,
+        "cuda_generate_peak_reserved_mb": (peak_reserved_bytes / (1024 ** 2)) if peak_reserved_bytes is not None else None,
     }
     result.update(collect_turbo_quant_runtime_stats(model))
     return result
@@ -329,6 +412,7 @@ def compare_one(
     num_batches: int,
     warmup_runs: int,
     device: torch.device,
+    include_historical_metrics: bool,
 ) -> Dict[str, Any]:
     config = load_config(config_path, checkpoint_path, overrides, batch_size)
     trainer = build_trainer(config)
@@ -343,7 +427,8 @@ def compare_one(
     }
     result.update(count_parameters(trainer.model))
     result.update(extract_turbo_quant_config(config))
-    result.update(load_average_metrics(locate_metrics_csv(checkpoint_path)))
+    if include_historical_metrics:
+        result.update(load_average_metrics(locate_metrics_csv(checkpoint_path)))
 
     benchmark_batches = (
         [prepare_audio_benchmark_batch(trainer, audio_path, device)]
@@ -360,18 +445,35 @@ def format_int(value: Any) -> Any:
 
 def main() -> None:
     args = parse_args()
+    backend_dir = Path(args.backend_dir).expanduser().resolve()
+    if not backend_dir.exists():
+        raise FileNotFoundError(f"Backend directory not found: {backend_dir}")
+    ensure_backend_on_path(backend_dir)
+
     checkpoints = [Path(p).expanduser().resolve() for p in args.checkpoints]
     configs = args.configs or []
+    config_names = args.config_names or []
+    if configs and config_names:
+        raise ValueError("Use either --config or --config-name, not both.")
     if configs and len(configs) not in (1, len(checkpoints)):
         raise ValueError("Pass either one --config for all checkpoints or one --config per checkpoint.")
+    if config_names and len(config_names) not in (1, len(checkpoints)):
+        raise ValueError("Pass either one --config-name for all checkpoints or one --config-name per checkpoint.")
 
     resolved_configs: List[Path] = []
     for idx, checkpoint in enumerate(checkpoints):
         if not checkpoint.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
-        config_path = Path(configs[0 if len(configs) == 1 else idx]).expanduser().resolve() if configs else find_default_config(checkpoint)
-        if config_path is None or not config_path.exists():
-            raise FileNotFoundError(f"Could not find a config for {checkpoint}. Pass --config explicitly.")
+        config_ref = configs[0 if len(configs) == 1 else idx] if configs else None
+        config_name = config_names[0 if len(config_names) == 1 else idx] if config_names else None
+        config_path = resolve_config_reference(
+            checkpoint_path=checkpoint,
+            config_ref=config_ref,
+            config_name=config_name,
+            backend_dir=backend_dir,
+        )
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config not found: {config_path}")
         resolved_configs.append(config_path)
 
     device = torch.device(args.device)
@@ -386,6 +488,7 @@ def main() -> None:
             num_batches=args.num_batches,
             warmup_runs=args.warmup_runs,
             device=device,
+            include_historical_metrics=args.include_historical_metrics,
         )
         for checkpoint, config_path in zip(checkpoints, resolved_configs)
     ]
@@ -403,25 +506,34 @@ def main() -> None:
         "decoder_window_size",
         "total_params",
         "trainable_params",
-        "tokens_per_second",
-        "examples_per_second",
-        "cuda_peak_allocated_mb",
-        "cuda_peak_reserved_mb",
+        "decoded_tokens_per_second",
+        "clips_per_second",
+        "decode_seconds",
+        "decoded_tokens",
+        "benchmark_batches",
+        "benchmark_clips",
+        "benchmark_source",
+        "cuda_generate_peak_allocated_mb",
+        "cuda_generate_peak_reserved_mb",
         "turbo_quant_bypass_observed",
         "turbo_quant_path_observed",
         "turbo_quant_short_prefix_steps",
         "turbo_quant_quantized_steps",
         "turbo_quant_max_cache_len",
         "turbo_quant_observed_window",
-        "benchmark_seconds",
-        "generated_tokens",
-        "benchmark_batches",
-        "benchmark_examples",
-        "benchmark_source",
-        "metric_note_f1",
-        "metric_note+offset_f1",
-        "metric_note+offset+velocity_f1",
-        "metrics_csv",
+        "historical_metrics_available",
+        "historical_batch_size",
+        "historical_note_onset_precision",
+        "historical_note_onset_recall",
+        "historical_note_onset_f1",
+        "historical_note_with_offset_precision",
+        "historical_note_with_offset_recall",
+        "historical_note_with_offset_f1",
+        "historical_note_with_offset_velocity_precision",
+        "historical_note_with_offset_velocity_recall",
+        "historical_note_with_offset_velocity_f1",
+        "historical_target_length",
+        "historical_metrics_csv",
     ]
     df = df[[c for c in preferred_columns if c in df.columns] + [c for c in df.columns if c not in preferred_columns]]
 
@@ -429,7 +541,9 @@ def main() -> None:
     for column in (
         "total_params",
         "trainable_params",
-        "generated_tokens",
+        "decoded_tokens",
+        "benchmark_batches",
+        "benchmark_clips",
         "turbo_quant_layers",
         "turbo_quant_short_prefix_steps",
         "turbo_quant_quantized_steps",
@@ -442,7 +556,13 @@ def main() -> None:
     ):
         if column in printable.columns:
             printable[column] = printable[column].map(format_int)
-    for column in ("tokens_per_second", "examples_per_second", "cuda_peak_allocated_mb", "cuda_peak_reserved_mb", "benchmark_seconds"):
+    for column in (
+        "decoded_tokens_per_second",
+        "clips_per_second",
+        "cuda_generate_peak_allocated_mb",
+        "cuda_generate_peak_reserved_mb",
+        "decode_seconds",
+    ):
         if column in printable.columns:
             printable[column] = printable[column].map(lambda x: None if pd.isna(x) else round(float(x), 3))
 
