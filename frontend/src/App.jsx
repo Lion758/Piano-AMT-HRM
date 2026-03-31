@@ -1,5 +1,6 @@
 import { useState } from "react";
 import "./index.css";
+import pianoBanner from "./assets/piano-banner.png";
 
 function App() {
   const [selectedFile, setSelectedFile] = useState(null);
@@ -20,15 +21,15 @@ function App() {
     }
   };
 
-  const handleTranscribe = async () => {
+  const handleSeparateStems = async () => {
     if (!selectedFile) {
       setError("Please choose an audio file first.");
       return;
     }
 
-    setStatus("Uploading and separating audio...");
     setError("");
     setStems(null);
+    setStatus("Uploading audio and separating stems...");
 
     try {
       const formData = new FormData();
@@ -40,12 +41,12 @@ function App() {
       });
 
       if (!response.ok) {
-        throw new Error("Backend request failed.");
+        throw new Error("Failed to separate stems.");
       }
 
       const data = await response.json();
       setStems(data.stems);
-      setStatus("Separation completed successfully.");
+      setStatus("Stem separation completed successfully.");
     } catch (err) {
       setError(err.message);
       setStatus("Something went wrong.");
@@ -53,40 +54,59 @@ function App() {
   };
 
   return (
-    <div className="page">
-      <div className="card">
-        <h1>Piano AMT</h1>
-        <p>Upload audio and separate it into stems.</p>
+    <div className="app-shell">
+      <div className="hero-section">
+        <img
+          src={pianoBanner}
+          alt="Piano keys with sheet music"
+          className="hero-image"
+        />
 
-        <input type="file" accept="audio/*" onChange={handleFileChange} />
-        <br />
-        <br />
+        <h1 className="main-title">Piano Automatic Transcription</h1>
 
-        <button className="transcribe-btn" onClick={handleTranscribe}>
-          Transcribe
-        </button>
+        <p className="subtitle">
+          Separate stems, transcribe piano audio into MIDI, and access tutoring
+          feedback through one interface.
+        </p>
 
-        <p style={{ marginTop: "1rem" }}>{status}</p>
+        <div className="upload-area">
+          <label className="file-btn">
+            Choose Audio
+            <input type="file" accept="audio/*" onChange={handleFileChange} />
+          </label>
+        </div>
 
-        {error && <p style={{ color: "red" }}>{error}</p>}
+        <p className="status-text">{status}</p>
+        {selectedFile && (
+          <p className="file-name">Current file: {selectedFile.name}</p>
+        )}
+        {error && <p className="error-text">{error}</p>}
 
-        {stems && (
-          <div style={{ marginTop: "1.5rem", textAlign: "left" }}>
-            <h2>Separated Stems</h2>
+        <div className="button-group">
+          <button className="main-btn" onClick={handleSeparateStems}>
+            Separate Stems
+          </button>
+          <button className="main-btn">Transcribe</button>
+          <button className="main-btn">Tutor</button>
+        </div>
+      </div>
 
+      {stems && (
+        <div className="stems-section">
+          <h2>Separated Stems</h2>
+          <div className="stems-grid">
             {Object.entries(stems).map(([name, path]) => {
               const audioUrl = `http://134.208.3.192:8000/${path}`;
               return (
-                <div key={name} style={{ marginBottom: "1rem" }}>
-                  <strong>{name}</strong>
-                  <br />
+                <div key={name} className="stem-card">
+                  <h3>{name}</h3>
                   <audio controls src={audioUrl}></audio>
                 </div>
               );
             })}
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

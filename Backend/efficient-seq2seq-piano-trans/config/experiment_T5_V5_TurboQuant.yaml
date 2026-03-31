@@ -1,0 +1,20 @@
+defaults:
+  - experiment_T5_V3_HybridGlobalLocalCrossAttn
+
+audio_path: "${hydra:runtime.cwd}/../../../external/efficient-seq2seq-piano-trans/audio/Franz-Liszt_Liebestraum.mp3"
+
+model:
+  checkpoint_path: "${hydra:runtime.cwd}/../../../external/efficient-seq2seq-piano-trans/checkpoints/T5_V4_steps_200000.ckpt"
+  turbo_quant:
+    enabled: true
+    n_bits: 4
+    qjl_projection_dim: 64
+    enable_qjl: true
+    min_cache_len: 32
+
+  cross_attention_hierarchy_pooling: true
+  pooling_sizes: [4, 4, 2, 2, 1, 1]
+  # pooling_sizes: [4, 4, 4, 4, 4, 4]
+
+training:
+  notes: "Turbo"
