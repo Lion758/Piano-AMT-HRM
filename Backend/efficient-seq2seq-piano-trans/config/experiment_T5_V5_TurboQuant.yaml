@@ -7,7 +7,7 @@ model:
     n_bits: 4
     qjl_projection_dim: 64
     enable_qjl: true
-    min_cache_len: 32
+    min_cache_len: 64
 
   cross_attention_hierarchy_pooling: true
   pooling_sizes: [4, 4, 2, 2, 1, 1]

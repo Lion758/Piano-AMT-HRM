@@ -15,5 +15,4 @@
   log_dir:
   debug_log_offline: true
 
-  # TRM halting auxiliary loss for the recursive encoder path.
-  trm_halt_loss_weight: 0.05
+

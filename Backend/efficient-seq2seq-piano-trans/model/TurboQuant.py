@@ -293,6 +293,37 @@ class TurboQuantCache(nn.Module):
         )
         return key, value
 
+    def get_decompressed_slice(self, start: int, end: int):
+        """
+        Decompress a slice of the cached KV for blockwise attention.
+
+        Args:
+            start: inclusive sequence start index
+            end: exclusive sequence end index
+        Returns:
+            key: float tensor [batch, end - start, num_heads, head_dim]
+            value: float tensor [batch, end - start, num_heads, head_dim]
+        """
+        key = self._decompress_role(
+            self.cached_key_quantized[:, start:end],
+            self.cached_key_scale[:, start:end],
+            self.cached_key_zp[:, start:end],
+            None if self.cached_key_qjl_signs is None else self.cached_key_qjl_signs[:, start:end],
+            None if self.cached_key_qjl_norms is None else self.cached_key_qjl_norms[:, start:end],
+            self.key_pq,
+            self.key_qjl,
+        )
+        value = self._decompress_role(
+            self.cached_value_quantized[:, start:end],
+            self.cached_value_scale[:, start:end],
+            self.cached_value_zp[:, start:end],
+            None if self.cached_value_qjl_signs is None else self.cached_value_qjl_signs[:, start:end],
+            None if self.cached_value_qjl_norms is None else self.cached_value_qjl_norms[:, start:end],
+            self.value_pq,
+            self.value_qjl,
+        )
+        return key, value
+
     def clear(self):
         """Reset cache for new sequence generation."""
         self.cached_key_quantized = None

@@ -48,6 +48,61 @@ class Multi_Head_Attention(nn.Module):
                 min_cache_len=turbo_quant_config.get('min_cache_len', 32),
             )
             
+    def _turbo_quant_blockwise_attention(self, query, attention_bias=None, block_size=32):
+        """
+        Run decode-time attention directly against the compressed TurboQuant cache by
+        decompressing only a small KV block at a time.
+        """
+        if self.turbo_quant_cache is None or not self.turbo_quant_cache.has_cached_values():
+            raise ValueError("TurboQuant blockwise attention requires an initialized compressed cache.")
+
+        cache_len = self.turbo_quant_cache.get_cache_len()
+        if cache_len == 0:
+            raise ValueError("TurboQuant blockwise attention requires a non-empty cache.")
+
+        if attention_bias is not None:
+            attention_bias = attention_bias.to(query.device)
+
+        query_for_logits = query.float() if self.float32_logits else query
+        query_for_logits = query_for_logits.permute(0, 2, 1, 3)  # [batch, heads, q_len, head_dim]
+
+        running_max = None
+        running_norm = None
+        running_value = None
+
+        for start in range(0, cache_len, block_size):
+            end = min(start + block_size, cache_len)
+            key_block, value_block = self.turbo_quant_cache.get_decompressed_slice(start, end)
+            key_for_logits = key_block.float() if self.float32_logits else key_block
+
+            logits = torch.einsum('bhqd,bkhd->bhqk', query_for_logits, key_for_logits)
+            if attention_bias is not None:
+                logits = logits + attention_bias[..., start:end].to(logits.dtype)
+
+            block_max = logits.amax(dim=-1)
+            safe_block_max = torch.where(torch.isfinite(block_max), block_max, torch.zeros_like(block_max))
+            block_exp = torch.exp(logits - safe_block_max.unsqueeze(-1))
+            block_exp = torch.where(torch.isfinite(logits), block_exp, torch.zeros_like(block_exp))
+            block_norm = block_exp.sum(dim=-1)
+            block_value = torch.einsum('bhqk,bkhd->bhqd', block_exp.to(value_block.dtype), value_block)
+
+            if running_max is None:
+                running_max = block_max
+                running_norm = block_norm
+                running_value = block_value
+                continue
+
+            merged_max = torch.maximum(running_max, block_max)
+            running_scale = torch.exp(running_max - merged_max)
+            block_scale = torch.exp(block_max - merged_max)
+
+            running_value = running_value * running_scale.unsqueeze(-1) + block_value * block_scale.unsqueeze(-1)
+            running_norm = running_norm * running_scale + block_norm * block_scale
+            running_max = merged_max
+
+        running_norm = running_norm.clamp_min(torch.finfo(running_value.dtype).tiny)
+        output = (running_value / running_norm.unsqueeze(-1)).permute(0, 2, 1, 3)
+        return output.to(self.dtype)
 
     def dot_product_attention(self, query, key, value, bias=None, deterministic=False):
         assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
@@ -156,6 +211,7 @@ class Multi_Head_Attention(nn.Module):
         query = self.projection(inputs_q).view(inputs_q.size(0), inputs_q.size(1), self.num_heads, self.head_dim)
         key = self.projection(inputs_kv).view(inputs_kv.size(0), inputs_kv.size(1), self.num_heads, self.head_dim)
         value = self.projection(inputs_kv).view(inputs_kv.size(0), inputs_kv.size(1), self.num_heads, self.head_dim)
+        use_turbo_quant_blockwise = False
 
         if decode:
             batch, length, num_heads, head_dim,  = key.size()
@@ -171,7 +227,9 @@ class Multi_Head_Attention(nn.Module):
                     self.turbo_quant_cache.compress_and_cache(key, value)
                     if cache_window_size is not None:
                         self.turbo_quant_cache.apply_sliding_window(cache_window_size)
-                    key, value = self.turbo_quant_cache.get_decompressed()
+                    use_turbo_quant_blockwise = not return_attn_weights
+                    if not use_turbo_quant_blockwise:
+                        key, value = self.turbo_quant_cache.get_decompressed()
                     self.turbo_quant_cache.note_quantized_step(self.turbo_quant_cache.get_cache_len(), cache_window_size)
                 else:
                     key, value = self._append_to_raw_cache(key, value, sliding_window_size=cache_window_size)
@@ -182,7 +240,9 @@ class Multi_Head_Attention(nn.Module):
                         if cache_window_size is not None:
                             self.turbo_quant_cache.apply_sliding_window(cache_window_size)
                         self._clear_raw_cache()
-                        key, value = self.turbo_quant_cache.get_decompressed()
+                        use_turbo_quant_blockwise = not return_attn_weights
+                        if not use_turbo_quant_blockwise:
+                            key, value = self.turbo_quant_cache.get_decompressed()
                         self.turbo_quant_cache.note_quantized_step(self.turbo_quant_cache.get_cache_len(), cache_window_size)
                     else:
                         self.turbo_quant_cache.note_short_prefix_step(raw_cache_len, cache_window_size)
@@ -209,7 +269,9 @@ class Multi_Head_Attention(nn.Module):
                     deterministic=deterministic)
         else:
             dropout_p = self.dropout_rate if not decode else 0.0
-            if self.window_size is None:
+            if use_turbo_quant_blockwise:
+                x = self._turbo_quant_blockwise_attention(query, attention_bias=attention_bias)
+            elif self.window_size is None:
                 # Faster implementation using PyTorch's built-in attention
                 query = query.permute(0, 2, 1, 3)  # (batch_size, num_heads, seq_len, head_dim)
                 key = key.permute(0, 2, 1, 3)

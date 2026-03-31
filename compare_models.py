@@ -350,6 +350,8 @@ def benchmark_generate(trainer, benchmark_batches: List[Dict[str, Any]], warmup_
     total_decode_seconds = 0.0
     peak_allocated_bytes = None
     peak_reserved_bytes = None
+    baseline_allocated_bytes = None
+    baseline_reserved_bytes = None
 
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -372,6 +374,9 @@ def benchmark_generate(trainer, benchmark_batches: List[Dict[str, Any]], warmup_
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats(device)
                 torch.cuda.synchronize(device)
+                # Record baseline BEFORE generate (model weights + features already on GPU)
+                batch_baseline_allocated = int(torch.cuda.memory_allocated(device))
+                batch_baseline_reserved = int(torch.cuda.memory_reserved(device))
             start = time.perf_counter()
             output_tokens = model.generate(
                 batch["encoder_inputs"],
@@ -384,10 +389,13 @@ def benchmark_generate(trainer, benchmark_batches: List[Dict[str, Any]], warmup_
                 batch_peak_reserved = int(torch.cuda.max_memory_reserved(device))
                 peak_allocated_bytes = batch_peak_allocated if peak_allocated_bytes is None else max(peak_allocated_bytes, batch_peak_allocated)
                 peak_reserved_bytes = batch_peak_reserved if peak_reserved_bytes is None else max(peak_reserved_bytes, batch_peak_reserved)
+                baseline_allocated_bytes = batch_baseline_allocated if baseline_allocated_bytes is None else min(baseline_allocated_bytes, batch_baseline_allocated)
+                baseline_reserved_bytes = batch_baseline_reserved if baseline_reserved_bytes is None else min(baseline_reserved_bytes, batch_baseline_reserved)
             total_decode_seconds += time.perf_counter() - start
             total_decoded_tokens += count_decoded_tokens(output_tokens)
             total_clips += int(batch["num_clips"])
 
+    has_cuda_stats = peak_allocated_bytes is not None
     result = {
         "benchmark_source": benchmark_batches[0]["benchmark_source"],
         "benchmark_batches": len(benchmark_batches),
@@ -396,8 +404,11 @@ def benchmark_generate(trainer, benchmark_batches: List[Dict[str, Any]], warmup_
         "decoded_tokens": total_decoded_tokens,
         "decoded_tokens_per_second": (total_decoded_tokens / total_decode_seconds) if total_decode_seconds > 0 else None,
         "clips_per_second": (total_clips / total_decode_seconds) if total_decode_seconds > 0 else None,
-        "cuda_generate_peak_allocated_mb": (peak_allocated_bytes / (1024 ** 2)) if peak_allocated_bytes is not None else None,
-        "cuda_generate_peak_reserved_mb": (peak_reserved_bytes / (1024 ** 2)) if peak_reserved_bytes is not None else None,
+        "cuda_model_baseline_allocated_mb": (baseline_allocated_bytes / (1024 ** 2)) if has_cuda_stats else None,
+        "cuda_peak_allocated_mb": (peak_allocated_bytes / (1024 ** 2)) if has_cuda_stats else None,
+        "cuda_peak_reserved_mb": (peak_reserved_bytes / (1024 ** 2)) if has_cuda_stats else None,
+        "cuda_generate_overhead_allocated_mb": ((peak_allocated_bytes - baseline_allocated_bytes) / (1024 ** 2)) if has_cuda_stats else None,
+        "cuda_generate_overhead_reserved_mb": ((peak_reserved_bytes - baseline_reserved_bytes) / (1024 ** 2)) if has_cuda_stats else None,
     }
     result.update(collect_turbo_quant_runtime_stats(model))
     return result
@@ -513,8 +524,11 @@ def main() -> None:
         "benchmark_batches",
         "benchmark_clips",
         "benchmark_source",
-        "cuda_generate_peak_allocated_mb",
-        "cuda_generate_peak_reserved_mb",
+        "cuda_model_baseline_allocated_mb",
+        "cuda_peak_allocated_mb",
+        "cuda_peak_reserved_mb",
+        "cuda_generate_overhead_allocated_mb",
+        "cuda_generate_overhead_reserved_mb",
         "turbo_quant_bypass_observed",
         "turbo_quant_path_observed",
         "turbo_quant_short_prefix_steps",
@@ -559,8 +573,11 @@ def main() -> None:
     for column in (
         "decoded_tokens_per_second",
         "clips_per_second",
-        "cuda_generate_peak_allocated_mb",
-        "cuda_generate_peak_reserved_mb",
+        "cuda_model_baseline_allocated_mb",
+        "cuda_peak_allocated_mb",
+        "cuda_peak_reserved_mb",
+        "cuda_generate_overhead_allocated_mb",
+        "cuda_generate_overhead_reserved_mb",
         "decode_seconds",
     ):
         if column in printable.columns:
