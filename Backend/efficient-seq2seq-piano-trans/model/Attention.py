@@ -8,11 +8,18 @@ import torch.nn as nn
 from model.Layers import *
 from model.Mask import *
 import math
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+try:
+    from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+except ImportError:  # pragma: no cover - optional dependency
+    flash_attn_qkvpacked_func = None
+    flash_attn_func = None
 
-
-from xformers.ops import memory_efficient_attention
-import xformers.ops.fmha.attn_bias as xformer_attn_bias
+try:
+    from xformers.ops import memory_efficient_attention
+    import xformers.ops.fmha.attn_bias as xformer_attn_bias
+except ImportError:  # pragma: no cover - optional dependency
+    memory_efficient_attention = None
+    xformer_attn_bias = None
 
 
 # from torch.nn.attention.flex_attention import flex_attention, create_block_mask
@@ -42,7 +49,7 @@ class Multi_Head_Attention(nn.Module):
                 head_dim=head_dim,
                 num_heads=num_heads,
                 n_bits=turbo_quant_config.get('n_bits', 4),
-                qjl_projection_dim=turbo_quant_config.get('qjl_projection_dim', 128),
+                qjl_projection_dim=turbo_quant_config.get('qjl_projection_dim'),
                 layer_idx=layer_idx,
                 enable_qjl=turbo_quant_config.get('enable_qjl', True),
                 min_cache_len=turbo_quant_config.get('min_cache_len', 32),
@@ -65,6 +72,7 @@ class Multi_Head_Attention(nn.Module):
 
         query_for_logits = query.float() if self.float32_logits else query
         query_for_logits = query_for_logits.permute(0, 2, 1, 3)  # [batch, heads, q_len, head_dim]
+        scale = 1.0 / math.sqrt(self.head_dim)
 
         running_max = None
         running_norm = None
@@ -75,7 +83,7 @@ class Multi_Head_Attention(nn.Module):
             key_block, value_block = self.turbo_quant_cache.get_decompressed_slice(start, end)
             key_for_logits = key_block.float() if self.float32_logits else key_block
 
-            logits = torch.einsum('bhqd,bkhd->bhqk', query_for_logits, key_for_logits)
+            logits = torch.einsum('bhqd,bkhd->bhqk', query_for_logits, key_for_logits) * scale
             if attention_bias is not None:
                 logits = logits + attention_bias[..., start:end].to(logits.dtype)
 
@@ -134,6 +142,8 @@ class Multi_Head_Attention(nn.Module):
     
     def flash_attn_sliding_window_attention(self, query, key, value,decode=False):
         assert self.window_size is not None, 'Sliding window attention requires a window size.'
+        if flash_attn_func is None:
+            raise ImportError("flash_attn is required for flash-attention sliding window attention.")
         if self.is_causal:
             window_size = (self.window_size - (self.window_size%2), -1)
         else:
@@ -148,6 +158,8 @@ class Multi_Head_Attention(nn.Module):
         
     def xformers_sliding_window_attention(self, query, key, value, dropout_p=0.0):
         assert self.window_size is not None, 'Sliding window attention requires a window size.'
+        if memory_efficient_attention is None or xformer_attn_bias is None:
+            raise ImportError("xformers is required for xFormers sliding window attention.")
         
         window_left = window_right = self.window_size // 2
         if self.is_causal:
