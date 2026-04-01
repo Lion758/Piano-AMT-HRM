@@ -1,6 +1,8 @@
 import argparse
+import multiprocessing
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -454,6 +456,39 @@ def format_int(value: Any) -> Any:
     return f"{value:,}" if isinstance(value, int) else value
 
 
+def _subprocess_compare_one(
+    result_queue: multiprocessing.Queue,
+    index: int,
+    backend_dir: str,
+    checkpoint_path: str,
+    config_path: str,
+    overrides: List[str],
+    batch_size: Optional[int],
+    audio_path: Optional[str],
+    num_batches: int,
+    warmup_runs: int,
+    device_str: str,
+    include_historical_metrics: bool,
+) -> None:
+    """Run compare_one in an isolated subprocess with its own CUDA context."""
+    try:
+        ensure_backend_on_path(Path(backend_dir))
+        result = compare_one(
+            checkpoint_path=Path(checkpoint_path),
+            config_path=Path(config_path),
+            overrides=overrides,
+            batch_size=batch_size,
+            audio_path=Path(audio_path) if audio_path else None,
+            num_batches=num_batches,
+            warmup_runs=warmup_runs,
+            device=torch.device(device_str),
+            include_historical_metrics=include_historical_metrics,
+        )
+        result_queue.put((index, result))
+    except Exception:
+        result_queue.put((index, traceback.format_exc()))
+
+
 def main() -> None:
     args = parse_args()
     backend_dir = Path(args.backend_dir).expanduser().resolve()
@@ -489,20 +524,40 @@ def main() -> None:
 
     device = torch.device(args.device)
     audio_path = Path(args.audio_path).expanduser().resolve() if args.audio_path else None
-    rows = [
-        compare_one(
-            checkpoint_path=checkpoint,
-            config_path=config_path,
-            overrides=args.overrides,
-            batch_size=args.batch_size,
-            audio_path=audio_path,
-            num_batches=args.num_batches,
-            warmup_runs=args.warmup_runs,
-            device=device,
-            include_historical_metrics=args.include_historical_metrics,
+
+    # Run each model in an isolated subprocess so each gets its own CUDA
+    # context.  This prevents kernel-cache and warmup effects from leaking
+    # between models and ensures timing results match standalone runs.
+    mp_ctx = multiprocessing.get_context("spawn")
+    result_queue: multiprocessing.Queue = mp_ctx.Queue()
+    rows: List[Optional[Dict[str, Any]]] = [None] * len(checkpoints)
+
+    for idx, (checkpoint, config_path) in enumerate(zip(checkpoints, resolved_configs)):
+        proc = mp_ctx.Process(
+            target=_subprocess_compare_one,
+            kwargs=dict(
+                result_queue=result_queue,
+                index=idx,
+                backend_dir=str(backend_dir),
+                checkpoint_path=str(checkpoint),
+                config_path=str(config_path),
+                overrides=args.overrides,
+                batch_size=args.batch_size,
+                audio_path=str(audio_path) if audio_path else None,
+                num_batches=args.num_batches,
+                warmup_runs=args.warmup_runs,
+                device_str=str(device),
+                include_historical_metrics=args.include_historical_metrics,
+            ),
         )
-        for checkpoint, config_path in zip(checkpoints, resolved_configs)
-    ]
+        proc.start()
+        proc.join()
+
+    for _ in range(len(checkpoints)):
+        idx, result = result_queue.get()
+        if isinstance(result, str):
+            raise RuntimeError(f"Subprocess for checkpoint index {idx} failed:\n{result}")
+        rows[idx] = result
 
     df = pd.DataFrame(rows)
     preferred_columns = [
