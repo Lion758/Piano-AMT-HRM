@@ -1,0 +1,4 @@
+[submodule "Backend/spleeter"]
+	path = Backend/spleeter
+	url = https://github.com/deezer/spleeter
+	ignore = all
