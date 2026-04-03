@@ -24,6 +24,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 SEPARATED_DIR.mkdir(exist_ok=True)
 
 app.mount("/separated", StaticFiles(directory="separated"), name="separated")
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 
 @app.get("/")
