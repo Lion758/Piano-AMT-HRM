@@ -4,7 +4,7 @@ defaults:
 audio_path: "audio/piano_test.mp3"
 
 model:
-  checkpoint_path: "checkpoints/T5_V4_steps_200000.ckpt"
+  checkpoint_path: #"checkpoints/T5_V4_steps_200000.ckpt"
 
   cross_attention_hierarchy_pooling: true
   pooling_sizes: [4, 4, 2, 2, 1, 1]

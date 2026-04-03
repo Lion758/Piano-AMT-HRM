@@ -3,7 +3,7 @@ defaults:
 
 model:
   turbo_quant:
-    enabled: true
+    enabled: false
     n_bits: 4  # Keys: nominal total bits; Values: exact MSE-only bits.
     qjl_projection_dim: 64  # Key-side only; when it matches head_dim, keys match the nominal total n_bits.
     enable_qjl: true

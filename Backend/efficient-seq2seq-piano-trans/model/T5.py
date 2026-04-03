@@ -11,6 +11,7 @@ from model.Decoder import Decoder, CompoundDecoder
 from model.Layers import *
 from model.Mask import *
 from model.HPPNet import HPPNet
+from model.trm_encoder import TrmEncoder
 from data.constants import *
 
 from torch.nn.utils.rnn import pad_sequence
@@ -26,8 +27,12 @@ class Transformer(nn.Module):
         config.dtype = eval(config.dtype)
         # config.dtype = torch.float32 # 
         self.config = config
+        self._encoder_returns_aux = False
         # select encoder
-        if config.encoder_name == "TransformerEncoder":
+        if config.encoder_name == "TrmEncoder":
+            self.encoder = TrmEncoder(config)
+            self._encoder_returns_aux = True
+        elif config.encoder_name == "TransformerEncoder":
             self.encoder = Encoder(config)
         elif config.encoder_name == "CNNEncoder":
             self.encoder = CNNEncoder(config)
@@ -59,7 +64,8 @@ class Transformer(nn.Module):
             self, 
             encoder_input_tokens, 
             encoder_segment_ids=None, 
-            enable_dropout=True
+            enable_dropout=True,
+            recording_ids=None,
             ):
         assert encoder_input_tokens.ndim == 3  # (batch, length, depth)
 
@@ -81,14 +87,33 @@ class Transformer(nn.Module):
             )
         
         encoder_mask = encoder_mask.to(encoder_input_tokens.device)
-            
+
+        if self._encoder_returns_aux:
+            if self.config.froze_encoder:
+                with torch.no_grad():
+                    encoder_outputs, encoder_aux = self.encoder(
+                        encoder_input_tokens,
+                        encoder_mask=encoder_mask,
+                        deterministic=not enable_dropout,
+                        recording_ids=recording_ids,
+                    )
+                    encoder_outputs = encoder_outputs.detach()
+            else:
+                encoder_outputs, encoder_aux = self.encoder(
+                    encoder_input_tokens,
+                    encoder_mask=encoder_mask,
+                    deterministic=not enable_dropout,
+                    recording_ids=recording_ids,
+                )
+            return encoder_outputs, encoder_aux
+
         if self.config.froze_encoder:
             with torch.no_grad():
                 encoder_outputs = self.encoder(encoder_input_tokens, encoder_mask, deterministic=not enable_dropout)
                 encoder_outputs = encoder_outputs.detach()
         else:
             encoder_outputs = self.encoder(encoder_input_tokens, encoder_mask, deterministic=not enable_dropout)
-        return encoder_outputs
+        return encoder_outputs, None
     
     def decode(
             self, 
@@ -204,14 +229,22 @@ class Transformer(nn.Module):
                 dur_inputs = None,
                 dur_targets = None,
                 decoder_targets_frame_index=None,
-                encoder_decoder_mask=None
+                encoder_decoder_mask=None,
+                recording_ids=None,
     ):
         res_dict = {}
             
         if decoder_input_tokens == None:
             decoder_input_tokens = self._shift_right(decoder_target_tokens, shift_step=1)
             
-        encoder_outputs = self.encode(encoder_input_tokens, encoder_segment_ids=encoder_segment_ids, enable_dropout=enable_dropout)
+        encoder_outputs, encoder_aux = self.encode(
+            encoder_input_tokens,
+            encoder_segment_ids=encoder_segment_ids,
+            enable_dropout=enable_dropout,
+            recording_ids=recording_ids,
+        )
+        if encoder_aux is not None:
+            res_dict["trm_aux"] = encoder_aux
         
         decoder_output_dict = self.decode(encoder_outputs, encoder_outputs, decoder_input_tokens, decoder_target_tokens, encoder_segment_ids=encoder_segment_ids, decoder_segment_ids=decoder_segment_ids, decoder_positions=decoder_positions, enable_dropout=enable_dropout, decode=decode, 
             decoder_targets_frame_index=decoder_targets_frame_index,
@@ -254,7 +287,7 @@ class Transformer(nn.Module):
         eos_flags = torch.zeros(batch_size, dtype=int).to(encoder_inputs.device)
         curr_frame_index = torch.zeros(batch_size, dtype=int).to(encoder_inputs.device)
         max_num_tokens = 0
-        encoded = self.encode(encoder_inputs, enable_dropout=False)
+        encoded, _ = self.encode(encoder_inputs, enable_dropout=False)
         decoder_mask = torch.tril(torch.ones((target_seq_length, target_seq_length), dtype=self.config.dtype), diagonal=0).to(encoder_inputs.device)
         decoder_mask = decoder_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, self.config.num_heads, -1, -1)  # [batch_size, 1, target_seq_length, target_seq_length]
         encoder_decoder_mask = torch.ones((batch_size, self.config.num_heads, target_seq_length, T), dtype=self.config.dtype).to(encoder_inputs.device)  # [batch_size, 1, target_seq_length, T]
@@ -400,5 +433,4 @@ class Transformer(nn.Module):
 
     
     
-
 

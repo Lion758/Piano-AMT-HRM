@@ -1,5 +1,7 @@
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+import ctypes
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -14,9 +16,11 @@ import hydra
 from model.T5 import Transformer
 from model.HPPNet import HPPNet
 from model.GPT import GPT
+from model.trm_encoder import compute_trm_halt_loss
 
 from data.dataset_Audio2Midi import Audio2Midi_Dataset
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from pytorch_lightning.trainer.states import RunningStage, TrainerFn
@@ -70,6 +74,108 @@ import utils.log_memory_usage as log_memory_usage
 import utils.sequence_processing as sequence_processing
 
 import shutil
+
+try:
+    from setproctitle import setproctitle
+except ImportError:
+    setproctitle = None
+
+
+def set_training_process_name(process_name):
+    process_name = str(process_name).strip()
+    if not process_name:
+        return
+
+    if setproctitle is not None:
+        try:
+            setproctitle(process_name)
+        except Exception:
+            pass
+
+    try:
+        libc = ctypes.CDLL(None)
+        libc.prctl.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        libc.prctl.restype = ctypes.c_int
+        libc.prctl(15, process_name[:15].encode("utf-8"), 0, 0, 0)
+    except Exception:
+        pass
+
+
+def get_wandb_offline_mode(config):
+    log_offline = OmegaConf.select(config, "training.log_offline", default=None)
+    if log_offline is None:
+        log_offline = OmegaConf.select(config, "training.debug_log_offline", default=False)
+    return log_offline
+
+
+def _resolve_checkpoint_path(checkpoint_path: str) -> Path:
+    path = Path(checkpoint_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"Checkpoint file not found: {path}")
+    return path
+
+
+def _load_checkpoint_payload(checkpoint_path: str) -> tuple[Path, dict]:
+    path = _resolve_checkpoint_path(checkpoint_path)
+    payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, dict):
+        raise ValueError(f"Checkpoint at {path} is not a dictionary payload.")
+    return path, payload
+
+
+def _is_lightning_checkpoint_payload(payload: dict) -> bool:
+    return "state_dict" in payload and "optimizer_states" in payload
+
+
+def _prepare_checkpoint_loading(config: OmegaConf) -> tuple[dict | None, str | None]:
+    weight_init_path = OmegaConf.select(config, "model.checkpoint_path", default=None)
+    resume_ckpt_path = OmegaConf.select(config, "training.resume_ckpt_path", default=None)
+
+    if weight_init_path and resume_ckpt_path:
+        raise ValueError(
+            "model.checkpoint_path and training.resume_ckpt_path are mutually exclusive. "
+            "Use model.checkpoint_path for weight-only initialization or "
+            "training.resume_ckpt_path for exact Lightning resume."
+        )
+
+    weight_state_dict = None
+    resolved_resume_path = None
+
+    if weight_init_path:
+        resolved_weight_path, payload = _load_checkpoint_payload(weight_init_path)
+        if _is_lightning_checkpoint_payload(payload):
+            raise ValueError(
+                f"model.checkpoint_path points to a full Lightning checkpoint: {resolved_weight_path}. "
+                "Use training.resume_ckpt_path instead for exact resume."
+            )
+
+        weight_state_dict = payload
+        for key in config.model.checkpoint_ignore_layres or []:
+            weight_state_dict.pop(key, None)
+
+    if resume_ckpt_path:
+        resolved_path, payload = _load_checkpoint_payload(resume_ckpt_path)
+        if not _is_lightning_checkpoint_payload(payload):
+            raise ValueError(
+                f"training.resume_ckpt_path must point to a full Lightning checkpoint with "
+                f"'state_dict' and 'optimizer_states': {resolved_path}"
+            )
+
+        resumed_global_step = payload.get("global_step")
+        if resumed_global_step is None:
+            raise ValueError(
+                f"Lightning checkpoint is missing 'global_step': {resolved_path}"
+            )
+        if config.training.training_steps <= resumed_global_step:
+            raise ValueError(
+                f"training.resume_ckpt_path is already at global_step={resumed_global_step}. "
+                f"Set training.training_steps to a value greater than {resumed_global_step} to continue training."
+            )
+        resolved_resume_path = str(resolved_path)
+
+    return weight_state_dict, resolved_resume_path
+
+
 class MT3Trainer(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
@@ -112,6 +218,62 @@ class MT3Trainer(pl.LightningModule):
         return self.model.forward(encoder_input_tokens, decoder_target_tokens, decode=decode, decoder_input_tokens=decoder_input_tokens, decoder_positions=decoder_positions, 
                 decoder_targets_frame_index=decoder_targets_frame_index,
                 encoder_decoder_mask=encoder_decoder_mask)
+
+    def _compute_decoder_loss_per_example(self, decoder_outputs, decoder_targets, decoder_targets_mask):
+        masked_targets = decoder_targets.clone()
+        masked_targets[decoder_targets_mask == 0] = TOKEN_PAD
+
+        token_losses = Functional.cross_entropy(
+            decoder_outputs.reshape(-1, decoder_outputs.size(-1)),
+            masked_targets.reshape(-1),
+            ignore_index=TOKEN_PAD,
+            reduction="none",
+        ).reshape_as(masked_targets)
+
+        valid_counts = decoder_targets_mask.to(token_losses.dtype).sum(dim=-1).clamp_min(1.0)
+        return token_losses.sum(dim=-1) / valid_counts
+
+    def _add_trm_halt_loss(self, outputs_dict, targets_dict, loss_dict):
+        trm_aux = outputs_dict.get("trm_aux")
+        trm_halt_loss_weight = float(getattr(self.config.training, "trm_halt_loss_weight", 0.0))
+        if trm_aux is None or trm_halt_loss_weight <= 0.0 or "decoder_outputs" not in outputs_dict:
+            return
+
+        decoder_loss_per_example = self._compute_decoder_loss_per_example(
+            outputs_dict["decoder_outputs"],
+            targets_dict["decoder_targets"],
+            targets_dict["decoder_targets_mask"],
+        )
+        trm_halt_loss, trm_halt_components = compute_trm_halt_loss(
+            trm_aux,
+            decoder_loss_per_example,
+            return_components=True,
+        )
+        trm_halt_loss_scaled = trm_halt_loss * trm_halt_loss_weight
+
+        loss_dict["trm_halt_loss"] = trm_halt_loss
+        loss_dict["trm_halt_loss_scaled"] = trm_halt_loss_scaled
+        loss_dict["trm_halt_loss_weight"] = torch.tensor(
+            trm_halt_loss_weight,
+            device=trm_halt_loss.device,
+            dtype=trm_halt_loss.dtype,
+        )
+        loss_dict["trm_halt_term"] = trm_halt_components["halt_term"]
+        loss_dict["trm_target_step_mean"] = trm_halt_components["target_step_mean"]
+
+        steps_per_example = trm_aux.get("steps_per_example")
+        if steps_per_example is not None:
+            loss_dict["trm_predicted_steps_mean"] = steps_per_example.to(torch.float32).mean()
+
+        halt_logits_last = trm_aux.get("halt_logits_last")
+        if halt_logits_last is not None:
+            loss_dict["trm_halt_logit_mean"] = halt_logits_last.to(torch.float32).mean()
+
+        decoder_loss = loss_dict.get("loss_decoder")
+        if isinstance(decoder_loss, torch.Tensor):
+            loss_dict["trm_halt_to_ce_ratio"] = trm_halt_loss_scaled.detach() / decoder_loss.detach().clamp_min(1e-8)
+
+        loss_dict["loss"] = loss_dict["loss"] + trm_halt_loss_scaled
     
     def log_time_event(self, event_name):
         if self.global_rank == 0:
@@ -212,6 +374,7 @@ class MT3Trainer(pl.LightningModule):
                     loss_dict[dic["loss_name"]] = loss
                     total_loss += loss
             loss_dict["loss"] = total_loss
+        self._add_trm_halt_loss(outputs_dict, targets_dict, loss_dict)
         self.log_time_event("loss_cal_done")
         
         decoder_outputs = outputs_dict["decoder_outputs"]
@@ -283,7 +446,8 @@ class MT3Trainer(pl.LightningModule):
     
     @rank_zero_only
     def cal_decoder_token_metrics(self, decoder_outputs_token, decoder_targets_token, batch, metrics_dict, metric_prefix=""):
-        """Visualize decoder outputs.
+        """
+        Visualize decoder outputs.
 
         Args:
             decoder_outputs_token (_type_): [batch, seq_len]
@@ -697,6 +861,10 @@ def Init_rank_zero_only(log_dir):
 def my_main(config: OmegaConf):
     torch.cuda.empty_cache()
     gc.collect()
+    set_training_process_name("group5, will end ~ 4/4 10:00")
+    wandb_offline = get_wandb_offline_mode(config)
+    model_name = config.model.model_name
+    experiment_name = "_".join([model_name])
 
     # if socket.gethostname() == "sacs14":
     #     config.data.dataset_dir='/nvme1/wei/data/maestro-v3.0.0/'
@@ -705,7 +873,6 @@ def my_main(config: OmegaConf):
     ####################################################
     # Get log dir.
     if config.training.log_dir is None:
-        model_name = config.model.model_name
         time_str = datetime.now().strftime('%y%m%d-%H%M%S')
         # loss_name = config.training.loss
         batch_size = "BS" + str(config.training.batch)
@@ -713,7 +880,6 @@ def my_main(config: OmegaConf):
         log_workdir = "runs"
         if "DEBUG" in os.environ and os.environ["DEBUG"] == "True":
             log_workdir = "runs-debug"
-        experiment_name = "_".join([model_name])
         assert config.training.notes is not None and len(config.training.notes) > 0, "Please set config.training.notes to a non-empty string."
         run_name = "_".join([time_str, config.training.notes]) # batch_size, config.data.dataset_name
         log_dir = os.path.join(log_workdir, experiment_name , run_name)
@@ -723,27 +889,25 @@ def my_main(config: OmegaConf):
     else:
         log_dir = config.training.log_dir
     ####################################################
+    weight_state_dict, resume_ckpt_path = _prepare_checkpoint_loading(config)
+
     # Create model.
     model = MT3Trainer(config)
     print(model)
-    # Load checkpoint.
-    if config.model.checkpoint_path is None:
-        assert config.model.froze_encoder == False, "If you want to train from scratch, please set config.model.froze_encoder to False and config.model.checkpoint_path to None."
-    else:
-        state_dict = torch.load(config.model.checkpoint_path) # , map_location=torch.device('cpu')
-        if not config.model.checkpoint_ignore_layres is None:
-            for key in config.model.checkpoint_ignore_layres:
-                del state_dict[key]
 
-        model.model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
+    # Load checkpoint.
+    if weight_state_dict is None and resume_ckpt_path is None:
+        assert config.model.froze_encoder == False, "If you want to train from scratch, please set config.model.froze_encoder to False and config.model.checkpoint_path to None."
+    elif weight_state_dict is not None:
+        model.model.load_state_dict(weight_state_dict, strict=config.model.strict_checkpoint)
     
     # model.model = torch.compile(model.model)
     
     # Create logger.
     if "DEBUG" in os.environ and os.environ["DEBUG"] == "True":
-        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="mt3-score-pytorch-debug", offline=config.training.debug_log_offline, save_dir=log_dir) #, rank_zero_only=True
+        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="mt3-score-pytorch-debug", offline=wandb_offline, save_dir=log_dir) #, rank_zero_only=True
     else:
-        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="AMT-audio-to-midi", offline=False, save_dir=log_dir, notes=config.training.notes) #, rank_zero_only=True
+        wandb_logger = WandbLogger(name=experiment_name+config.training.notes, project="AMT-audio-to-midi", offline=wandb_offline, save_dir=log_dir, notes=config.training.notes) #, rank_zero_only=True
     tensorboard_logger = TensorBoardLogger(save_dir=log_dir)
 
     # Save informations to log dir.
@@ -777,11 +941,20 @@ def my_main(config: OmegaConf):
         config_dict = OmegaConf.to_container(config)
         if "CUDA_VISIBLE_DEVICES" in os.environ:
             config_dict["training"]["cuda"]= os.environ["CUDA_VISIBLE_DEVICES"]
+        config_dict["training"]["log_offline"] = wandb_offline
         wandb_logger.log_hyperparams(config_dict)
     
     logger_list = [wandb_logger, tensorboard_logger]
     if config.training.mode != "train":
         logger_list = []
+    resume_ckpt_callback = ModelCheckpoint(
+                        dirpath=os.path.join(log_dir, "cpt", "full"),
+                        save_last=True,
+                        save_top_k=0,
+                        save_weights_only=False,
+                        every_n_epochs=config.training.evaluation_epochs,
+                        save_on_train_epoch_end=True,
+                        )
     trainer = pl.Trainer(
                         devices=config.devices, # 1 [1,2, 4, 5, 6,7]
                         accelerator=config.accelerator, # "gpu"
@@ -795,11 +968,14 @@ def my_main(config: OmegaConf):
                         # strategy='ddp_find_unused_parameters_true'
                         gradient_clip_val=0.5,
                         gradient_clip_algorithm="value",
-                        # callbacks=[val_call_back,]
+                        callbacks=[resume_ckpt_callback],
                         strategy=DDPStrategy(find_unused_parameters=True),
                         )
 
-    trainer.fit(model)
+    if resume_ckpt_path is not None:
+        trainer.fit(model, ckpt_path=resume_ckpt_path)
+    else:
+        trainer.fit(model)
     
 if __name__ == "__main__":
     my_main()

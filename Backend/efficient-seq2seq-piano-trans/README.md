@@ -80,6 +80,20 @@ python train.py --config-name=$config\
 ```
 
 - Config files is managed with [hydra](http://hydra.cc/).
+- `model.checkpoint_path` is for weight-only initialization from checkpoints like `runs/.../cpt/latest.ckpt`.
+- `training.resume_ckpt_path` is for exact Lightning resume from full checkpoints like `runs/.../cpt/full/last.ckpt`.
+
+```bash
+# exact resume: restore optimizer/global step and continue past the saved step
+python train.py \
+  training.resume_ckpt_path="runs/.../cpt/full/last.ckpt" \
+  training.training_steps=120000
+
+# current V6 continuation until the stable full checkpoint path is generated
+python train.py \
+  training.resume_ckpt_path="runs/Transformer-T5/260402-224722_V6_TRM/AMT-audio-to-midi/3q9ivnrw/checkpoints/epoch=45-step=80000.ckpt" \
+  training.training_steps=120000
+```
 
 ### TRM encoder configuration
 
@@ -145,6 +159,5 @@ python inference.py model.checkpoint_path="$checkpoint_path" audio_path="'audio/
 
 - rlax59us' [MT3-pytorch](https://github.com/rlax59us/MT3-pytorch)
 - Official [PyTorch Lightning](https://github.com/PyTorchLightning/pytorch-lightning)
-
 
 

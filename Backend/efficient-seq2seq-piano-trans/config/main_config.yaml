@@ -5,7 +5,7 @@ defaults:
   # - experiment_T5_V1_LocalEncAttn
   # - experiment_T5_V2_LocalEncDecAttn
   # - experiment_T5_V3_HybridGlobalLocalCrossAttn
-  - experiment_T5_V5_TurboQuant
+  - experiment_T5_V6_TRM
 
 
 # --config-name=experiment_T5_V0
@@ -14,5 +14,4 @@ defaults:
 # --config-name=experiment_T5_V3_HybridGlobalLocalCrossAttn
 # --config-name=experiment_T5_V4_HierarchyPool
 # --config-name=experiment_T5_V5_HRM
-# --config-name=experiment_T5_V6_TRMv2
-
+# --config-name=experiment_T5_V6_TRM

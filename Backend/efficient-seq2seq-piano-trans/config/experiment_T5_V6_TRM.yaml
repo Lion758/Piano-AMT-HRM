@@ -1,0 +1,21 @@
+defaults:
+  - experiment_T5_V0
+
+model:
+  encoder_name: "TrmEncoder"
+  trm_layers: 2
+  trm_recursions: 6
+  trm_local_window_size: 64
+  trm_use_rope: true
+  trm_rope_max_len: 2048
+  trm_rope_theta: 10000.0
+  trm_min_recursions: 2
+  trm_halt_threshold: 0.5
+  trm_halt_target_sharpness: 4.0
+  use_recording_id_embedding: false
+
+training:
+  resume_ckpt_path: "runs/Transformer-T5/260402-224722_V6_TRM/AMT-audio-to-midi/3q9ivnrw/checkpoints/epoch=45-step=80000.ckpt"
+  training_steps: 160000
+  trm_halt_loss_weight: 0.05
+  notes: "V6_TRMResume"
