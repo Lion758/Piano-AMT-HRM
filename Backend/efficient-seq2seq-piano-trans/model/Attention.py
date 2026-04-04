@@ -269,6 +269,7 @@ class Multi_Head_Attention(nn.Module):
                     use_turbo_quant_v2_blockwise = not return_attn_weights
                     if not use_turbo_quant_v2_blockwise:
                         key, value = self.turbo_quant_v2_cache.get_decompressed()
+                    self.turbo_quant_v2_cache.note_quantized_step(self.turbo_quant_v2_cache.get_cache_len(), cache_window_size)
                 else:
                     key, value = self._append_to_raw_cache(key, value, sliding_window_size=cache_window_size)
                     raw_cache_len = key.size(1)
@@ -281,6 +282,9 @@ class Multi_Head_Attention(nn.Module):
                         use_turbo_quant_v2_blockwise = not return_attn_weights
                         if not use_turbo_quant_v2_blockwise:
                             key, value = self.turbo_quant_v2_cache.get_decompressed()
+                        self.turbo_quant_v2_cache.note_quantized_step(self.turbo_quant_v2_cache.get_cache_len(), cache_window_size)
+                    else:
+                        self.turbo_quant_v2_cache.note_short_prefix_step(raw_cache_len, cache_window_size)
             elif self.turbo_quant_cache is not None:
                 if self.turbo_quant_cache.has_cached_values():
                     self.turbo_quant_cache.compress_and_cache(key, value)

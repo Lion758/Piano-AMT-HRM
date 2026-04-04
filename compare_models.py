@@ -56,7 +56,12 @@ def parse_args() -> argparse.Namespace:
         "--audio-path",
         type=str,
         default=None,
-        help="Optional audio file used for speed benchmarking. If omitted, benchmark on the first test batch.",
+        help="Optional audio file used for speed benchmarking. If omitted, compare_models will try config.audio_path before considering any test-set benchmark.",
+    )
+    parser.add_argument(
+        "--use-test-dataloader",
+        action="store_true",
+        help="Benchmark on trainer.test_dataloader() batches instead of inference audio. Disabled by default.",
     )
     parser.add_argument(
         "--batch-size",
@@ -68,7 +73,7 @@ def parse_args() -> argparse.Namespace:
         "--num-batches",
         type=int,
         default=1,
-        help="Number of test batches to benchmark when --audio-path is not provided.",
+        help="Number of test batches to benchmark when --use-test-dataloader is set.",
     )
     parser.add_argument(
         "--warmup-runs",
@@ -166,16 +171,41 @@ def count_parameters(model: torch.nn.Module) -> Dict[str, int]:
 def extract_turbo_quant_config(config: Any) -> Dict[str, Any]:
     model_cfg = getattr(config, "model", None)
     turbo_cfg = getattr(model_cfg, "turbo_quant", None) if model_cfg is not None else None
+    turbo_v2_cfg = getattr(model_cfg, "turbo_quant_v2", None) if model_cfg is not None else None
     result: Dict[str, Any] = {
         "decoder_window_size": getattr(model_cfg, "decoder_window_size", None) if model_cfg is not None else None,
         "turbo_quant_enabled": False,
+        "turbo_quant_variant": None,
     }
+    if turbo_v2_cfg is not None:
+        result.update(
+            {
+                "turbo_quant_enabled": bool(getattr(turbo_v2_cfg, "enabled", False)),
+                "turbo_quant_variant": "v2",
+                "turbo_quant_key_n_bits": getattr(turbo_v2_cfg, "key_n_bits", None),
+                "turbo_quant_value_n_bits": getattr(turbo_v2_cfg, "value_n_bits", None),
+                "turbo_quant_qjl_projection_dim": getattr(turbo_v2_cfg, "qjl_projection_dim", None),
+                "turbo_quant_enable_qjl": getattr(turbo_v2_cfg, "enable_qjl", None),
+                "turbo_quant_min_cache_len": getattr(turbo_v2_cfg, "min_cache_len", None),
+                "turbo_quant_boundary_layers": getattr(turbo_v2_cfg, "boundary_layers", None),
+                "turbo_quant_boundary_value_n_bits": getattr(turbo_v2_cfg, "boundary_value_n_bits", None),
+                "turbo_quant_enable_sparse_v": getattr(turbo_v2_cfg, "enable_sparse_v", None),
+                "turbo_quant_sparsity_threshold": getattr(turbo_v2_cfg, "sparsity_threshold", None),
+            }
+        )
+        outlier_cfg = getattr(turbo_v2_cfg, "outlier_channels", None)
+        if outlier_cfg is not None:
+            result["turbo_quant_outlier_channels_enabled"] = getattr(outlier_cfg, "enabled", None)
+            result["turbo_quant_outlier_fraction"] = getattr(outlier_cfg, "outlier_fraction", None)
+        return result
+
     if turbo_cfg is None:
         return result
 
     result.update(
         {
             "turbo_quant_enabled": bool(getattr(turbo_cfg, "enabled", False)),
+            "turbo_quant_variant": "v1",
             "turbo_quant_n_bits": getattr(turbo_cfg, "n_bits", None),
             "turbo_quant_qjl_projection_dim": getattr(turbo_cfg, "qjl_projection_dim", None),
             "turbo_quant_enable_qjl": getattr(turbo_cfg, "enable_qjl", None),
@@ -256,6 +286,37 @@ def prepare_audio_benchmark_batch(trainer, audio_path: Path, device: torch.devic
     }
 
 
+def resolve_benchmark_audio_path(
+    explicit_audio_path: Optional[Path],
+    config: Any,
+    config_path: Path,
+    backend_dir: Path,
+) -> Optional[Path]:
+    if explicit_audio_path is not None:
+        return explicit_audio_path.expanduser().resolve()
+
+    configured_audio_path = getattr(config, "audio_path", None)
+    if configured_audio_path in (None, ""):
+        return None
+
+    configured_audio_path = Path(str(configured_audio_path)).expanduser()
+    if configured_audio_path.is_absolute():
+        return configured_audio_path.resolve()
+
+    candidates = [
+        (backend_dir / configured_audio_path).resolve(),
+        (config_path.parent / configured_audio_path).resolve(),
+        (ROOT_DIR / configured_audio_path).resolve(),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    # Keep the backend-relative path as the default returned path even if it does
+    # not exist so we can surface a clear, stable error message to the caller.
+    return candidates[0]
+
+
 def prepare_test_benchmark_batches(trainer, device: torch.device, num_batches: int) -> List[Dict[str, Any]]:
     import torchaudio
 
@@ -282,17 +343,19 @@ def prepare_test_benchmark_batches(trainer, device: torch.device, num_batches: i
 
 def reset_turbo_quant_runtime_stats(model: torch.nn.Module) -> None:
     for module in model.modules():
-        cache = getattr(module, "turbo_quant_cache", None)
-        if cache is not None and hasattr(cache, "reset_stats"):
-            cache.reset_stats()
+        for cache_attr in ("turbo_quant_cache", "turbo_quant_v2_cache"):
+            cache = getattr(module, cache_attr, None)
+            if cache is not None and hasattr(cache, "reset_stats"):
+                cache.reset_stats()
 
 
 def collect_turbo_quant_runtime_stats(model: torch.nn.Module) -> Dict[str, Any]:
     caches = []
     for module in model.modules():
-        cache = getattr(module, "turbo_quant_cache", None)
-        if cache is not None and hasattr(cache, "get_stats"):
-            caches.append(cache)
+        for cache_attr in ("turbo_quant_cache", "turbo_quant_v2_cache"):
+            cache = getattr(module, cache_attr, None)
+            if cache is not None and hasattr(cache, "get_stats"):
+                caches.append(cache)
 
     if not caches:
         return {}
@@ -419,9 +482,11 @@ def benchmark_generate(trainer, benchmark_batches: List[Dict[str, Any]], warmup_
 def compare_one(
     checkpoint_path: Path,
     config_path: Path,
+    backend_dir: Path,
     overrides: List[str],
     batch_size: Optional[int],
     audio_path: Optional[Path],
+    use_test_dataloader: bool,
     num_batches: int,
     warmup_runs: int,
     device: torch.device,
@@ -443,11 +508,28 @@ def compare_one(
     if include_historical_metrics:
         result.update(load_average_metrics(locate_metrics_csv(checkpoint_path)))
 
-    benchmark_batches = (
-        [prepare_audio_benchmark_batch(trainer, audio_path, device)]
-        if audio_path is not None
-        else prepare_test_benchmark_batches(trainer, device, num_batches=num_batches)
+    resolved_audio_path = resolve_benchmark_audio_path(
+        explicit_audio_path=audio_path,
+        config=config,
+        config_path=config_path,
+        backend_dir=backend_dir,
     )
+    if use_test_dataloader:
+        benchmark_batches = prepare_test_benchmark_batches(trainer, device, num_batches=num_batches)
+    else:
+        if resolved_audio_path is None:
+            raise ValueError(
+                "No audio benchmark source was found. Pass --audio-path, set config.audio_path, "
+                "or use --use-test-dataloader to benchmark on the test set explicitly."
+            )
+        if not resolved_audio_path.exists():
+            raise FileNotFoundError(
+                f"Benchmark audio file not found: {resolved_audio_path}. "
+                "Pass --audio-path with a valid file, update config.audio_path, "
+                "or use --use-test-dataloader explicitly."
+            )
+        benchmark_batches = [prepare_audio_benchmark_batch(trainer, resolved_audio_path, device)]
+
     result.update(benchmark_generate(trainer, benchmark_batches, warmup_runs=warmup_runs, device=device))
     return result
 
@@ -465,6 +547,7 @@ def _subprocess_compare_one(
     overrides: List[str],
     batch_size: Optional[int],
     audio_path: Optional[str],
+    use_test_dataloader: bool,
     num_batches: int,
     warmup_runs: int,
     device_str: str,
@@ -476,9 +559,11 @@ def _subprocess_compare_one(
         result = compare_one(
             checkpoint_path=Path(checkpoint_path),
             config_path=Path(config_path),
+            backend_dir=Path(backend_dir),
             overrides=overrides,
             batch_size=batch_size,
             audio_path=Path(audio_path) if audio_path else None,
+            use_test_dataloader=use_test_dataloader,
             num_batches=num_batches,
             warmup_runs=warmup_runs,
             device=torch.device(device_str),
@@ -499,6 +584,8 @@ def main() -> None:
     checkpoints = [Path(p).expanduser().resolve() for p in args.checkpoints]
     configs = args.configs or []
     config_names = args.config_names or []
+    if args.use_test_dataloader and args.audio_path:
+        raise ValueError("Use either --audio-path for inference benchmarking or --use-test-dataloader for dataset benchmarking, not both.")
     if configs and config_names:
         raise ValueError("Use either --config or --config-name, not both.")
     if configs and len(configs) not in (1, len(checkpoints)):
@@ -544,6 +631,7 @@ def main() -> None:
                 overrides=args.overrides,
                 batch_size=args.batch_size,
                 audio_path=str(audio_path) if audio_path else None,
+                use_test_dataloader=bool(args.use_test_dataloader),
                 num_batches=args.num_batches,
                 warmup_runs=args.warmup_runs,
                 device_str=str(device),
@@ -565,10 +653,20 @@ def main() -> None:
         "config",
         "encoder_name",
         "notes",
+        "turbo_quant_variant",
         "turbo_quant_enabled",
         "turbo_quant_n_bits",
+        "turbo_quant_key_n_bits",
+        "turbo_quant_value_n_bits",
         "turbo_quant_qjl_projection_dim",
+        "turbo_quant_enable_qjl",
         "turbo_quant_min_cache_len",
+        "turbo_quant_boundary_layers",
+        "turbo_quant_boundary_value_n_bits",
+        "turbo_quant_enable_sparse_v",
+        "turbo_quant_sparsity_threshold",
+        "turbo_quant_outlier_channels_enabled",
+        "turbo_quant_outlier_fraction",
         "decoder_window_size",
         "total_params",
         "trainable_params",
@@ -619,8 +717,12 @@ def main() -> None:
         "turbo_quant_max_cache_len",
         "turbo_quant_observed_window",
         "turbo_quant_n_bits",
+        "turbo_quant_key_n_bits",
+        "turbo_quant_value_n_bits",
         "turbo_quant_qjl_projection_dim",
         "turbo_quant_min_cache_len",
+        "turbo_quant_boundary_layers",
+        "turbo_quant_boundary_value_n_bits",
         "decoder_window_size",
     ):
         if column in printable.columns:
