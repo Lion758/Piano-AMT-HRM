@@ -10,14 +10,14 @@ import { useMidi } from './hooks/useMidi.js';
 import { usePianoPlayer } from './hooks/usePianoPlayer.js';
 import { useRecorder } from './hooks/useRecorder.js';
 
-export default function PianoPage() {
+export default function PianoPage({ midiUrl }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const mainRef = useRef(null);
   const [dimensions, setDimensions] = useState({ width: 1200, height: 500 });
 
   // Load MIDI
-  const { notes, duration, tempo, isLoading, error } = useMidi();
+  const { notes, duration, tempo, isLoading, error } = useMidi(midiUrl);
 
   // Player
   const player = usePianoPlayer(notes, duration, tempo);
@@ -124,7 +124,9 @@ export default function PianoPage() {
               <p>Failed to load MIDI</p>
               <p className="pp-error-detail">{error}</p>
               <p className="pp-error-hint">
-                Make sure the backend is running and <code>Backend/uploads/test.mid</code> exists.
+                {midiUrl
+                  ? "Make sure the backend is running and the generated MIDI file is still available."
+                  : <>Make sure <code>frontend/public/test.mid</code> exists and the app was rebuilt.</>}
               </p>
             </div>
           </div>

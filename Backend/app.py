@@ -4,8 +4,10 @@ from pathlib import Path
 import shutil
 import uuid
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from separation_service import run_spleeter
+from transcription_service import run_transcription
 
 app = FastAPI()
 
@@ -19,12 +21,22 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("uploads")
 SEPARATED_DIR = Path("separated")
+TRANSCRIPTIONS_DIR = Path("transcriptions")
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 SEPARATED_DIR.mkdir(exist_ok=True)
+TRANSCRIPTIONS_DIR.mkdir(exist_ok=True)
 
 app.mount("/separated", StaticFiles(directory="separated"), name="separated")
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+app.mount("/transcriptions", StaticFiles(directory="transcriptions"), name="transcriptions")
+
+
+class TranscriptionRequest(BaseModel):
+    audio_path: str
+    config_path: str | None = None
+    config_name: str | None = "main_config"
+    midi_output_path: str | None = None
 
 
 @app.get("/")
@@ -37,8 +49,8 @@ async def ping():
     return {"message": "pong"}
 
 
-@app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
+@app.post("/separate")
+async def separate(file: UploadFile = File(...)):
     unique_name = f"{uuid.uuid4()}_{file.filename}"
     save_path = UPLOAD_DIR / unique_name
 
@@ -56,3 +68,20 @@ async def transcribe(file: UploadFile = File(...)):
         "saved_path": str(save_path),
         "stems": stems,
     }
+
+
+@app.post("/transcribe")
+async def transcribe(request: TranscriptionRequest):
+    try:
+        return run_transcription(
+            audio_path=request.audio_path,
+            config_path=request.config_path,
+            config_name=request.config_name,
+            midi_output_path=request.midi_output_path,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(exc)}") from exc

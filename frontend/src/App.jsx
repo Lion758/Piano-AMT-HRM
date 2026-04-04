@@ -60,7 +60,7 @@ const FEATURES = [
   {
     icon: "📱",
     title: "Works in Your Browser",
-    desc: "No installation needed. Everything runs in the browser — upload, transcribe, and practise immediately.",
+    desc: "No installation needed. Upload, separate, transcribe, and practise in one workflow.",
   },
 ];
 
@@ -79,33 +79,82 @@ const FOOTER_COLS = [
 
 export default function App() {
   const [selectedFile, setSelectedFile] = useState(null);
-  const [status, setStatus] = useState("Record, upload, or choose audio to begin.");
+  const [status, setStatus] = useState("Upload or choose audio to begin.");
   const [stems, setStems] = useState(null);
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [isSeparating, setIsSeparating] = useState(false);
+  const [transcribingStem, setTranscribingStem] = useState(null);
 
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     setSelectedFile(file);
     setStems(null);
     setError("");
-    setStatus(file ? `Selected: ${file.name}` : "Record, upload, or choose audio to begin.");
+    setTranscribingStem(null);
+    setStatus(file ? `Selected: ${file.name}` : "Upload or choose audio to begin.");
   };
 
-  const handleSeparateStems = async () => {
+  const handleSeparateAudio = async () => {
     if (!selectedFile) { setError("Please choose an audio file first."); return; }
-    setError(""); setStems(null); setStatus("Separating stems…");
+    setError("");
+    setStems(null);
+    setTranscribingStem(null);
+    setIsSeparating(true);
+    setStatus("Separating stems...");
     try {
       const formData = new FormData();
       formData.append("file", selectedFile);
-      const response = await fetch(`${API_BASE}/transcribe`, { method: "POST", body: formData });
+      const response = await fetch(`${API_BASE}/separate`, { method: "POST", body: formData });
       if (!response.ok) throw new Error("Failed to separate stems.");
       const data = await response.json();
       setStems(data.stems || {});
-      setStatus("Stem separation completed.");
+      setStatus("Stem separation completed. Choose the piano stem to transcribe.");
     } catch (err) {
       setError(err.message || "Something went wrong.");
       setStatus("Request failed.");
+    } finally {
+      setIsSeparating(false);
+    }
+  };
+
+  const handleTranscribeStem = async (audioPath) => {
+    if (!audioPath) {
+      setError("Missing piano stem path.");
+      return;
+    }
+
+    setError("");
+    setTranscribingStem(audioPath);
+    setStatus("Transcribing piano stem to MIDI...");
+
+    try {
+      const response = await fetch(`${API_BASE}/transcribe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audio_path: audioPath }),
+      });
+
+      if (!response.ok) {
+        let message = "Failed to transcribe piano stem.";
+        try {
+          const payload = await response.json();
+          if (payload?.detail) message = payload.detail;
+        } catch {
+          // Keep the fallback message when the error payload is not JSON.
+        }
+        throw new Error(message);
+      }
+
+      const data = await response.json();
+      const midiUrl = new URL(data.midi_url, `${API_BASE}/`).toString();
+      setStatus("Opening the piano tutor...");
+      window.location.hash = `#/piano?midi=${encodeURIComponent(midiUrl)}`;
+    } catch (err) {
+      setError(err.message || "Something went wrong.");
+      setStatus("Transcription failed.");
+    } finally {
+      setTranscribingStem(null);
     }
   };
 
@@ -231,7 +280,13 @@ export default function App() {
             onDrop={(e) => {
               e.preventDefault(); setDragging(false);
               const f = e.dataTransfer.files[0];
-              if (f) { setSelectedFile(f); setStatus(`Selected: ${f.name}`); setError(""); }
+              if (f) {
+                setSelectedFile(f);
+                setStems(null);
+                setError("");
+                setTranscribingStem(null);
+                setStatus(`Selected: ${f.name}`);
+              }
             }}
           >
             <div className="upload-zone-icon">🎼</div>
@@ -242,12 +297,15 @@ export default function App() {
                 📁 <strong>Upload File</strong>
                 <input type="file" accept="audio/*" onChange={handleFileChange} />
               </label>
-              <button className="method-btn" onClick={handleSeparateStems}>
-                🎤 <strong>Record Audio</strong>
+              <button className="method-btn" onClick={handleSeparateAudio} disabled={!selectedFile || isSeparating}>
+                <strong>{isSeparating ? "Separating..." : "Separate Stems"}</strong>
               </button>
             </div>
             <p className="upload-note">
               {selectedFile ? `Ready: ${selectedFile.name}` : "No file selected yet"}
+            </p>
+            <p className="upload-note">
+              {error || status}
             </p>
           </div>
         </section>
@@ -269,7 +327,13 @@ export default function App() {
                   </div>
                   <audio controls src={`${API_BASE}/${path}`} />
                   {name === "piano" && (
-                    <button className="use-btn">Send to Tutor →</button>
+                    <button
+                      className="use-btn"
+                      onClick={() => handleTranscribeStem(path)}
+                      disabled={Boolean(transcribingStem)}
+                    >
+                      {transcribingStem === path ? "Transcribing..." : "Transcribe & Open Tutor →"}
+                    </button>
                   )}
                 </div>
               ))}

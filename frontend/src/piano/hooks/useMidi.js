@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react';
 import { Midi } from '@tonejs/midi';
 import { assignHands } from '../utils/noteHelpers.js';
 
-const API_BASE = 'http://134.208.3.192:8000';
+const DEFAULT_MIDI_URL = `${import.meta.env.BASE_URL}test.mid`;
 
-export function useMidi(url = `${API_BASE}/uploads/test.mid`) {
+export function useMidi(url = DEFAULT_MIDI_URL) {
   const [notes, setNotes] = useState([]);
   const [duration, setDuration] = useState(0);
   const [tempo, setTempo] = useState(120);
@@ -14,12 +14,13 @@ export function useMidi(url = `${API_BASE}/uploads/test.mid`) {
 
   useEffect(() => {
     let cancelled = false;
+    const midiUrl = url || DEFAULT_MIDI_URL;
 
     async function loadMidi() {
       setIsLoading(true);
       setError(null);
       try {
-        const response = await fetch(url);
+        const response = await fetch(midiUrl);
         if (!response.ok) throw new Error(`Failed to load MIDI: ${response.status}`);
         const arrayBuffer = await response.arrayBuffer();
         const midi = new Midi(arrayBuffer);

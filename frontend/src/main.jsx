@@ -4,6 +4,16 @@ import './index.css'
 import App from './App.jsx'
 import PianoPage from './piano/PianoPage.jsx'
 
+function parseHashRoute(hash) {
+  const [path, query = ''] = hash.split('?');
+  const params = new URLSearchParams(query);
+
+  return {
+    path,
+    midiUrl: params.get('midi'),
+  };
+}
+
 function Root() {
   const [route, setRoute] = useState(window.location.hash);
 
@@ -13,7 +23,9 @@ function Root() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  if (route === '#/piano') return <PianoPage />;
+  const { path, midiUrl } = parseHashRoute(route);
+
+  if (path === '#/piano') return <PianoPage midiUrl={midiUrl} />;
   return <App />;
 }
 
