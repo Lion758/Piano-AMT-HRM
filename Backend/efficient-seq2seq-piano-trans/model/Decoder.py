@@ -23,8 +23,14 @@ class DecoderLayer(nn.Module):
             tq = config.turbo_quant
             turbo_quant_config = tq.__dict__ if hasattr(tq, '__dict__') else tq
 
+        turbo_quant_v2_config = None
+        if hasattr(config, 'turbo_quant_v2'):
+            tq2 = config.turbo_quant_v2
+            turbo_quant_v2_config = dict(tq2.__dict__) if hasattr(tq2, '__dict__') else dict(tq2)
+            turbo_quant_v2_config['num_decoder_layers'] = config.num_decoder_layers
+
         self.pre_self_attention_layer_norm = LayerNorm(config.emb_dim)
-        self.self_attention = Multi_Head_Attention(num_heads=config.num_heads, head_dim=config.head_dim, dropout_rate=config.dropout_rate, window_size=window_size, is_causal=True, turbo_quant_config=turbo_quant_config, layer_idx=layer_idx)
+        self.self_attention = Multi_Head_Attention(num_heads=config.num_heads, head_dim=config.head_dim, dropout_rate=config.dropout_rate, window_size=window_size, is_causal=True, turbo_quant_config=turbo_quant_config, turbo_quant_v2_config=turbo_quant_v2_config, layer_idx=layer_idx)
         self.dropout1 = nn.Dropout(config.dropout_rate)
 
         self.pre_cross_attention_layer_norm = LayerNorm(config.emb_dim)

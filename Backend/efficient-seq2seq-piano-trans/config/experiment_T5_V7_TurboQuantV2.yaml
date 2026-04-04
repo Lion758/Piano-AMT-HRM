@@ -1,0 +1,24 @@
+defaults:
+  - experiment_T5_V4_HierarchyPool
+
+model:
+  turbo_quant_v2:
+    enabled: true
+    key_n_bits: 4           # Higher precision for keys (softmax amplification)
+    value_n_bits: 2         # Lower precision for middle-layer values
+    enable_qjl: true
+    qjl_projection_dim: 64
+    min_cache_len: 64
+    boundary_layers: 2      # First 2 + last 2 decoder layers get higher V precision
+    boundary_value_n_bits: 4 # V precision for boundary layers
+    enable_sparse_v: true
+    sparsity_threshold: 1.0e-6
+    outlier_channels:
+      enabled: false
+      outlier_fraction: 0.25
+
+  cross_attention_hierarchy_pooling: true
+  pooling_sizes: [4, 4, 2, 2, 1, 1]
+
+training:
+  notes: "TurboQuantV7_AsymKV_SparseV_BoundaryV"

@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - optional dependency
 # from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks
 
 class Multi_Head_Attention(nn.Module):
-    def __init__(self, num_heads, head_dim, dtype=torch.float32, dropout_rate=0.0, kernel_init=None, float32_logits=False, window_size=None, is_causal=False, turbo_quant_config=None, layer_idx=0):
+    def __init__(self, num_heads, head_dim, dtype=torch.float32, dropout_rate=0.0, kernel_init=None, float32_logits=False, window_size=None, is_causal=False, turbo_quant_config=None, turbo_quant_v2_config=None, layer_idx=0):
         super(Multi_Head_Attention, self).__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -54,7 +54,31 @@ class Multi_Head_Attention(nn.Module):
                 enable_qjl=turbo_quant_config.get('enable_qjl', True),
                 min_cache_len=turbo_quant_config.get('min_cache_len', 32),
             )
-            
+
+        # TurboQuant V2 KV cache compression (asymmetric K/V, sparse V, boundary layers)
+        self.turbo_quant_v2_cache = None
+        if turbo_quant_v2_config is not None and turbo_quant_v2_config.get('enabled', False):
+            from model.TurboQuant2 import TurboQuant2Cache
+            outlier_cfg = turbo_quant_v2_config.get('outlier_channels', None)
+            if isinstance(outlier_cfg, dict) and not outlier_cfg.get('enabled', False):
+                outlier_cfg = None
+            self.turbo_quant_v2_cache = TurboQuant2Cache(
+                head_dim=head_dim,
+                num_heads=num_heads,
+                layer_idx=layer_idx,
+                num_decoder_layers=turbo_quant_v2_config['num_decoder_layers'],
+                key_n_bits=turbo_quant_v2_config.get('key_n_bits', 4),
+                value_n_bits=turbo_quant_v2_config.get('value_n_bits', 2),
+                enable_qjl=turbo_quant_v2_config.get('enable_qjl', True),
+                qjl_projection_dim=turbo_quant_v2_config.get('qjl_projection_dim'),
+                min_cache_len=turbo_quant_v2_config.get('min_cache_len', 32),
+                boundary_layers=turbo_quant_v2_config.get('boundary_layers', 2),
+                boundary_value_n_bits=turbo_quant_v2_config.get('boundary_value_n_bits', 4),
+                sparsity_threshold=turbo_quant_v2_config.get('sparsity_threshold', 1e-6),
+                enable_sparse_v=turbo_quant_v2_config.get('enable_sparse_v', True),
+                outlier_config=outlier_cfg,
+            )
+
     def _turbo_quant_blockwise_attention(self, query, attention_bias=None, block_size=32):
         """
         Run decode-time attention directly against the compressed TurboQuant cache by
@@ -183,6 +207,8 @@ class Multi_Head_Attention(nn.Module):
         self._clear_raw_cache()
         if self.turbo_quant_cache is not None:
             self.turbo_quant_cache.clear()
+        if self.turbo_quant_v2_cache is not None:
+            self.turbo_quant_v2_cache.clear()
 
     def _clear_raw_cache(self):
         if hasattr(self, 'cached_key'):
@@ -224,6 +250,7 @@ class Multi_Head_Attention(nn.Module):
         key = self.projection(inputs_kv).view(inputs_kv.size(0), inputs_kv.size(1), self.num_heads, self.head_dim)
         value = self.projection(inputs_kv).view(inputs_kv.size(0), inputs_kv.size(1), self.num_heads, self.head_dim)
         use_turbo_quant_blockwise = False
+        use_turbo_quant_v2_blockwise = False
 
         if decode:
             batch, length, num_heads, head_dim,  = key.size()
@@ -234,7 +261,27 @@ class Multi_Head_Attention(nn.Module):
                                 (expected_shape, query.size()))
 
             cache_window_size = self._get_decode_cache_window(sliding_window_size)
-            if self.turbo_quant_cache is not None:
+            if self.turbo_quant_v2_cache is not None:
+                if self.turbo_quant_v2_cache.has_cached_values():
+                    self.turbo_quant_v2_cache.compress_and_cache(key, value)
+                    if cache_window_size is not None:
+                        self.turbo_quant_v2_cache.apply_sliding_window(cache_window_size)
+                    use_turbo_quant_v2_blockwise = not return_attn_weights
+                    if not use_turbo_quant_v2_blockwise:
+                        key, value = self.turbo_quant_v2_cache.get_decompressed()
+                else:
+                    key, value = self._append_to_raw_cache(key, value, sliding_window_size=cache_window_size)
+                    raw_cache_len = key.size(1)
+                    if self.turbo_quant_v2_cache.should_quantize(raw_cache_len):
+                        self.turbo_quant_v2_cache.clear()
+                        self.turbo_quant_v2_cache.compress_and_cache(key, value)
+                        if cache_window_size is not None:
+                            self.turbo_quant_v2_cache.apply_sliding_window(cache_window_size)
+                        self._clear_raw_cache()
+                        use_turbo_quant_v2_blockwise = not return_attn_weights
+                        if not use_turbo_quant_v2_blockwise:
+                            key, value = self.turbo_quant_v2_cache.get_decompressed()
+            elif self.turbo_quant_cache is not None:
                 if self.turbo_quant_cache.has_cached_values():
                     self.turbo_quant_cache.compress_and_cache(key, value)
                     if cache_window_size is not None:
@@ -281,7 +328,11 @@ class Multi_Head_Attention(nn.Module):
                     deterministic=deterministic)
         else:
             dropout_p = self.dropout_rate if not decode else 0.0
-            if use_turbo_quant_blockwise:
+            if use_turbo_quant_v2_blockwise:
+                x = self.turbo_quant_v2_cache.sparse_blockwise_attention(
+                    query, attention_bias=attention_bias,
+                    float32_logits=self.float32_logits, dtype=self.dtype)
+            elif use_turbo_quant_blockwise:
                 x = self._turbo_quant_blockwise_attention(query, attention_bias=attention_bias)
             elif self.window_size is None:
                 # Faster implementation using PyTorch's built-in attention
