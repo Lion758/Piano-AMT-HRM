@@ -1,8 +1,7 @@
 import { useState } from "react";
 import "./index.css";
 import pianoBanner from "./assets/piano-banner.png";
-
-const API_BASE = "http://134.208.3.192:8000";
+import { API_BASE, resolveApiUrl } from "./lib/api.js";
 
 const STEPS = [
   {
@@ -147,7 +146,7 @@ export default function App() {
       }
 
       const data = await response.json();
-      const midiUrl = new URL(data.midi_url, `${API_BASE}/`).toString();
+      const midiUrl = resolveApiUrl(data.midi_url);
       setStatus("Opening the piano tutor...");
       window.location.hash = `#/piano?midi=${encodeURIComponent(midiUrl)}`;
     } catch (err) {
@@ -325,7 +324,7 @@ export default function App() {
                     <h4>{name}</h4>
                     {name === "piano" && <span className="pill">Use This</span>}
                   </div>
-                  <audio controls src={`${API_BASE}/${path}`} />
+                  <audio controls src={resolveApiUrl(path)} />
                   {name === "piano" && (
                     <button
                       className="use-btn"

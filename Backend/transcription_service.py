@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import sys
 import threading
 from pathlib import Path
 from types import ModuleType
 
+import torch
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 
@@ -31,6 +34,53 @@ def _ensure_model_root_on_path() -> None:
         sys.path.insert(0, model_root)
 
 
+def _prepare_runtime_env() -> None:
+    os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    Path(os.environ["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
+
+
+def _patch_cpu_attention_backends() -> None:
+    if torch.cuda.is_available():
+        return
+
+    attention_module = sys.modules.get("model.Attention")
+    if attention_module is not None and not getattr(attention_module, "_cpu_fallback_patched", False):
+        attention_module.flash_attn_func = None
+
+        def _cpu_sliding_window_attention(self, query, key, value, decode=False):
+            seq_len = query.size(1)
+            mask = attention_module.make_sliding_window_mask(
+                seq_len,
+                int(self.window_size),
+                bool(self.is_causal),
+            ).to(query.device)
+            attention_bias = torch.where(
+                mask > 0,
+                torch.zeros_like(mask, dtype=torch.float32, device=query.device),
+                torch.full_like(mask, float("-inf"), dtype=torch.float32, device=query.device),
+            )
+
+            q = query.permute(0, 2, 1, 3).to(torch.float32)
+            k = key.permute(0, 2, 1, 3).to(torch.float32)
+            v = value.permute(0, 2, 1, 3).to(torch.float32)
+            dropout_p = 0.0 if decode else float(self.dropout_rate)
+
+            x = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_bias, dropout_p=dropout_p)
+            return x.permute(0, 2, 1, 3).to(query.dtype)
+
+        attention_module.Multi_Head_Attention.flash_attn_sliding_window_attention = _cpu_sliding_window_attention
+        attention_module._cpu_fallback_patched = True
+
+    trm_module = sys.modules.get("model.trm_encoder")
+    if trm_module is not None:
+        trm_module._flash_attn_func = None
+
+    hrm_layers_module = sys.modules.get("model.layers.hrm_layers")
+    if hrm_layers_module is not None:
+        hrm_layers_module.flash_attn_func = None
+
+
 def _load_runtime(selector_key: str) -> ModuleType:
     with _RUNTIME_LOCK:
         runtime = _RUNTIMES.get(selector_key)
@@ -40,6 +90,7 @@ def _load_runtime(selector_key: str) -> ModuleType:
         if not INFERENCE_PATH.is_file():
             raise FileNotFoundError(f"Inference entrypoint not found: {INFERENCE_PATH}")
 
+        _prepare_runtime_env()
         _ensure_model_root_on_path()
 
         module_name = f"seq2seq_inference_{hashlib.sha1(selector_key.encode('utf-8')).hexdigest()}"
@@ -56,6 +107,7 @@ def _load_runtime(selector_key: str) -> ModuleType:
             sys.modules.pop(module_name, None)
             raise
 
+        _patch_cpu_attention_backends()
         _RUNTIMES[selector_key] = module
         return module
 
@@ -157,8 +209,8 @@ def run_transcription(
 
     config = runtime.load_config(resolved_config_path, effective_config_name, [])
     _resolve_checkpoint(config)
-    config.audio_path = str(resolved_audio_path)
-    config.midi_path = str(resolved_output_path)
+    OmegaConf.update(config, "audio_path", str(resolved_audio_path), force_add=True)
+    OmegaConf.update(config, "midi_path", str(resolved_output_path), force_add=True)
 
     runtime.run_inference(config)
 
