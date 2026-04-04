@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react';
 import { Midi } from '@tonejs/midi';
 import { assignHands } from '../utils/noteHelpers.js';
+import { resolveApiUrl } from '../../lib/api.js';
 
-const API_BASE = 'http://134.208.3.192:8000';
+const MIDI_FETCH_RETRIES = 8;
+const MIDI_FETCH_RETRY_DELAY_MS = 750;
 
-export function useMidi(url = `${API_BASE}/uploads/test.mid`) {
+export function useMidi(url = null) {
   const [notes, setNotes] = useState([]);
   const [duration, setDuration] = useState(0);
   const [tempo, setTempo] = useState(120);
@@ -14,14 +16,50 @@ export function useMidi(url = `${API_BASE}/uploads/test.mid`) {
 
   useEffect(() => {
     let cancelled = false;
+    const midiUrl = typeof url === 'string' && url.trim() ? resolveApiUrl(url.trim()) : null;
+
+    if (!midiUrl) {
+      setNotes([]);
+      setDuration(0);
+      setTempo(120);
+      setMidiData(null);
+      setError(null);
+      setIsLoading(false);
+      return () => { cancelled = true; };
+    }
 
     async function loadMidi() {
       setIsLoading(true);
       setError(null);
       try {
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`Failed to load MIDI: ${response.status}`);
-        const arrayBuffer = await response.arrayBuffer();
+        let arrayBuffer = null;
+        let lastError = null;
+
+        for (let attempt = 0; attempt < MIDI_FETCH_RETRIES; attempt += 1) {
+          try {
+            const response = await fetch(midiUrl);
+            if (!response.ok) {
+              throw new Error(`Failed to load MIDI: ${response.status}`);
+            }
+
+            arrayBuffer = await response.arrayBuffer();
+            break;
+          } catch (err) {
+            lastError = err;
+
+            if (attempt === MIDI_FETCH_RETRIES - 1) {
+              throw err;
+            }
+
+            await new Promise(resolve => window.setTimeout(resolve, MIDI_FETCH_RETRY_DELAY_MS));
+            if (cancelled) return;
+          }
+        }
+
+        if (!arrayBuffer) {
+          throw lastError || new Error('Failed to load MIDI.');
+        }
+
         const midi = new Midi(arrayBuffer);
 
         if (cancelled) return;
