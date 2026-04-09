@@ -23,7 +23,7 @@
   head_dim: 64
   mlp_dim: 1024
   mlp_activations: relu
-  dropout_rate: 0.1
+  dropout_rate: 0.15
   logits_via_embeddings: False
   dtype: torch.float32
   # dtype: torch.float16

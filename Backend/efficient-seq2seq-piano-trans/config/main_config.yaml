@@ -5,7 +5,8 @@ defaults:
   # - experiment_T5_V1_LocalEncAttn
   # - experiment_T5_V2_LocalEncDecAttn
   # - experiment_T5_V3_HybridGlobalLocalCrossAttn
-  - experiment_T5_V7_TurboQuantV2_FullDecoder
+  - experiment_T5_V6_TRM
+  # - experiment_T5_V7_TurboQuantV2_FullDecoder
 
 
 # --config-name=experiment_T5_V0

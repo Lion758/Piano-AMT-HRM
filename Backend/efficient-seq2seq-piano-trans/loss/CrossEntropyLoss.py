@@ -10,8 +10,15 @@ class CrossEntropyLoss(nn.Module):
         super().__init__()
         self.config = config
         class_weights = torch.ones([self.config.model.vocab_size, ])
+        label_smoothing = 0.0
+        if getattr(self.config.model, "encoder_name", None) == "TrmEncoder":
+            label_smoothing = float(self.config.training.get("trm_label_smoothing", 0.0))
         # class_weights[128:256] = config.data.offset_weight # set Offset weights
-        self.criterion = nn.CrossEntropyLoss(weight=class_weights, ignore_index=TOKEN_PAD) # config.data.TOKEN_PAD
+        self.criterion = nn.CrossEntropyLoss(
+            weight=class_weights,
+            ignore_index=TOKEN_PAD,
+            label_smoothing=label_smoothing,
+        ) # config.data.TOKEN_PAD
         self.TOKEN_PAD = TOKEN_PAD
     def forward(self, outputs:torch.tensor, targets:torch.tensor, targets_mask:torch.tensor):
         """ Cross Entropy Loss with Softmax Layer.

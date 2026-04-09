@@ -9,7 +9,6 @@ import torch.nn.functional as Functional
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.optim.lr_scheduler import CosineAnnealingLR
 import torchvision
 from omegaconf import OmegaConf
 import hydra
@@ -17,6 +16,7 @@ from model.T5 import Transformer
 from model.HPPNet import HPPNet
 from model.GPT import GPT
 from model.trm_encoder import compute_trm_halt_loss
+from utils.trm_training import build_trm_optimizer, build_trm_scheduler
 
 from data.dataset_Audio2Midi import Audio2Midi_Dataset
 import pytorch_lightning as pl
@@ -180,6 +180,7 @@ class MT3Trainer(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.is_trm_run = self.config.model.encoder_name == "TrmEncoder"
         if self.config.model.model_name == "HPPNet":
             self.model = HPPNet(config=config.model)
         else:
@@ -769,13 +770,29 @@ class MT3Trainer(pl.LightningModule):
 
 
     def configure_optimizers(self):
-        optimizer = AdamW(self.model.parameters(), self.config.training.learning_rate)
+        if not self.is_trm_run:
+            return AdamW(self.model.parameters(), self.config.training.learning_rate)
 
-        # scheduler = CosineAnnealingLR(optimizer, T_max=10)
-        # scheduler.get_lr()
-        # return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler}}
+        optimizer = build_trm_optimizer(
+            self.model,
+            self.config.training.learning_rate,
+            float(self.config.training.get("trm_weight_decay", 0.01)),
+        )
+        scheduler = build_trm_scheduler(
+            optimizer,
+            int(self.config.training.training_steps),
+            float(self.config.training.get("trm_warmup_ratio", 0.05)),
+            float(self.config.training.get("trm_cosine_min_lr_ratio", 0.1)),
+        )
         
-        return optimizer
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
     
     
     def train_dataloader(self):
@@ -861,7 +878,7 @@ def Init_rank_zero_only(log_dir):
 def my_main(config: OmegaConf):
     torch.cuda.empty_cache()
     gc.collect()
-    set_training_process_name("group5, will end ~ 4/4 10:00")
+    set_training_process_name("group5, will end 4/9 ~ 12:00")
     wandb_offline = get_wandb_offline_mode(config)
     model_name = config.model.model_name
     experiment_name = "_".join([model_name])

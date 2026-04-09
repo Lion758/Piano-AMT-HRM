@@ -2,6 +2,7 @@ defaults:
   - experiment_T5_V0
 
 model:
+  checkpoint_path: 
   encoder_name: "TrmEncoder"
   trm_layers: 2
   trm_recursions: 6
@@ -15,7 +16,12 @@ model:
   use_recording_id_embedding: false
 
 training:
-  resume_ckpt_path: "runs/Transformer-T5/260402-224722_V6_TRM/AMT-audio-to-midi/3q9ivnrw/checkpoints/epoch=45-step=80000.ckpt"
-  training_steps: 160000
+  # resume_ckpt_path: "runs/Transformer-T5/260402-224722_V6_TRM/AMT-audio-to-midi/3q9ivnrw/checkpoints/epoch=45-step=80000.ckpt"
+  training_steps: 100000
   trm_halt_loss_weight: 0.05
-  notes: "V6_TRMResume"
+  trm_weight_decay: 0.02
+  trm_warmup_ratio: 0.05
+  trm_cosine_min_lr_ratio: 0.1
+  trm_label_smoothing: 0.08
+  online_testing: false
+  notes: "V6_TRM_RegularizationSweep_Continue"
