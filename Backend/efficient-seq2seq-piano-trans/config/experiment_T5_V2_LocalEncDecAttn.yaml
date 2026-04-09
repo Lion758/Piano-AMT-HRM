@@ -3,7 +3,7 @@ defaults:
 
 model:
   # checkpoint_path: ""
-  decoder_window_size: 128 # or None
+  decoder_window_size: 64 # or None
 
 training:
   notes: "_Efficient_Transformer_V2_LocalEncDecAttn=64"
