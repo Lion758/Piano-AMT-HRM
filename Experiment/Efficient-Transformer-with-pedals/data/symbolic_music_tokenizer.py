@@ -315,7 +315,8 @@ class SymbolicMusicTokenizer:
         if SEQUENCE_TYPE == SequenceType.MIDI_LIKE:
             self.compound_word_size = 1
         elif SEQUENCE_TYPE == SequenceType.COMPOUND_WORD:
-            self.compound_word_size = len(self.token_type_list)
+            # Triplet size: each event emits exactly 3 tokens [Onset, Pitch/NoteOff/PedalOn/PedalOff, Velocity/BLANK]
+            self.compound_word_size = 3
             self.midi_like_size = len(self.token_type_list) - 1 # exclude family
 
     
@@ -425,7 +426,8 @@ class SymbolicMusicTokenizer:
         # df_data["start_index"] = df_data["onset_sec"].apply(lambda x: int(np.round(x * ONSET_SEC_UP_SAMPLING)))
         # df_data["onset_sec"] * ONSET_SEC_UP_SAMPLING
         start_index = (df_data["onset_sec"] * ONSET_SEC_UP_SAMPLING).round().astype(int)
-        
+        start_index = start_index.clip(0, TokenSize.ONSET_SEC.value - 1)  # Clamp to valid onset range
+
         df_data["start_index"] = start_index
         df_data = df_data.sort_values(by=["start_index", "type_id", "pitch", "velocity"], ascending=[True, True, True, True])
         # df_data = df_data.sort_values(by=["onset_sec", "type_id", "pitch"], ascending=[True, True, True])

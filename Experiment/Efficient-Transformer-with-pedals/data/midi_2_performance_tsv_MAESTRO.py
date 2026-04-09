@@ -23,29 +23,54 @@ def process_midi_file(midi_path):
     os.makedirs(os.path.dirname(notes_tsv_path), exist_ok=True)
     shutil.copyfile(midi_path, midi_path_out)
     
-    # # Pedal events
-    # symusic_midi = symusic.Score(midi_path, ttype=symusic.TimeUnit.SECOND)
-    # assert len(symusic_midi.tracks) == 1
-    # track = symusic_midi.tracks[0]
-    # pedals = track.pedals.numpy()
-    # pedals["end"] = pedals["time"] + pedals["duration"]
-    
-    performance = partitura.load_performance(midi_path, merge_tracks=True, pedal_threshold=64)
-    
-    note_array = performance = performance.note_array()
+    # Parse pedal events from symusic (physical pedal on/off times)
+    symusic_midi = symusic.Score(midi_path, ttype=symusic.TimeUnit.second)
+    assert len(symusic_midi.tracks) == 1
+    track = symusic_midi.tracks[0]
+    pedals = track.pedals.numpy()
+    pedals["end"] = pedals["time"] + pedals["duration"]
+
+    # Use partitura for notes with no pedal extension (physical key release offsets)
+    performance = partitura.load_performance(midi_path, merge_tracks=True, pedal_threshold=None)
+
+    note_array = performance.note_array()
     df_notes = pd.DataFrame({
-        "type": "note",  # type is note
+        "type": "note",
         "type_id": 1,  # 1 for note
         "onset_sec": note_array["onset_sec"],
         "duration_sec": note_array["duration_sec"],
         "offset_sec": note_array["onset_sec"] + note_array["duration_sec"],
         "pitch": note_array["pitch"],
         "velocity": note_array["velocity"],
-        # "track": note_array["track"],
     })
-    
-    df_notes.sort_values(by=["onset_sec", "type_id", "pitch"], ascending=[True, True, True], inplace=True)
-    df_notes.to_csv(notes_tsv_path, sep="\t", index=False)
+
+    # Add PedalOn events (pedal press times)
+    df_frames = [df_notes]
+    if len(pedals["time"]) > 0:
+        df_pedal_on = pd.DataFrame({
+            "type": "PedalOn",
+            "type_id": 0,
+            "onset_sec": pedals["time"],
+            "duration_sec": pedals["duration"],
+            "offset_sec": pedals["end"],
+            "pitch": -1,
+            "velocity": 0,
+        })
+        df_pedal_off = pd.DataFrame({
+            "type": "PedalOff",
+            "type_id": 0,
+            "onset_sec": pedals["end"],
+            "duration_sec": 0.0,
+            "offset_sec": pedals["end"],
+            "pitch": -1,
+            "velocity": 0,
+        })
+        df_frames.append(df_pedal_on)
+        df_frames.append(df_pedal_off)
+
+    df_all = pd.concat(df_frames, ignore_index=True)
+    df_all.sort_values(by=["onset_sec", "type_id", "pitch"], ascending=[True, True, True], inplace=True)
+    df_all.to_csv(notes_tsv_path, sep="\t", index=False)
     return True
     
     
