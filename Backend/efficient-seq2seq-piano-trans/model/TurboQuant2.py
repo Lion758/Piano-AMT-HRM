@@ -172,6 +172,7 @@ class TurboQuant2Cache(nn.Module):
         self.cached_v_outlier_norms = None
         self.cached_v_normal_packed = None
         self.cached_v_normal_norms = None
+        self.reset_stats()
 
     def _compress_key(self, key):
         indices, norms = self.key_pq.compress(key)
@@ -226,6 +227,81 @@ class TurboQuant2Cache(nn.Module):
         if self.cached_key_quantized is None:
             return 0
         return int(self.cached_key_quantized.size(1))
+
+    def reset_stats(self):
+        self.short_prefix_steps = 0
+        self.quantized_steps = 0
+        self.max_cache_len = 0
+        self.last_cache_len = 0
+        self.last_window_size = None
+
+    def _record_step(self, cache_len, window_size, used_quantized):
+        cache_len = int(cache_len)
+        if used_quantized:
+            self.quantized_steps += 1
+        else:
+            self.short_prefix_steps += 1
+        self.max_cache_len = max(self.max_cache_len, cache_len)
+        self.last_cache_len = cache_len
+        self.last_window_size = int(window_size) if window_size is not None else None
+
+    def note_short_prefix_step(self, cache_len, window_size=None):
+        self._record_step(cache_len, window_size, used_quantized=False)
+
+    def note_quantized_step(self, cache_len, window_size=None):
+        self._record_step(cache_len, window_size, used_quantized=True)
+
+    def get_stats(self):
+        key_index_bytes = _tensor_storage_bytes(self.cached_key_quantized)
+        key_qjl_bytes = _tensor_storage_bytes(self.cached_key_qjl_signs)
+        key_norm_bytes = _tensor_storage_bytes(self.cached_key_norms) + _tensor_storage_bytes(self.cached_key_qjl_norms)
+
+        if self.use_outlier_v:
+            value_index_bytes = (
+                _tensor_storage_bytes(self.cached_v_outlier_packed)
+                + _tensor_storage_bytes(self.cached_v_normal_packed)
+            )
+            value_norm_bytes = (
+                _tensor_storage_bytes(self.cached_v_outlier_norms)
+                + _tensor_storage_bytes(self.cached_v_normal_norms)
+            )
+            value_vector_count = 0 if self.cached_v_outlier_norms is None else int(self.cached_v_outlier_norms.numel())
+        else:
+            value_index_bytes = _tensor_storage_bytes(self.cached_value_data)
+            value_norm_bytes = _tensor_storage_bytes(self.cached_value_norms)
+            value_vector_count = 0 if self.cached_value_norms is None else int(self.cached_value_norms.numel())
+
+        key_vector_count = 0 if self.cached_key_norms is None else int(self.cached_key_norms.numel())
+        unpacked_key_discrete_bytes = key_vector_count * self.head_dim
+        unpacked_value_discrete_bytes = value_vector_count * self.head_dim
+        if self.enable_qjl:
+            unpacked_key_discrete_bytes += key_vector_count * self.key_qjl_projection_dim
+
+        return {
+            'short_prefix_steps': int(self.short_prefix_steps),
+            'quantized_steps': int(self.quantized_steps),
+            'max_cache_len': int(self.max_cache_len),
+            'last_cache_len': int(self.last_cache_len),
+            'last_window_size': self.last_window_size,
+            'min_cache_len': int(self.min_cache_len),
+            'key_n_bits': int(self.key_n_bits),
+            'value_n_bits': int(self.value_n_bits),
+            'enable_qjl': bool(self.enable_qjl),
+            'qjl_projection_dim': int(self.key_qjl_projection_dim),
+            'enable_sparse_v': bool(self.enable_sparse_v),
+            'sparsity_threshold': float(self.sparsity_threshold),
+            'is_boundary': bool(self.is_boundary),
+            'packed_key_index_bytes': key_index_bytes,
+            'packed_value_index_bytes': value_index_bytes,
+            'packed_key_qjl_bytes': key_qjl_bytes,
+            'packed_key_discrete_bytes': key_index_bytes + key_qjl_bytes,
+            'packed_value_discrete_bytes': value_index_bytes,
+            'norm_bytes': key_norm_bytes + value_norm_bytes,
+            'total_bytes': key_index_bytes + value_index_bytes + key_qjl_bytes + key_norm_bytes + value_norm_bytes,
+            'unpacked_key_discrete_bytes': unpacked_key_discrete_bytes,
+            'unpacked_value_discrete_bytes': unpacked_value_discrete_bytes,
+            'unpacked_discrete_bytes': unpacked_key_discrete_bytes + unpacked_value_discrete_bytes,
+        }
 
     def compress_and_cache(self, key, value):
         """

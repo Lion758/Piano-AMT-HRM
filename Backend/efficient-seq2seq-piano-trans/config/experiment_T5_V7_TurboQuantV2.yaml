@@ -14,7 +14,7 @@ model:
     enable_sparse_v: true
     sparsity_threshold: 1.0e-6
     outlier_channels:
-      enabled: false
+      enabled: true
       outlier_fraction: 0.25
 
   cross_attention_hierarchy_pooling: true

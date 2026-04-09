@@ -1,0 +1,10 @@
+defaults:
+  - experiment_T5_V7_TurboQuantV2
+
+model:
+  # Disable the local decoder window so decode-time KV cache can grow
+  # with sequence length and TurboQuant V2 can realize larger gains.
+  decoder_window_size: null
+
+training:
+  notes: "TurboQuantV7_FullDecoder"
