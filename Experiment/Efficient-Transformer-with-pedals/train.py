@@ -1,5 +1,6 @@
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+import ctypes
 
 import torch
 import torch.nn as nn
@@ -26,7 +27,6 @@ import wandb
 import json
 import pandas as pd
 from torch.utils.data import IterableDataset, Dataset, ConcatDataset
-import editdistance
 # from torchaudio.transforms import MelSpectrogram
 
 # from lightning.pytorch.trainer.states import RunningStage, TrainerFn
@@ -61,7 +61,7 @@ from itertools import chain
 from tqdm import tqdm
 from glob import glob
 import pandas as pd
-from line_profiler import LineProfiler
+#from line_profiler import LineProfiler
 from symusic import Score, TimeUnit
 from collections import defaultdict
 
@@ -70,6 +70,33 @@ import utils.log_memory_usage as log_memory_usage
 import utils.sequence_processing as sequence_processing
 
 import shutil
+
+try:
+    from setproctitle import setproctitle
+except ImportError:
+    setproctitle = None
+
+
+def set_training_process_name(process_name):
+    process_name = str(process_name).strip()
+    if not process_name:
+        return
+
+    if setproctitle is not None:
+        try:
+            setproctitle(process_name)
+        except Exception:
+            pass
+
+    try:
+        libc = ctypes.CDLL(None)
+        libc.prctl.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        libc.prctl.restype = ctypes.c_int
+        libc.prctl(15, process_name[:15].encode("utf-8"), 0, 0, 0)
+    except Exception:
+        pass
+
+
 class MT3Trainer(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
@@ -704,8 +731,10 @@ def my_main(config: OmegaConf):
 
     ####################################################
     # Get log dir.
+    model_name = config.model.model_name
+    experiment_name = "_".join([model_name])
+
     if config.training.log_dir is None:
-        model_name = config.model.model_name
         time_str = datetime.now().strftime('%y%m%d-%H%M%S')
         # loss_name = config.training.loss
         batch_size = "BS" + str(config.training.batch)
@@ -713,7 +742,6 @@ def my_main(config: OmegaConf):
         log_workdir = "runs"
         if "DEBUG" in os.environ and os.environ["DEBUG"] == "True":
             log_workdir = "runs-debug"
-        experiment_name = "_".join([model_name])
         assert config.training.notes is not None and len(config.training.notes) > 0, "Please set config.training.notes to a non-empty string."
         run_name = "_".join([time_str, config.training.notes]) # batch_size, config.data.dataset_name
         log_dir = os.path.join(log_workdir, experiment_name , run_name)
@@ -722,6 +750,10 @@ def my_main(config: OmegaConf):
         config.training.log_dir=log_dir
     else:
         log_dir = config.training.log_dir
+
+    process_note = str(config.training.notes).strip() if config.training.notes is not None else ""
+    process_name = experiment_name if not process_note else f"{experiment_name}_{process_note}"
+    set_training_process_name("group 5 will end 4/10 ~ 8:00")
     ####################################################
     # Create model.
     model = MT3Trainer(config)

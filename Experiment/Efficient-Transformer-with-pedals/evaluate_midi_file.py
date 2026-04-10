@@ -9,7 +9,7 @@ subset = "test"
 
 predict_output_dir = "runs/HPPformer_targets_notes_state_offset+pedal/240326-014525_BS5_MAESTRO_Meta_Dataset/cpt/steps_250000.ckpt_predict"
 
-dataset_dir = 'dataset/maestro-v3.0.0/'
+dataset_dir = '/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0'
 # Save outputs to MIDI files.
 # load data
 meta_csv_path = dataset_dir + '/maestro-v3.0.0.csv'

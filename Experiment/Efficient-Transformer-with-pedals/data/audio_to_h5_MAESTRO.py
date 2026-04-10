@@ -27,7 +27,7 @@ def save_audio_split_list(df, output_path):
 
 if __name__ == "__main__":
 
-    root_dir='dataset/maestro-v3.0.0/'
+    root_dir='/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0'
     csv_path = root_dir + '/maestro-v3.0.0.csv'
     df = pd.read_csv(csv_path, header=0)
 

@@ -1,6 +1,6 @@
 # data:
   dataset_name: Audio2Midi_Dataset
-  dataset_dir: dataset/maestro-v3.0.0
+  dataset_dir: /home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0
   features: cqt # mel, log-specgram, cqt
   amplitude_to_db: true
   num_mel_bins: 512
@@ -17,3 +17,4 @@
   sample_rate: 16000
   hop_length: 320 # 160 # 320
   max_token_length: 512 #1024
+  use_truth_offsets: false

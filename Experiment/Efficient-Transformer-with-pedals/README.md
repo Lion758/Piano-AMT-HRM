@@ -29,29 +29,25 @@ $ pip install -r requirements.txt
 ```
 ## Dataset Preparation
 
-Download MAESTRO v3.0.0 dataset, and unzip to ./dataset/maestro-v3.0.0
+Use the shared backend MAESTRO v3.0.0 dataset at `/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0`
 ```bash
-mkdir dataset
-cd dataset
-wget https://storage.googleapis.com/magentadata/datasets/maestro/v3.0.0/maestro-v3.0.0.zip
-unzip maestro-v3.0.0.zip
-cd ../
+backend_dataset_dir=/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0
 ```
 
 or use soft symbolic link:
 
 ```bash
-ln -s path/to/maestro-v3.0.0 ./dataset/maestro-v3.0.0
+backend_dataset_dir=/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0
 ```
 
 
-Convert audios into h5py file and save to "dataset/maestro-v3.0.0/audio.h5".
+Convert audios into h5py file and save to `Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0/audio.h5`.
 ```bash
 python data/audio_to_h5_MAESTRO.py
 ```
 
 
-Convert midi files to tsv and save to "dataset/maestro-v3.0.0/cache/".
+Convert midi files to tsv and save to `Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0/cache/`.
 ```bash
 python data/midi_2_performance_tsv_MAESTRO.py
 ```
@@ -110,7 +106,6 @@ python inference.py model.checkpoint_path="$checkpoint_path" audio_path="'audio/
 
 - rlax59us' [MT3-pytorch](https://github.com/rlax59us/MT3-pytorch)
 - Official [PyTorch Lightning](https://github.com/PyTorchLightning/pytorch-lightning)
-
 
 
 

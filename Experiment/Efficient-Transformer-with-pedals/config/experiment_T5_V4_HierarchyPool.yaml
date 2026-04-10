@@ -9,5 +9,5 @@ model:
   # pooling_sizes: [4, 4, 4, 4, 4, 4]
 
 training:
-  notes: "Efficient_Transformer_V4_HierarchyPool=421"
+  notes: "Efficient_Transformer_V4_Pedal_seq_length:1353"
 

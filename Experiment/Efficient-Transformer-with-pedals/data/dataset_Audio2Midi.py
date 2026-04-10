@@ -121,10 +121,16 @@ class SingleWavDataset(Dataset):
         if True:
             tsv_path = os.path.splitext(self.midi_path)[0] + ".midi-notes.tsv"
             dataframe_midi = pd.read_csv(tsv_path, sep="\t")
-            dataframe_midi = sm_tokenizer.notes_to_midi_events(dataframe_midi)
+            dataframe_midi = sm_tokenizer.notes_to_midi_events(
+                dataframe_midi,
+                use_truth_offsets=self.config.data.get("use_truth_offsets", False),
+            )
         else:
             dataframe_midi = sm_tokenizer.midi_to_dataframe(self.midi_path)
-            dataframe_midi = sm_tokenizer.notes_to_midi_events(dataframe_midi)
+            dataframe_midi = sm_tokenizer.notes_to_midi_events(
+                dataframe_midi,
+                use_truth_offsets=self.config.data.get("use_truth_offsets", False),
+            )
 
         self.dataframe_midi = dataframe_midi.sort_values(by="onset_sec").reset_index(drop=True)
             

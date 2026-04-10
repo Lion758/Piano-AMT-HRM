@@ -17,3 +17,4 @@
   sample_rate: 16000
   hop_length: 320 # 160 # 320
   max_token_length: 512 #1024
+  use_truth_offsets: false

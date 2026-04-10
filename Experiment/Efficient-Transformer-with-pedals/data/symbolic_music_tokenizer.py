@@ -346,28 +346,40 @@ class SymbolicMusicTokenizer:
         else:
             assert isinstance(midi, symusic.Score), "midi should be a symusic.Score object or a path to a MIDI file."
             
+        def compute_pedal_extended_offsets(raw_offsets, pedals):
+            extended_offsets = np.copy(raw_offsets)
+            for pedal_start, pedal_end in zip(pedals["time"], pedals["end"]):
+                mask = (raw_offsets >= pedal_start) & (raw_offsets <= pedal_end)
+                extended_offsets[mask] = pedal_end
+            return extended_offsets
+
         # iterate through tracks, save track name, is_drum, program, notes to dataframes, and concat dataframes together.
         df_list = []
-        
-        # notes, pedals = get_notes_with_pedal(midi_path)
-        
+
         for track in midi.tracks:
             track.name
             track.is_drum
             track.program
-            
-            if False:
-                notes = track.notes.numpy() # convert to numpy array
-            else:
-                notes, pedals = get_notes_with_pedal(midi_path)
+
+            notes = track.notes.numpy()
+            pedals = track.pedals.numpy()
+            pedals["end"] = pedals["time"] + pedals["duration"]
+            onset_sec = notes["time"]
+            offset_sec_truth = notes["time"] + notes["duration"]
+            offset_sec_pedal_extended = compute_pedal_extended_offsets(offset_sec_truth, pedals)
 
             df = pd.DataFrame({
                 "type": "note",
                 "type_id": 1, # for sorting. 0 for measure, 1 for note
                 "pitch": notes["pitch"],
-                "onset_sec": notes["time"],
-                "dur_sec": notes["duration"],
-                "offset_sec": notes["time"]+ notes["duration"],
+                "onset_sec": onset_sec,
+                "dur_sec": offset_sec_pedal_extended - onset_sec,
+                "offset_sec": offset_sec_pedal_extended,
+                "duration_sec": offset_sec_pedal_extended - onset_sec,
+                "offset_sec_truth": offset_sec_truth,
+                "duration_sec_truth": offset_sec_truth - onset_sec,
+                "offset_sec_pedal_extended": offset_sec_pedal_extended,
+                "duration_sec_pedal_extended": offset_sec_pedal_extended - onset_sec,
                 "velocity": notes["velocity"],
                 "program": 0,  # track.program,
                 "is_drum": 0, # int(track.is_drum), # 0: not drum, 1: drum
@@ -387,6 +399,11 @@ class SymbolicMusicTokenizer:
                     "onset_sec": pedals["time"],
                     "dur_sec": pedals["duration"],
                     "offset_sec": pedals["end"],
+                    "duration_sec": pedals["duration"],
+                    "offset_sec_truth": pedals["end"],
+                    "duration_sec_truth": pedals["duration"],
+                    "offset_sec_pedal_extended": pedals["end"],
+                    "duration_sec_pedal_extended": pedals["duration"],
                     "velocity": 0,
                     "program": 0,
                     "is_drum": 0,
@@ -399,6 +416,11 @@ class SymbolicMusicTokenizer:
                     "onset_sec": pedals["end"],
                     "dur_sec": 0.0,
                     "offset_sec": pedals["end"],
+                    "duration_sec": 0.0,
+                    "offset_sec_truth": pedals["end"],
+                    "duration_sec_truth": 0.0,
+                    "offset_sec_pedal_extended": pedals["end"],
+                    "duration_sec_pedal_extended": 0.0,
                     "velocity": 0,
                     "program": 0,
                     "is_drum": 0,
@@ -577,7 +599,7 @@ class SymbolicMusicTokenizer:
         
         return midi_event_list
     
-    def notes_to_midi_events(self, df: pd.DataFrame) -> List[Dict[str, Union[int, float]]]:
+    def notes_to_midi_events(self, df: pd.DataFrame, use_truth_offsets: bool = False) -> List[Dict[str, Union[int, float]]]:
         """
         Args:
             midi_note_list: List of MIDI note data dictionaries.
@@ -585,6 +607,16 @@ class SymbolicMusicTokenizer:
             midi_event_list: List of MIDI event dictionaries.
         """
         midi_event_list = []
+        offset_column = "offset_sec"
+        if use_truth_offsets:
+            required_truth_columns = {"offset_sec_truth", "duration_sec_truth"}
+            missing_columns = sorted(required_truth_columns - set(df.columns))
+            if missing_columns:
+                raise ValueError(
+                    "TSV is missing truth offset columns %s. Regenerate the cache with the dual-offset TSV generator before setting data.use_truth_offsets=true."
+                    % missing_columns
+                )
+            offset_column = "offset_sec_truth"
         
         df_note_on = df[df["type"] == "note"].copy()
         df_note_on["type"] = "NoteOn"
@@ -594,7 +626,7 @@ class SymbolicMusicTokenizer:
         df_note_off = df[df["type"] == "note"].copy()
         df_note_off["type"] = "NoteOff"
         df_note_off["type_id"] = 1  # For sorting
-        df_note_off["onset_sec"] = df_note_off["offset_sec"]
+        df_note_off["onset_sec"] = df_note_off[offset_column]
         df_note_off["velocity"] = 0  # NoteOff events have velocity 0
         df_note_off = df_note_off[["pitch", "onset_sec", "type", "type_id", "velocity"]]
         # remove duplicate NoteOff events with the same pitch and offset
@@ -770,7 +802,7 @@ class SymbolicMusicTokenizer:
         
 if __name__ == "__main__":
     tokenizer = SymbolicMusicTokenizer()
-    midi_path = "dataset/maestro-v3.0.0/2004/MIDI-Unprocessed_SMF_02_R1_2004_01-05_ORIG_MID--AUDIO_02_R1_2004_05_Track05_wav.midi"
+    midi_path = "/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0/2004/MIDI-Unprocessed_SMF_02_R1_2004_01-05_ORIG_MID--AUDIO_02_R1_2004_05_Track05_wav.midi"
     df = tokenizer.midi_to_dataframe(midi_path)
     print(df.head())
     pass
