@@ -2,12 +2,13 @@ defaults:
   - experiment_T5_V3_HybridGlobalLocalCrossAttn
 
 model:
-  checkpoint_path: # "checkpoints/T5_V4_steps_200000.ckpt"
+  checkpoint_path: "/home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260411-004521_Efficient_Transformer_V4_Pedal_seq_length:1353/AMT-audio-to-midi/rtw4mi58/checkpoints/epoch=76-step=120000.ckpt"
+  
 
   cross_attention_hierarchy_pooling: true
   pooling_sizes: [4, 4, 2, 2, 1, 1]
   # pooling_sizes: [4, 4, 4, 4, 4, 4]
 
 training:
+  training_steps: 160000
   notes: "Efficient_Transformer_V4_Pedal_seq_length:1353"
-

@@ -5,7 +5,7 @@ import torchaudio
 import torch.nn.functional as F
 from data.constants import *
 import os
-from train import MT3Trainer
+from train import MT3Trainer, detect_checkpoint_format, extract_model_state_dict, remove_ignored_layers
 import numpy as np
 from tqdm import tqdm
 import gc
@@ -35,15 +35,12 @@ def my_main(config: OmegaConf):
     if trainer is None:
         trainer = MT3Trainer(config)
         print("Loading model from checkpoint:", checkpoint_path)
-        state_dict = torch.load(checkpoint_path)
-        
-        # Remove keys that are in the ignore list.
-        for key in list(state_dict.keys()):
-            if key in config.model.checkpoint_ignore_layres:
-                print(f"Removing key {key} from state_dict")
-                del state_dict[key]
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        checkpoint_format = detect_checkpoint_format(checkpoint)
+        state_dict = extract_model_state_dict(checkpoint, checkpoint_format)
+        remove_ignored_layers(state_dict, config.model.checkpoint_ignore_layres)
 
-        trainer.model.load_state_dict(state_dict, strict=True) # config.model.strict_checkpoint
+        trainer.model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
         trainer.model = trainer.model.to(device).eval()
 
     audio_path = config.audio_path

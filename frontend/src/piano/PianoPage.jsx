@@ -34,6 +34,9 @@ export default function PianoPage({ midiUrl }) {
   const hasNotes = notes.length > 0 && duration > 0;
   const controlsReady = player.isLoaded && hasNotes;
 
+  // Speed-synced visual time
+  const visualTime = player.currentTime;
+
   useEffect(() => {
     setActiveMidiUrl(midiUrl || null);
   }, [midiUrl]);
@@ -42,28 +45,26 @@ export default function PianoPage({ midiUrl }) {
   useEffect(() => {
     const el = mainRef.current;
     if (!el) return;
-
     const observer = new ResizeObserver(entries => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
-        setDimensions({ width, height: Math.max(height - 140, 200) }); // subtract keyboard height
+        setDimensions({ width, height: Math.max(height - 140, 200) });
       }
     });
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
 
-  // Compute active notes (currently sounding)
+  // Compute active notes using visual time
   const activeNotes = useMemo(() => {
-    const t = player.currentTime;
+    const t = visualTime;
     return notes.filter(n => t >= n.time && t < n.time + n.duration);
-  }, [notes, player.currentTime]);
+  }, [notes, visualTime]);
 
   // Keyboard shortcuts
   useEffect(() => {
     function handleKey(e) {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-
       switch (e.code) {
         case 'Space':
           e.preventDefault();
@@ -103,34 +104,26 @@ export default function PianoPage({ midiUrl }) {
       setUploadError('Choose an audio file first.');
       return;
     }
-
     setUploadError('');
     setIsTranscribingUpload(true);
     setUploadStatus('Uploading audio and transcribing with the seq2seq model...');
-
     try {
       const formData = new FormData();
       formData.append('file', selectedAudioFile);
-
       const response = await fetch(`${API_BASE}/transcribe-upload`, {
         method: 'POST',
         body: formData,
       });
-
       if (!response.ok) {
         let message = 'Failed to transcribe audio.';
         try {
           const payload = await response.json();
           if (payload?.detail) message = payload.detail;
-        } catch {
-          // Keep fallback error text when the response body is not JSON.
-        }
+        } catch { }
         throw new Error(message);
       }
-
       const data = await response.json();
       const nextMidiUrl = resolveApiUrl(data.midi_url);
-
       setUploadStatus('Opening your transcription...');
       setSelectedAudioFile(null);
       setUploadError('');
@@ -146,17 +139,37 @@ export default function PianoPage({ midiUrl }) {
 
   return (
     <div className="piano-page">
-      {/* Left Menu */}
       <LeftMenu isOpen={menuOpen} onToggle={() => setMenuOpen(v => !v)} />
 
-      {/* Chat Panel */}
-      <ChatPanel isOpen={chatOpen} onToggle={() => setChatOpen(v => !v)} />
+      <ChatPanel
+        isOpen={chatOpen}
+        onToggle={() => setChatOpen(v => !v)}
+        midiUrl={activeMidiUrl}
+        notes={notes}
+      />
 
-      {/* Top Controls */}
       <div className="pp-top">
+        <button
+          className="pp-play-fab"
+          onClick={player.isPlaying ? player.pause : player.play}
+          disabled={!controlsReady}
+          title={player.isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+        >
+          {player.isPlaying ? (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="4" width="4" height="16" rx="1" />
+              <rect x="14" y="4" width="4" height="16" rx="1" />
+            </svg>
+          ) : (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="6,4 20,12 6,20" />
+            </svg>
+          )}
+        </button>
+
         <TopControls
           isPlaying={player.isPlaying}
-          currentTime={player.currentTime}
+          currentTime={visualTime}
           duration={player.duration || duration}
           speed={player.speed}
           volume={player.volume}
@@ -168,6 +181,7 @@ export default function PianoPage({ midiUrl }) {
           onSpeedChange={player.setSpeed}
           onVolumeChange={player.setVolume}
         />
+
         <RecordButton
           isRecording={recorder.isRecording}
           onStart={recorder.startRecording}
@@ -177,7 +191,6 @@ export default function PianoPage({ midiUrl }) {
         />
       </div>
 
-      {/* Main content area */}
       <div className="pp-main" ref={mainRef}>
         {!hasMidi && !isTranscribingUpload && (
           <div className="pp-overlay">
@@ -237,7 +250,7 @@ export default function PianoPage({ midiUrl }) {
         {!isLoading && !error && hasMidi && (
           <FallingNotesCanvas
             notes={notes}
-            currentTime={player.currentTime}
+            currentTime={visualTime}
             containerWidth={dimensions.width}
             containerHeight={dimensions.height}
             isPlaying={player.isPlaying}
@@ -245,7 +258,6 @@ export default function PianoPage({ midiUrl }) {
         )}
       </div>
 
-      {/* Piano keyboard at bottom */}
       <div className="pp-keyboard">
         <PianoKeyboard
           activeNotes={activeNotes}
@@ -253,11 +265,10 @@ export default function PianoPage({ midiUrl }) {
         />
       </div>
 
-      {/* Progress indicator bar */}
       <div className="pp-progress-bar">
         <div
           className="pp-progress-fill"
-          style={{ width: duration ? `${(player.currentTime / duration) * 100}%` : '0%' }}
+          style={{ width: duration ? `${(visualTime / duration) * 100}%` : '0%' }}
         />
       </div>
     </div>

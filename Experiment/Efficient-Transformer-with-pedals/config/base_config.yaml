@@ -9,7 +9,7 @@ defaults:
   
 devices: [0] # -1
 accelerator: gpu
-audio_path: "audio/Franz-Liszt_Liebestraum.mp3"
+audio_path: "audio/Passionfruit_Katherine_Cordova.mp3"
 
 data:
     sequence_type: compound-word # performance-sequence, score-sequence

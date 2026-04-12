@@ -4,63 +4,19 @@ import pianoBanner from "./assets/piano-banner.png";
 import { API_BASE, resolveApiUrl } from "./lib/api.js";
 
 const STEPS = [
-  {
-    icon: "🎵",
-    num: 1,
-    title: "Upload Your Audio",
-    desc: "Upload any piano recording — solo or mixed. Our system accepts MP3, WAV, M4A and more.",
-  },
-  {
-    icon: "🎛️",
-    num: 2,
-    title: "Stem Separation",
-    desc: "We isolate the piano track from the rest of the audio, giving you a clean signal to work with.",
-  },
-  {
-    icon: "🎹",
-    num: 3,
-    title: "MIDI Transcription",
-    desc: "The clean piano stem is automatically converted into a MIDI file — every note, every timing.",
-  },
-  {
-    icon: "🧑‍🏫",
-    num: 4,
-    title: "Interactive Tutor",
-    desc: "Our AI tutor analyses your MIDI and guides you through the piece — note by note, at your pace.",
-  },
+  { icon: "🎵", num: 1, title: "Upload Your Audio", desc: "Upload any piano recording — solo or mixed. Our system accepts MP3, WAV, M4A and more." },
+  { icon: "🎛️", num: 2, title: "Stem Separation", desc: "We isolate the piano track from the rest of the audio, giving you a clean signal to work with." },
+  { icon: "🎹", num: 3, title: "MIDI Transcription", desc: "The clean piano stem is automatically converted into a MIDI file — every note, every timing." },
+  { icon: "🧑‍🏫", num: 4, title: "Interactive Tutor", desc: "Our AI tutor analyses your MIDI and guides you through the piece — note by note, at your pace." },
 ];
 
 const FEATURES = [
-  {
-    icon: "🎚️",
-    title: "Stem Separation",
-    desc: "Separate a full mix into individual tracks. We extract the piano stem so transcription is clean and accurate.",
-  },
-  {
-    icon: "🎼",
-    title: "Automatic MIDI Generation",
-    desc: "The isolated piano audio is converted to MIDI automatically — no manual input, no music theory required.",
-  },
-  {
-    icon: "🧑‍🏫",
-    title: "Interactive AI Tutor",
-    desc: "Your personal practice guide. The tutor listens, compares, and gives real-time feedback on your playing.",
-  },
-  {
-    icon: "📈",
-    title: "Progress Tracking",
-    desc: "See how you improve over time. Track accuracy, timing, and consistency across sessions.",
-  },
-  {
-    icon: "🔁",
-    title: "Loop & Slow Down",
-    desc: "Struggling with a passage? Loop any section and slow it down without changing the pitch.",
-  },
-  {
-    icon: "📱",
-    title: "Works in Your Browser",
-    desc: "No installation needed. Upload, separate, transcribe, and practise in one workflow.",
-  },
+  { icon: "🎚️", title: "Stem Separation", desc: "Separate a full mix into individual tracks. We extract the piano stem so transcription is clean and accurate." },
+  { icon: "🎼", title: "Automatic MIDI Generation", desc: "The isolated piano audio is converted to MIDI automatically — no manual input, no music theory required." },
+  { icon: "🧑‍🏫", title: "Interactive AI Tutor", desc: "Your personal practice guide. The tutor listens, compares, and gives real-time feedback on your playing." },
+  { icon: "📈", title: "Progress Tracking", desc: "See how you improve over time. Track accuracy, timing, and consistency across sessions." },
+  { icon: "🔁", title: "Loop & Slow Down", desc: "Struggling with a passage? Loop any section and slow it down without changing the pitch." },
+  { icon: "📱", title: "Works in Your Browser", desc: "No installation needed. Upload, separate, transcribe, and practise in one workflow." },
 ];
 
 const PIPELINE_STATS = [
@@ -85,16 +41,21 @@ export default function App() {
   const [isSeparating, setIsSeparating] = useState(false);
   const [transcribingStem, setTranscribingStem] = useState(null);
 
+  // ── Item 1: Spleeter toggle ──
+  // null = not yet answered, true = needs separation, false = piano-only
+  const [needsStemSep, setNeedsStemSep] = useState(null);
+
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     setSelectedFile(file);
     setStems(null);
     setError("");
     setTranscribingStem(null);
+    setNeedsStemSep(null); // reset question on new file
     setStatus(file ? `Selected: ${file.name}` : "Upload or choose audio to begin.");
   };
 
-  const handleSeparateAudio = async () => {
+  const handleSeparateStems = async () => {
     if (!selectedFile) { setError("Please choose an audio file first."); return; }
     setError("");
     setStems(null);
@@ -117,34 +78,49 @@ export default function App() {
     }
   };
 
-  const handleTranscribeStem = async (audioPath) => {
-    if (!audioPath) {
-      setError("Missing piano stem path.");
-      return;
+  // Direct transcription (piano-only file, no stem separation)
+  const handleDirectTranscribe = async () => {
+    if (!selectedFile) { setError("Please choose an audio file first."); return; }
+    setError("");
+    setIsSeparating(true);
+    setStatus("Uploading and transcribing...");
+    try {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+      const response = await fetch(`${API_BASE}/transcribe-upload`, { method: "POST", body: formData });
+      if (!response.ok) {
+        let msg = "Failed to transcribe audio.";
+        try { const p = await response.json(); if (p?.detail) msg = p.detail; } catch { }
+        throw new Error(msg);
+      }
+      const data = await response.json();
+      const midiUrl = resolveApiUrl(data.midi_url);
+      setStatus("Opening the piano tutor...");
+      window.location.hash = `#/piano?midi=${encodeURIComponent(midiUrl)}`;
+    } catch (err) {
+      setError(err.message || "Something went wrong.");
+      setStatus("Transcription failed.");
+    } finally {
+      setIsSeparating(false);
     }
+  };
 
+  const handleTranscribeStem = async (audioPath) => {
+    if (!audioPath) { setError("Missing piano stem path."); return; }
     setError("");
     setTranscribingStem(audioPath);
     setStatus("Transcribing piano stem to MIDI...");
-
     try {
       const response = await fetch(`${API_BASE}/transcribe`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ audio_path: audioPath }),
       });
-
       if (!response.ok) {
         let message = "Failed to transcribe piano stem.";
-        try {
-          const payload = await response.json();
-          if (payload?.detail) message = payload.detail;
-        } catch {
-          // Keep the fallback message when the error payload is not JSON.
-        }
+        try { const payload = await response.json(); if (payload?.detail) message = payload.detail; } catch { }
         throw new Error(message);
       }
-
       const data = await response.json();
       const midiUrl = resolveApiUrl(data.midi_url);
       setStatus("Opening the piano tutor...");
@@ -159,6 +135,72 @@ export default function App() {
 
   const scrollToDemo = () =>
     document.getElementById("demo")?.scrollIntoView({ behavior: "smooth" });
+
+  // Determine what action button to show in the upload zone
+  const renderActionArea = () => {
+    if (!selectedFile) return null;
+
+    // Step 1: ask if the recording has multiple instruments
+    if (needsStemSep === null) {
+      return (
+        <div className="spleeter-question">
+          <p className="spleeter-q-label">
+            Does this recording contain <strong>multiple instruments</strong> (not just piano)?
+          </p>
+          <div className="spleeter-btn-row">
+            <button
+              className="spleeter-btn yes"
+              onClick={() => setNeedsStemSep(true)}
+            >
+              Yes — separate stems first
+            </button>
+            <button
+              className="spleeter-btn no"
+              onClick={() => setNeedsStemSep(false)}
+            >
+              No — piano only, transcribe directly
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // Step 2a: needs Spleeter → show separate button
+    if (needsStemSep === true) {
+      return (
+        <div className="spleeter-action">
+          <p className="spleeter-route-note">
+            🎛️ We'll run <strong>Spleeter</strong> to isolate the piano stem, then transcribe it.
+          </p>
+          <button
+            className="method-btn"
+            onClick={handleSeparateStems}
+            disabled={isSeparating}
+          >
+            <strong>{isSeparating ? "Separating..." : "Separate Stems & Transcribe"}</strong>
+          </button>
+          <button className="spleeter-change" onClick={() => setNeedsStemSep(null)}>← Change</button>
+        </div>
+      );
+    }
+
+    // Step 2b: piano-only → direct transcription
+    return (
+      <div className="spleeter-action">
+        <p className="spleeter-route-note">
+          🎹 We'll transcribe your piano recording directly — no stem separation needed.
+        </p>
+        <button
+          className="method-btn"
+          onClick={handleDirectTranscribe}
+          disabled={isSeparating}
+        >
+          <strong>{isSeparating ? "Transcribing..." : "Transcribe Directly"}</strong>
+        </button>
+        <button className="spleeter-change" onClick={() => setNeedsStemSep(null)}>← Change</button>
+      </div>
+    );
+  };
 
   return (
     <>
@@ -199,7 +241,6 @@ export default function App() {
               Upload a piano recording — we split the stems, generate MIDI,
               and guide you through every note with an interactive AI tutor.
             </h2>
-
             <div className="cta-row">
               <button className="primary-btn" onClick={scrollToDemo}>
                 🎹 Try It Now
@@ -210,7 +251,6 @@ export default function App() {
               <a href="#workflow" className="ghost-btn">See How It Works</a>
             </div>
           </div>
-
           <div className="hero-visual">
             <img src={pianoBanner} alt="Piano keys with score" className="hero-image" />
           </div>
@@ -270,7 +310,7 @@ export default function App() {
           <div className="section-head">
             <div className="section-tag">Try It Now</div>
             <h3>Upload a Recording to Get Started</h3>
-            <p>Drop in any piano audio — we'll separate the stems and begin the transcription pipeline.</p>
+            <p>Drop in any piano audio — we'll figure out the right pipeline for your recording.</p>
           </div>
           <div
             className={`upload-zone${dragging ? " drag-over" : ""}`}
@@ -284,6 +324,7 @@ export default function App() {
                 setStems(null);
                 setError("");
                 setTranscribingStem(null);
+                setNeedsStemSep(null);
                 setStatus(`Selected: ${f.name}`);
               }
             }}
@@ -296,10 +337,11 @@ export default function App() {
                 📁 <strong>Upload File</strong>
                 <input type="file" accept="audio/*" onChange={handleFileChange} />
               </label>
-              <button className="method-btn" onClick={handleSeparateAudio} disabled={!selectedFile || isSeparating}>
-                <strong>{isSeparating ? "Separating..." : "Separate Stems"}</strong>
-              </button>
             </div>
+
+            {/* Spleeter question / action */}
+            {renderActionArea()}
+
             <p className="upload-note">
               {selectedFile ? `Ready: ${selectedFile.name}` : "No file selected yet"}
             </p>
@@ -339,7 +381,7 @@ export default function App() {
             </div>
           ) : (
             <div className="empty-box">
-              No stems yet — upload a file above and click <strong>Separate Stems</strong>.
+              No stems yet — upload a file above and run the pipeline.
             </div>
           )}
         </section>

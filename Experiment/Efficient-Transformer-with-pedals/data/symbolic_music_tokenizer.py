@@ -678,8 +678,8 @@ class SymbolicMusicTokenizer:
             return midi_note_list, pedal_event_list
 
         # Group by pitch and calculate the duration
-        grouped = df_notes.groupby(['pitch'])
-        for (pitch,), group in grouped:
+        grouped = df_notes.groupby("pitch")
+        for pitch, group in grouped:
             for i in range(len(group)):
                 event = group.iloc[i]
                 if event['type'] != 'NoteOn':

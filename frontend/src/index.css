@@ -788,3 +788,96 @@ audio {
     text-align: center;
   }
 }
+
+/* ── Item 1: Spleeter Toggle ── */
+.spleeter-question {
+  margin-top: 20px;
+  padding: 20px;
+  background: rgba(124, 92, 191, 0.08);
+  border: 1px solid rgba(124, 92, 191, 0.3);
+  border-radius: 12px;
+  text-align: center;
+}
+
+.spleeter-q-label {
+  font-size: 15px;
+  color: var(--text, #e8e8f0);
+  margin-bottom: 16px;
+}
+
+.spleeter-q-label strong {
+  color: #c9aeff;
+}
+
+.spleeter-btn-row {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.spleeter-btn {
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: all 0.2s;
+}
+
+.spleeter-btn.yes {
+  background: #2a1f40;
+  border-color: #7c5cbf;
+  color: #c9aeff;
+}
+
+.spleeter-btn.yes:hover {
+  background: #7c5cbf;
+  color: #fff;
+}
+
+.spleeter-btn.no {
+  background: #1a2a20;
+  border-color: #2ecc71;
+  color: #7affb2;
+}
+
+.spleeter-btn.no:hover {
+  background: #2ecc71;
+  color: #0a1a10;
+}
+
+.spleeter-action {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.spleeter-route-note {
+  font-size: 13px;
+  color: #aaa;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 8px 16px;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.spleeter-route-note strong {
+  color: #e8e8f0;
+}
+
+.spleeter-change {
+  background: none;
+  border: none;
+  color: #8888a0;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.spleeter-change:hover {
+  color: #c9aeff;
+}

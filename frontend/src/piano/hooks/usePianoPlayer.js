@@ -11,9 +11,8 @@ export function usePianoPlayer(notes, duration, baseTempo = 120) {
   const samplerRef = useRef(null);
   const partRef = useRef(null);
   const animFrameRef = useRef(null);
-  const startOffsetRef = useRef(0);
 
-  // Initialize sampler
+  // Initialize sampler once
   useEffect(() => {
     const sampler = new Tone.Sampler({
       urls: {
@@ -33,30 +32,52 @@ export function usePianoPlayer(notes, duration, baseTempo = 120) {
 
     samplerRef.current = sampler;
 
+    Tone.Transport.stop();
+    Tone.Transport.cancel();
+    Tone.Transport.seconds = 0;
+    Tone.Transport.playbackRate = 1;
+    Tone.Transport.loop = false;
+
     return () => {
-      sampler.dispose();
-      if (partRef.current) partRef.current.dispose();
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      if (partRef.current) {
+        partRef.current.dispose();
+        partRef.current = null;
+      }
       Tone.Transport.stop();
       Tone.Transport.cancel();
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      Tone.Transport.seconds = 0;
+      Tone.Transport.playbackRate = 1;
+      sampler.dispose();
+      samplerRef.current = null;
     };
   }, []);
 
-  // Schedule notes when they change
+  // Build note part only when notes/duration change
   useEffect(() => {
     if (!notes.length || !samplerRef.current) return;
 
-    if (partRef.current) {
-      partRef.current.dispose();
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
     }
 
-    Tone.Transport.cancel();
+    if (partRef.current) {
+      partRef.current.dispose();
+      partRef.current = null;
+    }
 
-    const events = notes.map(note => ({
+    Tone.Transport.stop();
+    Tone.Transport.cancel();
+    Tone.Transport.seconds = 0;
+    setCurrentTime(0);
+    setIsPlaying(false);
+
+    const events = notes.map((note) => ({
       time: note.time,
       note: note.name || Tone.Frequency(note.midi, 'midi').toNote(),
       duration: note.duration,
-      velocity: note.velocity,
+      velocity: note.velocity ?? 0.8,
     }));
 
     const part = new Tone.Part((time, event) => {
@@ -68,47 +89,59 @@ export function usePianoPlayer(notes, duration, baseTempo = 120) {
           event.velocity
         );
       }
-    }, events.map(e => [e.time, e]));
+    }, events.map((e) => [e.time, e]));
 
     part.start(0);
     partRef.current = part;
 
-    // Set transport duration
-    Tone.Transport.loopEnd = duration + 1;
-  }, [notes, duration]);
+    Tone.Transport.loop = false;
+    Tone.Transport.loopEnd = duration || 0;
+    Tone.Transport.playbackRate = speed;
+  }, [notes, duration]); // <- speed removed here
 
-  // Update time via animation frame
+  // Keep transport playbackRate synced without resetting playback
+  useEffect(() => {
+    Tone.Transport.playbackRate = speed;
+  }, [speed]);
+
   const updateTime = useCallback(() => {
     if (Tone.Transport.state === 'started') {
-      setCurrentTime(Tone.Transport.seconds);
+      const t = Math.min(Tone.Transport.seconds, duration || Tone.Transport.seconds);
+      setCurrentTime(t);
+
+      if (duration && t >= duration) {
+        Tone.Transport.pause();
+        setIsPlaying(false);
+        return;
+      }
+
       animFrameRef.current = requestAnimationFrame(updateTime);
     }
-  }, []);
-
-  // Check for end of song
-  useEffect(() => {
-    if (isPlaying && currentTime >= duration) {
-      Tone.Transport.pause();
-      setIsPlaying(false);
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    }
-  }, [currentTime, duration, isPlaying]);
+  }, [duration]);
 
   const play = useCallback(async () => {
     await Tone.start();
-    if (currentTime >= duration) {
+
+    if (duration && currentTime >= duration) {
       Tone.Transport.seconds = 0;
       setCurrentTime(0);
     }
+
+    Tone.Transport.playbackRate = speed;
     Tone.Transport.start();
     setIsPlaying(true);
+
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     animFrameRef.current = requestAnimationFrame(updateTime);
-  }, [currentTime, duration, updateTime]);
+  }, [currentTime, duration, speed, updateTime]);
 
   const pause = useCallback(() => {
     Tone.Transport.pause();
     setIsPlaying(false);
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
   }, []);
 
   const stop = useCallback(() => {
@@ -116,44 +149,44 @@ export function usePianoPlayer(notes, duration, baseTempo = 120) {
     Tone.Transport.seconds = 0;
     setIsPlaying(false);
     setCurrentTime(0);
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-  }, []);
-
-  const seek = useCallback((time) => {
-    const wasPlaying = Tone.Transport.state === 'started';
-    Tone.Transport.seconds = time;
-    setCurrentTime(time);
-    if (!wasPlaying) {
-      // If paused, just update position
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
     }
   }, []);
 
+  const seek = useCallback((time) => {
+    const clamped = Math.max(0, Math.min(duration || 0, time));
+    Tone.Transport.seconds = clamped;
+    setCurrentTime(clamped);
+  }, [duration]);
+
   const setSpeed = useCallback((newSpeed) => {
-    // Tone.Transport.bpm controls playback rate
-    // Default is based on "1 beat per second at 60bpm" but we use seconds-based scheduling
-    // So we use playbackRate instead
-    Tone.Transport.bpm.value = 60 * newSpeed;
-    setSpeedState(newSpeed);
+    const safeSpeed = Math.max(0.25, Math.min(2, Number(newSpeed) || 1));
+    setSpeedState(safeSpeed);
+    Tone.Transport.playbackRate = safeSpeed;
   }, []);
 
   const setVolume = useCallback((vol) => {
     if (samplerRef.current) {
-      // Convert 0-1 range to decibels
       const db = vol === 0 ? -Infinity : 20 * Math.log10(vol);
       samplerRef.current.volume.value = db;
     }
     setVolumeState(vol);
   }, []);
 
-  // Initialize transport BPM to match "1 second = 1 second"
-  useEffect(() => {
-    Tone.Transport.bpm.value = 60;
-  }, []);
-
   return {
-    play, pause, stop, seek,
-    setSpeed, setVolume,
-    currentTime, duration, isPlaying,
-    speed, volume, isLoaded,
+    play,
+    pause,
+    stop,
+    seek,
+    setSpeed,
+    setVolume,
+    currentTime,
+    duration,
+    isPlaying,
+    speed,
+    volume,
+    isLoaded,
   };
 }

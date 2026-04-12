@@ -97,6 +97,48 @@ def set_training_process_name(process_name):
         pass
 
 
+def detect_checkpoint_format(checkpoint):
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        lightning_keys = {
+            "optimizer_states",
+            "lr_schedulers",
+            "loops",
+            "callbacks",
+            "pytorch-lightning_version",
+        }
+        if any(key in checkpoint for key in lightning_keys):
+            return "lightning"
+    if isinstance(checkpoint, dict):
+        return "state_dict"
+    raise TypeError(f"Unsupported checkpoint type: {type(checkpoint)!r}")
+
+
+def extract_model_state_dict(checkpoint, checkpoint_format):
+    if checkpoint_format == "lightning":
+        model_state_dict = {}
+        for key, value in checkpoint["state_dict"].items():
+            if key.startswith("model."):
+                model_state_dict[key[len("model."):]] = value
+        if not model_state_dict:
+            raise ValueError("Lightning checkpoint did not contain any model.* weights.")
+        return model_state_dict
+    return checkpoint
+
+
+def remove_ignored_layers(state_dict, ignore_layers):
+    removed_layers = []
+    if ignore_layers is None:
+        return removed_layers
+
+    for key in ignore_layers:
+        normalized_key = key[len("model."):] if key.startswith("model.") else key
+        if normalized_key in state_dict:
+            del state_dict[normalized_key]
+            removed_layers.append(normalized_key)
+
+    return removed_layers
+
+
 class MT3Trainer(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
@@ -753,21 +795,30 @@ def my_main(config: OmegaConf):
 
     process_note = str(config.training.notes).strip() if config.training.notes is not None else ""
     process_name = experiment_name if not process_note else f"{experiment_name}_{process_note}"
-    set_training_process_name("group 5 will end 4/10 ~ 8:00")
+    set_training_process_name("group 5 will end 4/12 ~ 9:00")
     ####################################################
     # Create model.
     model = MT3Trainer(config)
     print(model)
+    resume_ckpt_path = None
     # Load checkpoint.
     if config.model.checkpoint_path is None:
         assert config.model.froze_encoder == False, "If you want to train from scratch, please set config.model.froze_encoder to False and config.model.checkpoint_path to None."
     else:
-        state_dict = torch.load(config.model.checkpoint_path) # , map_location=torch.device('cpu')
-        if not config.model.checkpoint_ignore_layres is None:
-            for key in config.model.checkpoint_ignore_layres:
-                del state_dict[key]
+        checkpoint = torch.load(config.model.checkpoint_path, map_location="cpu")
+        checkpoint_format = detect_checkpoint_format(checkpoint)
+        model_state_dict = extract_model_state_dict(checkpoint, checkpoint_format)
+        ignored_layers = remove_ignored_layers(model_state_dict, config.model.checkpoint_ignore_layres)
 
-        model.model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
+        if checkpoint_format == "lightning" and len(ignored_layers) == 0:
+            resume_ckpt_path = config.model.checkpoint_path
+            print("Resuming full Lightning checkpoint:", resume_ckpt_path)
+        else:
+            if checkpoint_format == "lightning":
+                print("Loading model weights from Lightning checkpoint without optimizer state because ignored layers were requested:", ignored_layers)
+            else:
+                print("Loading model weights from state_dict checkpoint:", config.model.checkpoint_path)
+            model.model.load_state_dict(model_state_dict, strict=config.model.strict_checkpoint)
     
     # model.model = torch.compile(model.model)
     
@@ -831,7 +882,7 @@ def my_main(config: OmegaConf):
                         strategy=DDPStrategy(find_unused_parameters=True),
                         )
 
-    trainer.fit(model)
+    trainer.fit(model, ckpt_path=resume_ckpt_path)
     
 if __name__ == "__main__":
     my_main()
