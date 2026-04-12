@@ -339,7 +339,6 @@ class ErrorAnalysis:
     
     def _analyze_articulation(self):
         """Analyze articulation: staccato, legato, note durations."""
-        reference_notes = self.reference_data.get('notes', [])
         performance_notes = self.performance_data.get('notes', [])
         
         if not performance_notes:
@@ -347,16 +346,20 @@ class ErrorAnalysis:
         
         perf_durations = [note['duration'] for note in performance_notes]
         
-        # Categorize articulation types
-        note_intervals = self._calculate_note_intervals(performance_notes)
+        # Calculate articulation ratios per track to avoid cross-voice IOI mixing.
+        by_track = defaultdict(list)
+        for note in performance_notes:
+            by_track[note.get('track_id', 0)].append(note)
+
         articulation_ratios = []
-        
-        for i in range(len(performance_notes) - 1):
-            duration = performance_notes[i]['duration']
-            interval = note_intervals[i] if i < len(note_intervals) else 0
-            if interval > 0:
-                ratio = duration / interval
-                articulation_ratios.append(ratio)
+        for track_notes in by_track.values():
+            track_notes.sort(key=lambda n: n['start'])
+            note_intervals = self._calculate_note_intervals(track_notes)
+            for i in range(len(track_notes) - 1):
+                duration = track_notes[i]['duration']
+                interval = note_intervals[i] if i < len(note_intervals) else 0
+                if interval > 1e-6:
+                    articulation_ratios.append(duration / interval)
         
         # Detect articulation patterns
         staccato_notes = [ratio for ratio in articulation_ratios if ratio < 0.5]
@@ -549,7 +552,33 @@ class ErrorAnalysis:
             total_weight += weights['dynamic_control']
 
         if 'articulation' in self.metrics:
-            articulation_score = float(self.metrics['articulation'].get('articulation_consistency', 0.5))
+            import math
+
+            # Prefer reference-vs-performance articulation match on aligned note pairs.
+            aligned_pairs = [
+                p for p in self.aligned_notes
+                if p.get('reference_note') and p.get('performance_note')
+            ]
+
+            if aligned_pairs:
+                ref_durs = [p['reference_note']['duration'] for p in aligned_pairs]
+                perf_durs = [p['performance_note']['duration'] for p in aligned_pairs]
+                log_devs = []
+                for ref_duration, perf_duration in zip(ref_durs, perf_durs):
+                    if ref_duration > 1e-6 and perf_duration > 1e-6:
+                        log_devs.append(abs(math.log(perf_duration / ref_duration)))
+
+                if log_devs:
+                    mean_dev = statistics.mean(log_devs)
+                    articulation_score = 1.0 / (1.0 + 6.0 * mean_dev)
+                else:
+                    articulation_score = 1.0
+            else:
+                # Fallback for solo mode: use internal articulation consistency.
+                articulation_score = float(
+                    self.metrics['articulation'].get('articulation_consistency', 0.5)
+                )
+
             articulation_score = max(0.0, min(1.0, articulation_score))
             component_scores['articulation'] = articulation_score
             total_score += articulation_score * weights['articulation']
