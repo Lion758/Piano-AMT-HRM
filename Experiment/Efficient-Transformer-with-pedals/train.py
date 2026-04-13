@@ -68,6 +68,7 @@ from collections import defaultdict
 import visualize.transcription_visualizer as transcription_visualizer
 import utils.log_memory_usage as log_memory_usage
 import utils.sequence_processing as sequence_processing
+from model.Layers import normalize_transformer_ffn_activation
 
 import shutil
 
@@ -137,6 +138,52 @@ def remove_ignored_layers(state_dict, ignore_layers):
             removed_layers.append(normalized_key)
 
     return removed_layers
+
+
+def infer_transformer_ffn_activation_from_state_dict(state_dict):
+    relu_keys = {
+        "encoder.encoder_layers.0.mlp.intermediate_layers.0.weight",
+        "decoder.decoder_layers.0.mlp.intermediate_layers.0.weight",
+    }
+    swiglu_keys = {
+        "encoder.encoder_layers.0.mlp.value_layer.weight",
+        "encoder.encoder_layers.0.mlp.gate_layer.weight",
+        "decoder.decoder_layers.0.mlp.value_layer.weight",
+        "decoder.decoder_layers.0.mlp.gate_layer.weight",
+    }
+
+    has_relu_keys = any(key in state_dict for key in relu_keys)
+    has_swiglu_keys = any(key in state_dict for key in swiglu_keys)
+
+    if has_relu_keys and has_swiglu_keys:
+        raise ValueError("Checkpoint contains both ReLU and SwiGLU FFN keys; refusing to guess activation mode.")
+    if has_relu_keys:
+        return "relu"
+    if has_swiglu_keys:
+        return "swiglu"
+
+    raise ValueError(
+        "Unable to infer transformer FFN activation from checkpoint. "
+        "Expected legacy ReLU keys like "
+        "'encoder.encoder_layers.0.mlp.intermediate_layers.0.weight' "
+        "or SwiGLU keys like "
+        "'encoder.encoder_layers.0.mlp.value_layer.weight'."
+    )
+
+
+def validate_transformer_ffn_activation_compatibility(state_dict, configured_activation):
+    config_activation = normalize_transformer_ffn_activation(configured_activation)
+    checkpoint_activation = infer_transformer_ffn_activation_from_state_dict(state_dict)
+
+    if checkpoint_activation != config_activation:
+        raise ValueError(
+            "Checkpoint FFN activation mismatch: "
+            f"config.model.mlp_activations={config_activation!r} "
+            f"but checkpoint uses {checkpoint_activation!r}. "
+            "Use a checkpoint trained with the same FFN activation."
+        )
+
+    return checkpoint_activation
 
 
 class MT3Trainer(pl.LightningModule):
@@ -602,7 +649,7 @@ class MT3Trainer(pl.LightningModule):
             concat_output_tokens = sum([row["output_tokens"] for row in data_list], [])
             concat_target_tokens = sum([row["target_tokens"] for row in data_list], [])
             
-            # Calculate Note Level Metrics
+            # Calculate note and pedal metrics
             output_event_data_list = []
             target_event_data_list = []
             sec_per_frame = DEFAULT_HOP_WIDTH / DEFAULT_SAMPLE_RATE
@@ -610,8 +657,20 @@ class MT3Trainer(pl.LightningModule):
                 offsets_sec = row["frame_offsets"] * sec_per_frame
                 output_event_data_list += sm_tokenizer.detokenize(row["output_tokens"], offsets_sec)
                 target_event_data_list += sm_tokenizer.detokenize(row["target_tokens"], offsets_sec)
-            output_note_data_list, _ = sm_tokenizer.midi_events_to_notes(output_event_data_list)
-            target_note_data_list, _ = sm_tokenizer.midi_events_to_notes(target_event_data_list)
+            output_note_data_list, output_pedal_event_list = sm_tokenizer.midi_events_to_notes(output_event_data_list)
+            target_note_data_list, target_pedal_event_list = sm_tokenizer.midi_events_to_notes(target_event_data_list)
+
+            piece_end_time = transcription_metrics.infer_piece_end_time(
+                note_lists=[output_note_data_list, target_note_data_list],
+                pedal_event_lists=[output_pedal_event_list, target_pedal_event_list],
+            )
+            pedal_metrics, output_pedal_spans, _ = transcription_metrics.cal_pedal_metrics(
+                output_pedal_event_list,
+                target_pedal_event_list,
+                piece_end_time=piece_end_time,
+            )
+            for metric_name, metric_value in pedal_metrics.items():
+                metric_dict[metric_name].append(metric_value)
             
             # Onset only Metrics
             output_interval = np.array([(note["onset"], note["offset"]) for note in output_note_data_list])
@@ -656,7 +715,8 @@ class MT3Trainer(pl.LightningModule):
                 
             try:
                 output_midi_path = test_output_dir + "/" + os.path.splitext(target_midi_basename)[0] + ".output.mid"
-                sm_tokenizer.save_midi(output_note_data_list, output_midi_path)
+                output_pedal_events_for_midi = transcription_metrics.pedal_spans_to_event_list(output_pedal_spans)
+                sm_tokenizer.save_midi(output_note_data_list, output_midi_path, pedal_event_list=output_pedal_events_for_midi)
             except Exception as e:
                 print("Error saving midi file:", e)
                 
@@ -795,7 +855,7 @@ def my_main(config: OmegaConf):
 
     process_note = str(config.training.notes).strip() if config.training.notes is not None else ""
     process_name = experiment_name if not process_note else f"{experiment_name}_{process_note}"
-    set_training_process_name("group 5 will end 4/12 ~ 9:00")
+    set_training_process_name("group 5 will end 4/13 ~ 11:00")
     ####################################################
     # Create model.
     model = MT3Trainer(config)
@@ -808,6 +868,7 @@ def my_main(config: OmegaConf):
         checkpoint = torch.load(config.model.checkpoint_path, map_location="cpu")
         checkpoint_format = detect_checkpoint_format(checkpoint)
         model_state_dict = extract_model_state_dict(checkpoint, checkpoint_format)
+        validate_transformer_ffn_activation_compatibility(model_state_dict, config.model.mlp_activations)
         ignored_layers = remove_ignored_layers(model_state_dict, config.model.checkpoint_ignore_layres)
 
         if checkpoint_format == "lightning" and len(ignored_layers) == 0:

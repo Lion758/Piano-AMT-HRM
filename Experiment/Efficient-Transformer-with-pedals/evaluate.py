@@ -1,4 +1,4 @@
-from train import MT3Trainer
+from train import MT3Trainer, detect_checkpoint_format, extract_model_state_dict, remove_ignored_layers, validate_transformer_ffn_activation_compatibility
 import hydra
 from omegaconf import OmegaConf
 import torch
@@ -15,15 +15,13 @@ def my_main(config: OmegaConf):
     model = MT3Trainer(config)
     print(model)
     # Load checkpoint.
-    state_dict = torch.load(config.model.checkpoint_path) # , map_location=torch.device('cpu')
+    checkpoint = torch.load(config.model.checkpoint_path, map_location="cpu")
+    checkpoint_format = detect_checkpoint_format(checkpoint)
+    state_dict = extract_model_state_dict(checkpoint, checkpoint_format)
+    validate_transformer_ffn_activation_compatibility(state_dict, config.model.mlp_activations)
+    remove_ignored_layers(state_dict, config.model.checkpoint_ignore_layres)
     
-    # Remove keys that are in the ignore list.
-    for key in list(state_dict.keys()):
-        if key in config.model.checkpoint_ignore_layres:
-            print(f"Removing key {key} from state_dict")
-            del state_dict[key]
-    
-    model.model.load_state_dict(state_dict, strict=True)
+    model.model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
     
     trainer = pl.Trainer(
         logger=[],

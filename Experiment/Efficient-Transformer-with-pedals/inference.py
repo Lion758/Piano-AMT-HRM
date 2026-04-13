@@ -5,7 +5,7 @@ import torchaudio
 import torch.nn.functional as F
 from data.constants import *
 import os
-from train import MT3Trainer, detect_checkpoint_format, extract_model_state_dict, remove_ignored_layers
+from train import MT3Trainer, detect_checkpoint_format, extract_model_state_dict, remove_ignored_layers, validate_transformer_ffn_activation_compatibility
 import numpy as np
 from tqdm import tqdm
 import gc
@@ -38,6 +38,7 @@ def my_main(config: OmegaConf):
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
         checkpoint_format = detect_checkpoint_format(checkpoint)
         state_dict = extract_model_state_dict(checkpoint, checkpoint_format)
+        validate_transformer_ffn_activation_compatibility(state_dict, config.model.mlp_activations)
         remove_ignored_layers(state_dict, config.model.checkpoint_ignore_layres)
 
         trainer.model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)

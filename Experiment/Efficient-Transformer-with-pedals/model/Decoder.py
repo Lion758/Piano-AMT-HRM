@@ -26,7 +26,7 @@ class DecoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(config.dropout_rate)
 
         self.pre_mlp_layer_norm = LayerNorm(config.emb_dim)
-        self.mlp = MlpBlock(emb_dim=config.emb_dim, intermediate_dim=config.mlp_dim, activations=config.mlp_activations, intermediate_dropout_rate=config.dropout_rate)
+        self.mlp = TransformerFfnBlock(emb_dim=config.emb_dim, intermediate_dim=config.mlp_dim, activations=config.mlp_activations, intermediate_dropout_rate=config.dropout_rate)
         
         self.dropout3 = nn.Dropout(config.dropout_rate)
         

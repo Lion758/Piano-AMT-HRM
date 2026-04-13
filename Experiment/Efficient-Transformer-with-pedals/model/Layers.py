@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from collections.abc import Sequence
 
 # device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -54,6 +55,64 @@ class MlpBlock(nn.Module):
         x = self.dropout(x)
         output = self.dense_layer(x)
         return output
+
+
+def normalize_transformer_ffn_activation(activations):
+    if activations is None:
+        return "relu"
+
+    if isinstance(activations, str):
+        activation_name = activations
+    elif isinstance(activations, Sequence):
+        if len(activations) != 1:
+            raise ValueError(f"Expected a single FFN activation, got {activations!r}")
+        activation_name = activations[0]
+    else:
+        activation_name = str(activations)
+
+    activation_name = str(activation_name).strip().lower()
+    if activation_name not in {"relu", "swiglu"}:
+        raise ValueError(f"Unsupported transformer FFN activation: {activation_name}")
+    return activation_name
+
+
+class TransformerFfnBlock(nn.Module):
+    def __init__(self,
+                 emb_dim=512,
+                 intermediate_dim=2048,
+                 activations=("relu",),
+                 intermediate_dropout_rate=0.1,
+                 emb_dim_out=None,
+                 ):
+        super(TransformerFfnBlock, self).__init__()
+        self.activation_name = normalize_transformer_ffn_activation(activations)
+        self.dropout = nn.Dropout(intermediate_dropout_rate)
+        if emb_dim_out is None:
+            emb_dim_out = emb_dim
+
+        if self.activation_name == "relu":
+            # Preserve legacy module names so existing ReLU checkpoints keep loading.
+            self.intermediate_layers = nn.ModuleList([
+                nn.Linear(in_features=emb_dim, out_features=intermediate_dim),
+                nn.ReLU(),
+            ])
+        else:
+            self.value_layer = nn.Linear(in_features=emb_dim, out_features=intermediate_dim)
+            self.gate_layer = nn.Linear(in_features=emb_dim, out_features=intermediate_dim)
+            self.silu = nn.SiLU()
+
+        self.dense_layer = nn.Linear(in_features=intermediate_dim, out_features=emb_dim_out)
+
+    def forward(self, inputs):
+        if self.activation_name == "relu":
+            x = inputs
+            for layer in self.intermediate_layers:
+                x = layer(x)
+        else:
+            x = self.value_layer(inputs) * self.silu(self.gate_layer(inputs))
+
+        x = self.dropout(x)
+        return self.dense_layer(x)
 
 class Embed(nn.Module):
     def __init__(self,

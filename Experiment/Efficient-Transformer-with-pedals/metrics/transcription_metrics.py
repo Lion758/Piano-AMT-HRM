@@ -20,6 +20,10 @@ import utils.pianoroll_parser as pianoroll_parser
 
 from data.notes_parser import frame_tokens_to_interval_and_pitch
 
+PEDAL_DUMMY_MIDI = 21
+PEDAL_MIN_DURATION = 1e-6
+PEDAL_EVENT_TOLERANCE = 0.05
+
 def pianoroll_frame_metrics(name, output_pianoroll_frame, target_pianoroll_frame):
     if (target_pianoroll_frame == 1).sum() == 0:
         return {}
@@ -400,6 +404,199 @@ def cal_multihot_notes_metrics(name, decoder_outputs_note, decoder_targets_note)
     }
 
 
+def infer_piece_end_time(note_lists=(), pedal_event_lists=(), minimum_end_time=0.05):
+    piece_end_time = float(minimum_end_time)
+
+    for note_list in note_lists:
+        for note in note_list:
+            piece_end_time = max(piece_end_time, float(note.get("offset", note.get("onset", 0.0))))
+
+    for pedal_event_list in pedal_event_lists:
+        for event in pedal_event_list:
+            piece_end_time = max(piece_end_time, float(event.get("time", 0.0)))
+
+    return piece_end_time
+
+
+def pedal_events_to_spans(pedal_event_list, piece_end_time):
+    sorted_events = sorted(
+        (
+            {
+                "time": float(event["time"]),
+                "type": event["type"],
+            }
+            for event in pedal_event_list
+            if event.get("type") in {"PedalOn", "PedalOff"} and "time" in event
+        ),
+        key=lambda event: (event["time"], 0 if event["type"] == "PedalOff" else 1),
+    )
+
+    pedal_spans = []
+    pedal_on_time = None
+    for event in sorted_events:
+        if event["type"] == "PedalOn":
+            if pedal_on_time is None:
+                pedal_on_time = event["time"]
+            continue
+
+        if pedal_on_time is None:
+            continue
+
+        pedal_off_time = max(event["time"], pedal_on_time + PEDAL_MIN_DURATION)
+        pedal_spans.append({
+            "onset": pedal_on_time,
+            "offset": pedal_off_time,
+        })
+        pedal_on_time = None
+
+    if pedal_on_time is not None:
+        pedal_off_time = max(float(piece_end_time), pedal_on_time + PEDAL_MIN_DURATION)
+        pedal_spans.append({
+            "onset": pedal_on_time,
+            "offset": pedal_off_time,
+        })
+
+    return pedal_spans
+
+
+def pedal_spans_to_event_list(pedal_spans):
+    pedal_event_list = []
+    for span in pedal_spans:
+        onset_time = float(span["onset"])
+        offset_time = max(float(span["offset"]), onset_time + PEDAL_MIN_DURATION)
+        pedal_event_list.append({"time": onset_time, "type": "PedalOn"})
+        pedal_event_list.append({"time": offset_time, "type": "PedalOff"})
+
+    return sorted(
+        pedal_event_list,
+        key=lambda event: (float(event["time"]), 0 if event["type"] == "PedalOff" else 1),
+    )
+
+
+def _pedal_spans_to_intervals(pedal_spans):
+    if len(pedal_spans) == 0:
+        return np.empty((0, 2), dtype=np.float32)
+
+    intervals = np.array(
+        [[float(span["onset"]), float(span["offset"])] for span in pedal_spans],
+        dtype=np.float32,
+    )
+    intervals[:, 1] = np.maximum(intervals[:, 1], intervals[:, 0] + PEDAL_MIN_DURATION)
+    return intervals
+
+
+def _safe_interval_metrics(reference_intervals, estimated_intervals, onset_tolerance=0.05, offset_ratio="default"):
+    if len(reference_intervals) == 0 or len(estimated_intervals) == 0:
+        return 0.0, 0.0, 0.0, 0.0
+
+    reference_pitches = midi_to_hz(np.full(len(reference_intervals), PEDAL_DUMMY_MIDI))
+    estimated_pitches = midi_to_hz(np.full(len(estimated_intervals), PEDAL_DUMMY_MIDI))
+
+    if offset_ratio is None:
+        return evaluate_notes(
+            reference_intervals,
+            reference_pitches,
+            estimated_intervals,
+            estimated_pitches,
+            offset_ratio=None,
+            onset_tolerance=onset_tolerance,
+        )
+
+    return evaluate_notes(
+        reference_intervals,
+        reference_pitches,
+        estimated_intervals,
+        estimated_pitches,
+        onset_tolerance=onset_tolerance,
+    )
+
+
+def _count_matched_event_times(reference_times, estimated_times, tolerance=PEDAL_EVENT_TOLERANCE):
+    reference_times = np.sort(np.asarray(reference_times, dtype=np.float32))
+    estimated_times = np.sort(np.asarray(estimated_times, dtype=np.float32))
+
+    ref_idx = 0
+    est_idx = 0
+    matched = 0
+    while ref_idx < len(reference_times) and est_idx < len(estimated_times):
+        delta = estimated_times[est_idx] - reference_times[ref_idx]
+        if abs(delta) <= tolerance:
+            matched += 1
+            ref_idx += 1
+            est_idx += 1
+        elif delta < -tolerance:
+            est_idx += 1
+        else:
+            ref_idx += 1
+
+    return matched
+
+
+def _precision_recall_f1(match_count, estimated_count, reference_count):
+    precision = match_count / estimated_count if estimated_count > 0 else 0.0
+    recall = match_count / reference_count if reference_count > 0 else 0.0
+    if precision + recall <= 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * precision * recall / (precision + recall)
+
+    return precision, recall, f1
+
+
+def cal_pedal_metrics(output_pedal_event_list, target_pedal_event_list, piece_end_time, onset_tolerance=0.05, event_tolerance=PEDAL_EVENT_TOLERANCE):
+    output_pedal_spans = pedal_events_to_spans(output_pedal_event_list, piece_end_time)
+    target_pedal_spans = pedal_events_to_spans(target_pedal_event_list, piece_end_time)
+
+    output_intervals = _pedal_spans_to_intervals(output_pedal_spans)
+    target_intervals = _pedal_spans_to_intervals(target_pedal_spans)
+
+    onset_precision, onset_recall, onset_f1, _ = _safe_interval_metrics(
+        target_intervals,
+        output_intervals,
+        onset_tolerance=onset_tolerance,
+        offset_ratio=None,
+    )
+    note_precision, note_recall, note_f1, _ = _safe_interval_metrics(
+        target_intervals,
+        output_intervals,
+        onset_tolerance=onset_tolerance,
+    )
+
+    target_pedal_on_times = [float(event["time"]) for event in target_pedal_event_list if event.get("type") == "PedalOn"]
+    output_pedal_on_times = [float(event["time"]) for event in output_pedal_event_list if event.get("type") == "PedalOn"]
+    pedal_on_match_count = _count_matched_event_times(target_pedal_on_times, output_pedal_on_times, tolerance=event_tolerance)
+    pedal_on_precision, pedal_on_recall, pedal_on_f1 = _precision_recall_f1(
+        pedal_on_match_count,
+        len(output_pedal_on_times),
+        len(target_pedal_on_times),
+    )
+
+    target_pedal_off_times = [float(event["time"]) for event in target_pedal_event_list if event.get("type") == "PedalOff"]
+    output_pedal_off_times = [float(event["time"]) for event in output_pedal_event_list if event.get("type") == "PedalOff"]
+    pedal_off_match_count = _count_matched_event_times(target_pedal_off_times, output_pedal_off_times, tolerance=event_tolerance)
+    pedal_off_precision, pedal_off_recall, pedal_off_f1 = _precision_recall_f1(
+        pedal_off_match_count,
+        len(output_pedal_off_times),
+        len(target_pedal_off_times),
+    )
+
+    metric_dict = {
+        "pedal_precision": onset_precision,
+        "pedal_recall": onset_recall,
+        "pedal_f1": onset_f1,
+        "pedal+offset_precision": note_precision,
+        "pedal+offset_recall": note_recall,
+        "pedal+offset_f1": note_f1,
+        "pedal_on_precision": pedal_on_precision,
+        "pedal_on_recall": pedal_on_recall,
+        "pedal_on_f1": pedal_on_f1,
+        "pedal_off_precision": pedal_off_precision,
+        "pedal_off_recall": pedal_off_recall,
+        "pedal_off_f1": pedal_off_f1,
+    }
+    return metric_dict, output_pedal_spans, target_pedal_spans
+
+
 def get_intervals_notes(midi_path):
     notes, pedals = pianoroll_parser.get_notes_with_pedal(midi_path)
     onsets = notes["onset"]
@@ -475,4 +672,3 @@ def cal_midi_files_metrics(est_midi_paths: list, ref_midi_paths: list, result_pa
     df.to_csv(result_path, float_format="%.2f")
     # print(df.tail(10))
     
-
