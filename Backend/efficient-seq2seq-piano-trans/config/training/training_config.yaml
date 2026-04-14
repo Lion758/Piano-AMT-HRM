@@ -1,7 +1,7 @@
 # training:
   mode: train # train, test
   learning_rate: 1e-4
-  training_steps: 160000 #50001 #1000000
+  training_steps: 45000 #50001 #1000000
   checking_steps: 10000
   evaluation_epochs: 1 #5
   evaluate_every_n_steps: 50
@@ -9,7 +9,6 @@
   cal_metrics_every_n_steps: 50
   log_hrm_scale_metrics: false
   trm_halt_loss_weight: 0.0
-  log_offline: false
   batch: 32 #24
   num_workers: 4 
   resume_ckpt_path:

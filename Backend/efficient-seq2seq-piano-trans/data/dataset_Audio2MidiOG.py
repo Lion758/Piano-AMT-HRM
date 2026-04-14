@@ -30,6 +30,7 @@ import json
 import pandas as pd
 
 from data.constants import *
+from data.offset_utils import resolve_use_truth_offsets
 
 from data.symbolic_music_tokenizer import SymbolicMusicTokenizer, TokenOnset, ONSET_SEC_UP_SAMPLING
 import data.symbolic_music_tokenizer as Tokenizer
@@ -117,19 +118,20 @@ class SingleWavDataset(Dataset):
         
     def __load_cache(self):
         # load cache
+        use_truth_offsets = resolve_use_truth_offsets(self.config)
         
         if True:
             tsv_path = os.path.splitext(self.midi_path)[0] + ".midi-notes.tsv"
             dataframe_midi = pd.read_csv(tsv_path, sep="\t")
             dataframe_midi = sm_tokenizer.notes_to_midi_events(
                 dataframe_midi,
-                use_truth_offsets=self.config.data.get("use_truth_offsets", False),
+                use_truth_offsets=use_truth_offsets,
             )
         else:
             dataframe_midi = sm_tokenizer.midi_to_dataframe(self.midi_path)
             dataframe_midi = sm_tokenizer.notes_to_midi_events(
                 dataframe_midi,
-                use_truth_offsets=self.config.data.get("use_truth_offsets", False),
+                use_truth_offsets=use_truth_offsets,
             )
 
         self.dataframe_midi = dataframe_midi.sort_values(by="onset_sec").reset_index(drop=True)

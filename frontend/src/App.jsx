@@ -245,7 +245,7 @@ export default function App() {
               <button className="primary-btn" onClick={scrollToDemo}>
                 🎹 Try It Now
               </button>
-              <a href="#/piano" className="primary-btn" style={{ background: 'linear-gradient(135deg, #7c5cbf, #4a9eff)', textDecoration: 'none' }}>
+              <a href="#/piano" className="primary-btn primary-btn-secondary">
                 🎹 Open Piano Tutor
               </a>
               <a href="#workflow" className="ghost-btn">See How It Works</a>
