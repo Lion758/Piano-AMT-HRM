@@ -90,7 +90,7 @@ export default function App() {
       const response = await fetch(`${API_BASE}/transcribe-upload`, { method: "POST", body: formData });
       if (!response.ok) {
         let msg = "Failed to transcribe audio.";
-        try { const p = await response.json(); if (p?.detail) msg = p.detail; } catch { }
+        try { const p = await response.json(); if (p?.detail) msg = p.detail; } catch { /* ignore malformed error payload */ }
         throw new Error(msg);
       }
       const data = await response.json();
@@ -118,7 +118,7 @@ export default function App() {
       });
       if (!response.ok) {
         let message = "Failed to transcribe piano stem.";
-        try { const payload = await response.json(); if (payload?.detail) message = payload.detail; } catch { }
+        try { const payload = await response.json(); if (payload?.detail) message = payload.detail; } catch { /* ignore malformed error payload */ }
         throw new Error(message);
       }
       const data = await response.json();

@@ -2,17 +2,19 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import * as Tone from 'tone';
 
 const PLAYBACK_LOOKAHEAD_SECONDS = 0.02;
+const INITIAL_VOLUME = 0.8;
 
 export function usePianoPlayer(notes, duration, _baseTempo = 120) {
   void _baseTempo;
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [speed, setSpeedState] = useState(1);
-  const [volume, setVolumeState] = useState(0.8);
+  const [volume, setVolumeState] = useState(INITIAL_VOLUME);
   const [isLoaded, setIsLoaded] = useState(false);
 
   const samplerRef = useRef(null);
-  const partRef = useRef(null);
+  const activePartRef = useRef(null);
   const noteEventsRef = useRef([]);
   const animFrameRef = useRef(null);
   const currentTimeRef = useRef(0);
@@ -22,6 +24,7 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
   const isPlayingRef = useRef(false);
   const lastFrameTimeRef = useRef(null);
   const playbackStartTimeRef = useRef(null);
+  const sessionIdRef = useRef(0);
 
   const setPlayingState = useCallback((nextIsPlaying) => {
     isPlayingRef.current = nextIsPlaying;
@@ -52,19 +55,29 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
     playbackStartTimeRef.current = null;
   }, []);
 
+  const disposeActivePart = useCallback(() => {
+    if (activePartRef.current) {
+      activePartRef.current.stop(0);
+      activePartRef.current.cancel(0);
+      activePartRef.current.dispose();
+      activePartRef.current = null;
+    }
+  }, []);
+
   const releaseActiveNotes = useCallback(() => {
     samplerRef.current?.releaseAll?.();
   }, []);
 
-  const clearPlaybackSchedule = useCallback(() => {
+  const clearPlaybackSession = useCallback(() => {
+    sessionIdRef.current += 1;
     stopAnimation();
     Tone.Transport.stop();
     Tone.Transport.cancel();
     Tone.Transport.seconds = 0;
     Tone.Transport.loop = false;
-    partRef.current?.cancel(0);
+    disposeActivePart();
     releaseActiveNotes();
-  }, [releaseActiveNotes, stopAnimation]);
+  }, [disposeActivePart, releaseActiveNotes, stopAnimation]);
 
   const advanceSongTime = useCallback((nowMs) => {
     if (!isPlayingRef.current) {
@@ -91,34 +104,12 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
 
     lastFrameTimeRef.current = nowMs;
     return syncCurrentTime(
-      currentTimeRef.current + deltaSeconds * scheduledSpeedRef.current
+      currentTimeRef.current + (deltaSeconds * scheduledSpeedRef.current)
     );
   }, [syncCurrentTime]);
 
-  const finishPlaybackRef = useRef(null);
-  finishPlaybackRef.current = (finalTime = currentTimeRef.current) => {
-    clearPlaybackSchedule();
-    setPlayingState(false);
-    syncCurrentTime(finalTime);
-  };
-
-  const updatePlaybackFrameRef = useRef(null);
-  updatePlaybackFrameRef.current = (timestamp) => {
-    if (!isPlayingRef.current) {
-      return;
-    }
-
-    const nextTime = advanceSongTime(timestamp);
-    if (durationRef.current > 0 && nextTime >= durationRef.current) {
-      finishPlaybackRef.current(durationRef.current);
-      return;
-    }
-
-    animFrameRef.current = requestAnimationFrame(updatePlaybackFrameRef.current);
-  };
-
-  const triggerHeldNotesAtOffset = useCallback((offset, playbackSpeed, startTime) => {
-    if (!samplerRef.current?.loaded) {
+  const triggerHeldNotesAtOffset = useCallback((offset, playbackSpeed, startTime, sessionId) => {
+    if (sessionId !== sessionIdRef.current || !samplerRef.current?.loaded) {
       return;
     }
 
@@ -142,37 +133,94 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
     });
   }, []);
 
+  const buildPlaybackPart = useCallback((playbackSpeed, sessionId) => {
+    const part = new Tone.Part((time, event) => {
+      if (event.sessionId !== sessionIdRef.current || !samplerRef.current?.loaded) {
+        return;
+      }
+
+      samplerRef.current.triggerAttackRelease(
+        event.note,
+        event.playbackDuration,
+        time,
+        event.velocity
+      );
+    }, noteEventsRef.current.map((event) => [
+      event.time,
+      {
+        ...event,
+        playbackDuration: Math.max(event.duration / playbackSpeed, 0.01),
+        sessionId,
+      },
+    ]));
+
+    part.loop = false;
+    part.playbackRate = playbackSpeed;
+    return part;
+  }, []);
+
+  const finishPlaybackRef = useRef(null);
+  finishPlaybackRef.current = (sessionId, finalTime = currentTimeRef.current) => {
+    if (sessionId !== sessionIdRef.current) {
+      return;
+    }
+
+    clearPlaybackSession();
+    setPlayingState(false);
+    syncCurrentTime(finalTime);
+  };
+
+  const updatePlaybackFrameRef = useRef(null);
+  updatePlaybackFrameRef.current = (sessionId, timestamp) => {
+    if (sessionId !== sessionIdRef.current || !isPlayingRef.current) {
+      return;
+    }
+
+    const nextTime = advanceSongTime(timestamp);
+    if (durationRef.current > 0 && nextTime >= durationRef.current) {
+      finishPlaybackRef.current(sessionId, durationRef.current);
+      return;
+    }
+
+    animFrameRef.current = requestAnimationFrame((nextTimestamp) => {
+      updatePlaybackFrameRef.current(sessionId, nextTimestamp);
+    });
+  };
+
   const startPlaybackFromOffset = useCallback((offset, playbackSpeed = speedRef.current) => {
-    const part = partRef.current;
-    if (!part) {
+    if (!noteEventsRef.current.length || !samplerRef.current) {
       return false;
     }
 
     const startOffset = clampTime(offset);
+    clearPlaybackSession();
+
     if (durationRef.current > 0 && startOffset >= durationRef.current) {
-      clearPlaybackSchedule();
       setPlayingState(false);
       syncCurrentTime(durationRef.current);
       return false;
     }
 
-    clearPlaybackSchedule();
-
+    const sessionId = sessionIdRef.current;
+    const part = buildPlaybackPart(playbackSpeed, sessionId);
+    activePartRef.current = part;
     scheduledSpeedRef.current = playbackSpeed;
-    part.playbackRate = playbackSpeed;
+
     part.start(0, startOffset);
 
     const startTime = Tone.now() + PLAYBACK_LOOKAHEAD_SECONDS;
-    triggerHeldNotesAtOffset(startOffset, playbackSpeed, startTime);
+    triggerHeldNotesAtOffset(startOffset, playbackSpeed, startTime, sessionId);
     Tone.Transport.start(startTime, 0);
 
     playbackStartTimeRef.current = window.performance.now() + (PLAYBACK_LOOKAHEAD_SECONDS * 1000);
-    animFrameRef.current = requestAnimationFrame(updatePlaybackFrameRef.current);
+    lastFrameTimeRef.current = null;
+    animFrameRef.current = requestAnimationFrame((timestamp) => {
+      updatePlaybackFrameRef.current(sessionId, timestamp);
+    });
     setPlayingState(true);
     return true;
-  }, [clampTime, clearPlaybackSchedule, setPlayingState, syncCurrentTime, triggerHeldNotesAtOffset]);
+  }, [buildPlaybackPart, clampTime, clearPlaybackSession, setPlayingState, syncCurrentTime, triggerHeldNotesAtOffset]);
 
-  // Initialize sampler once
   useEffect(() => {
     const sampler = new Tone.Sampler({
       urls: {
@@ -191,6 +239,7 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
     }).toDestination();
 
     samplerRef.current = sampler;
+    sampler.volume.value = 20 * Math.log10(INITIAL_VOLUME);
 
     Tone.Transport.stop();
     Tone.Transport.cancel();
@@ -198,68 +247,31 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
     Tone.Transport.loop = false;
 
     return () => {
-      stopAnimation();
-      if (partRef.current) {
-        partRef.current.dispose();
-        partRef.current = null;
-      }
-      Tone.Transport.stop();
-      Tone.Transport.cancel();
-      Tone.Transport.seconds = 0;
+      clearPlaybackSession();
       sampler.dispose();
       samplerRef.current = null;
     };
-  }, [stopAnimation]);
+  }, [clearPlaybackSession]);
 
   useEffect(() => {
     durationRef.current = duration || 0;
   }, [duration]);
 
-  // Build note part only when notes/duration change
   useEffect(() => {
-    noteEventsRef.current = [];
-    clearPlaybackSchedule();
-    if (partRef.current) {
-      partRef.current.dispose();
-      partRef.current = null;
-    }
-
-    syncCurrentTime(0);
-    setPlayingState(false);
-
-    if (!notes.length || !samplerRef.current) {
-      return;
-    }
-
-    const events = notes.map((note) => ({
+    noteEventsRef.current = notes.map((note) => ({
       time: note.time,
       note: note.name || Tone.Frequency(note.midi, 'midi').toNote(),
       duration: note.duration,
       velocity: note.velocity ?? 0.8,
     }));
-    noteEventsRef.current = events;
 
-    const part = new Tone.Part((time, event) => {
-      if (samplerRef.current && samplerRef.current.loaded) {
-        samplerRef.current.triggerAttackRelease(
-          event.note,
-          Math.max(event.duration / scheduledSpeedRef.current, 0.01),
-          time,
-          event.velocity
-        );
-      }
-    }, events.map((e) => [e.time, e]));
-
-    part.loop = false;
-    part.playbackRate = speedRef.current;
-    partRef.current = part;
-
-    Tone.Transport.loop = false;
-    Tone.Transport.loopEnd = duration || 0;
-  }, [notes, duration, clearPlaybackSchedule, setPlayingState, syncCurrentTime]);
+    clearPlaybackSession();
+    syncCurrentTime(0);
+    setPlayingState(false);
+  }, [notes, clearPlaybackSession, setPlayingState, syncCurrentTime]);
 
   const play = useCallback(async () => {
-    if (!partRef.current) {
+    if (!noteEventsRef.current.length) {
       return;
     }
 
@@ -274,37 +286,38 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
   }, [startPlaybackFromOffset, syncCurrentTime]);
 
   const pause = useCallback(() => {
-    advanceSongTime(window.performance.now());
-    clearPlaybackSchedule();
+    if (isPlayingRef.current) {
+      advanceSongTime(window.performance.now());
+    }
+
+    clearPlaybackSession();
     setPlayingState(false);
-  }, [advanceSongTime, clearPlaybackSchedule, setPlayingState]);
+  }, [advanceSongTime, clearPlaybackSession, setPlayingState]);
 
   const stop = useCallback(() => {
-    clearPlaybackSchedule();
+    clearPlaybackSession();
     setPlayingState(false);
     syncCurrentTime(0);
-  }, [clearPlaybackSchedule, setPlayingState, syncCurrentTime]);
+  }, [clearPlaybackSession, setPlayingState, syncCurrentTime]);
 
   const seek = useCallback((time) => {
-    const clamped = syncCurrentTime(time);
+    const clampedTime = syncCurrentTime(time);
 
     if (isPlayingRef.current) {
-      startPlaybackFromOffset(clamped, speedRef.current);
+      startPlaybackFromOffset(clampedTime, speedRef.current);
     }
   }, [startPlaybackFromOffset, syncCurrentTime]);
 
   const setSpeed = useCallback((newSpeed) => {
     const safeSpeed = Math.max(0.25, Math.min(2, Number(newSpeed) || 1));
+
     if (isPlayingRef.current) {
       advanceSongTime(window.performance.now());
     }
 
     speedRef.current = safeSpeed;
+    scheduledSpeedRef.current = safeSpeed;
     setSpeedState(safeSpeed);
-
-    if (partRef.current) {
-      partRef.current.playbackRate = safeSpeed;
-    }
 
     if (isPlayingRef.current) {
       startPlaybackFromOffset(currentTimeRef.current, safeSpeed);
@@ -312,11 +325,15 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
   }, [advanceSongTime, startPlaybackFromOffset]);
 
   const setVolume = useCallback((vol) => {
+    const safeVolume = Math.max(0, Math.min(1, Number(vol) || 0));
+
     if (samplerRef.current) {
-      const db = vol === 0 ? -Infinity : 20 * Math.log10(vol);
-      samplerRef.current.volume.value = db;
+      samplerRef.current.volume.value = safeVolume === 0
+        ? -Infinity
+        : 20 * Math.log10(safeVolume);
     }
-    setVolumeState(vol);
+
+    setVolumeState(safeVolume);
   }, []);
 
   return {

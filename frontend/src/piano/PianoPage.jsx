@@ -5,11 +5,11 @@ import FallingNotesCanvas from './components/FallingNotesCanvas.jsx';
 import PianoKeyboard from './components/PianoKeyboard.jsx';
 import LeftMenu from './components/LeftMenu.jsx';
 import ChatPanel from './components/ChatPanel.jsx';
-import RecordButton from './components/RecordButton.jsx';
 import { useMidi } from './hooks/useMidi.js';
 import { usePianoPlayer } from './hooks/usePianoPlayer.js';
 import { useRecorder } from './hooks/useRecorder.js';
 import { API_BASE, resolveApiUrl } from '../lib/api.js';
+import grandPianoTheater from '../assets/grand-piano-indoors-theater-place-generative-ai.jpg';
 
 export default function PianoPage({ midiUrl }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -119,7 +119,9 @@ export default function PianoPage({ midiUrl }) {
         try {
           const payload = await response.json();
           if (payload?.detail) message = payload.detail;
-        } catch { }
+        } catch {
+          // Ignore malformed error payloads and keep the default message.
+        }
         throw new Error(message);
       }
       const data = await response.json();
@@ -149,24 +151,6 @@ export default function PianoPage({ midiUrl }) {
       />
 
       <div className="pp-top">
-        <button
-          className="pp-play-fab"
-          onClick={player.isPlaying ? player.pause : player.play}
-          disabled={!controlsReady}
-          title={player.isPlaying ? 'Pause (Space)' : 'Play (Space)'}
-        >
-          {player.isPlaying ? (
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="4" width="4" height="16" rx="1" />
-              <rect x="14" y="4" width="4" height="16" rx="1" />
-            </svg>
-          ) : (
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-              <polygon points="6,4 20,12 6,20" />
-            </svg>
-          )}
-        </button>
-
         <TopControls
           isPlaying={player.isPlaying}
           currentTime={visualTime}
@@ -174,29 +158,54 @@ export default function PianoPage({ midiUrl }) {
           speed={player.speed}
           volume={player.volume}
           isLoaded={controlsReady}
+          isMenuOpen={menuOpen}
+          isTutorOpen={chatOpen}
+          recordProps={{
+            isRecording: recorder.isRecording,
+            onStart: recorder.startRecording,
+            onStop: recorder.stopRecording,
+            audioURL: recorder.audioURL,
+            error: recorder.error,
+          }}
           onPlay={player.play}
           onPause={player.pause}
           onStop={player.stop}
           onSeek={player.seek}
           onSpeedChange={player.setSpeed}
           onVolumeChange={player.setVolume}
-        />
-
-        <RecordButton
-          isRecording={recorder.isRecording}
-          onStart={recorder.startRecording}
-          onStop={recorder.stopRecording}
-          audioURL={recorder.audioURL}
-          error={recorder.error}
+          onMenuToggle={() => setMenuOpen(v => !v)}
+          onTutorToggle={() => setChatOpen(v => !v)}
         />
       </div>
 
       <div className="pp-main" ref={mainRef}>
+        <div className={`pp-scene-badge${hasMidi ? ' active' : ''}`}>
+          <span className="pp-scene-dot" />
+          {hasMidi ? 'Tutor stage active' : 'Awaiting transcription'}
+        </div>
+
         {!hasMidi && !isTranscribingUpload && (
           <div className="pp-overlay">
             <div className="pp-upload-card">
-              <h2>Upload A Song To Start Learning</h2>
-              <p>We&apos;ll transcribe it with the efficient seq2seq transformer and open it here automatically.</p>
+              <div className="pp-upload-photo">
+                <img
+                  src={grandPianoTheater}
+                  alt="Grand piano in a warmly lit theater"
+                  className="pp-upload-photo-image"
+                />
+                <div className="pp-upload-photo-overlay">
+                  <span>Stage Reference</span>
+                  <strong>Grand piano, amber lighting, and a concert-hall mood</strong>
+                </div>
+              </div>
+              <div className="pp-upload-kicker">Tutor Workspace</div>
+              <h2>Bring a recording into the piano stage</h2>
+              <p>Transcribe the performance, open the falling-note view, and keep the practice controls in the same workspace.</p>
+              <div className="pp-upload-highlights">
+                <span>Audio input</span>
+                <span>MIDI output</span>
+                <span>Guided practice</span>
+              </div>
               <label className="pp-upload-picker">
                 <span>Choose audio file</span>
                 <input type="file" accept="audio/*" onChange={handleAudioSelection} />

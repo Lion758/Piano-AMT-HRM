@@ -878,7 +878,7 @@ def Init_rank_zero_only(log_dir):
 def my_main(config: OmegaConf):
     torch.cuda.empty_cache()
     gc.collect()
-    set_training_process_name("group5, will end 4/14 ~ 8:00")
+    set_training_process_name("group5, will end 4/15 ~ 08:00")
     wandb_offline = get_wandb_offline_mode(config)
     model_name = config.model.model_name
     experiment_name = "_".join([model_name])
