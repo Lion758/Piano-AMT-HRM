@@ -599,7 +599,7 @@ class SymbolicMusicTokenizer:
         
         return midi_event_list
     
-    def notes_to_midi_events(self, df: pd.DataFrame, use_truth_offsets: bool = False) -> List[Dict[str, Union[int, float]]]:
+    def notes_to_midi_events(self, df: pd.DataFrame, use_truth_offsets: bool = False, emit_pedal_tokens: bool = True) -> List[Dict[str, Union[int, float]]]:
         """
         Args:
             midi_note_list: List of MIDI note data dictionaries.
@@ -635,13 +635,13 @@ class SymbolicMusicTokenizer:
         # Pedal events are already in the DataFrame as PedalOn/PedalOff types
         event_frames = [df_note_on, df_note_off]
 
-        df_pedal_on = df[df["type"] == "PedalOn"].copy()
+        df_pedal_on = df[df["type"] == "PedalOn"].copy() if emit_pedal_tokens else df.iloc[0:0].copy()
         if len(df_pedal_on) > 0:
             df_pedal_on["type_id"] = 0  # Pedal sorts before notes
             df_pedal_on = df_pedal_on[["pitch", "onset_sec", "type", "type_id", "velocity"]]
             event_frames.append(df_pedal_on)
 
-        df_pedal_off = df[df["type"] == "PedalOff"].copy()
+        df_pedal_off = df[df["type"] == "PedalOff"].copy() if emit_pedal_tokens else df.iloc[0:0].copy()
         if len(df_pedal_off) > 0:
             df_pedal_off["type_id"] = 0
             df_pedal_off = df_pedal_off[["pitch", "onset_sec", "type", "type_id", "velocity"]]
@@ -800,6 +800,56 @@ class SymbolicMusicTokenizer:
         return True
         
         
+def pedal_events_to_spans(pedal_event_list):
+    spans = []
+    open_time = None
+    for ev in sorted(pedal_event_list, key=lambda e: e["time"]):
+        if ev["type"] == "PedalOn":
+            if open_time is None:
+                open_time = ev["time"]
+        elif ev["type"] == "PedalOff":
+            if open_time is not None:
+                spans.append((open_time, ev["time"]))
+                open_time = None
+    return spans
+
+
+def extend_offsets_with_pedals(notes, pedal_event_list, next_onset_cap: bool = True):
+    """Return a new list of notes whose offsets are extended by sustain pedal spans.
+
+    Mirrors the canonical MAESTRO preprocessing: if a note's offset falls inside
+    a pedal span, extend it to the pedal release, capped at the next onset of
+    the same pitch (when next_onset_cap=True).
+    """
+    if len(notes) == 0:
+        return []
+    spans = pedal_events_to_spans(pedal_event_list)
+    notes_sorted = sorted(notes, key=lambda n: (n["pitch"], n["onset"]))
+    next_onset_by_pitch = {}
+    if next_onset_cap:
+        for i, n in enumerate(notes_sorted):
+            if i + 1 < len(notes_sorted) and notes_sorted[i + 1]["pitch"] == n["pitch"]:
+                next_onset_by_pitch[id(n)] = notes_sorted[i + 1]["onset"]
+    out = []
+    for n in notes:
+        offset = n["offset"]
+        for ps, pe in spans:
+            if ps <= offset <= pe:
+                offset = pe
+                break
+        if next_onset_cap:
+            cap = next_onset_by_pitch.get(id(n))
+            if cap is not None and offset > cap:
+                offset = cap
+        if offset < n["onset"]:
+            offset = n["onset"]
+        new_note = dict(n)
+        new_note["offset"] = offset
+        new_note["duration"] = offset - n["onset"]
+        out.append(new_note)
+    return out
+
+
 if __name__ == "__main__":
     tokenizer = SymbolicMusicTokenizer()
     midi_path = "/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0/2004/MIDI-Unprocessed_SMF_02_R1_2004_01-05_ORIG_MID--AUDIO_02_R1_2004_05_Track05_wav.midi"

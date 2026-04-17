@@ -23,7 +23,8 @@ data:
     num_mel_bins: 360 # 512
     decoder_targets: decoder_targets
     token_types: performance-seq
-    use_truth_offsets: true # to extend offsets by pedal time 
+    use_truth_offsets: true # false = use pedal-extended offsets; true = use raw physical key-release offsets
+    emit_pedal_tokens: true # false = literature-style baseline with no pedal tokens in target sequence
     midi_min: 0
     midi_max: 127
     n_frames: 256 #  512, 1024, 2048
@@ -40,6 +41,9 @@ model:
     "decoder.dense_onset_by_AttnMap.dense_layer.weight", 
     "decoder.dense_onset_by_AttnMap.dense_layer.bias"
   ]
+
+evaluation:
+  report_pedal_extended: false # if true, additionally evaluate pedal-re-extended predictions vs TSV offset_sec
 
 training:
   notes: "T5"

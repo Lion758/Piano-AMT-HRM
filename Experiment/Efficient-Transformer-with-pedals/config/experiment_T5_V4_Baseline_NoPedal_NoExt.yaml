@@ -1,0 +1,15 @@
+defaults:
+  - experiment_T5_V4_HierarchyPool
+
+# Literature-style baseline for the offset-definition experiment:
+#   - no pedal tokens in target sequence
+#   - training targets use raw physical key-release offsets (no pedal extension)
+# Evaluated against raw unextended GT, this isolates "how well can any
+# model predict physical key releases from a spectrogram" and confirms the
+# ~84->66 drop is inherent to the task, not a flaw in the pedal-aware model.
+data:
+  use_truth_offsets: true
+  emit_pedal_tokens: false
+
+training:
+  notes: "Baseline_T5_V4_NoPedal_NoExtension"

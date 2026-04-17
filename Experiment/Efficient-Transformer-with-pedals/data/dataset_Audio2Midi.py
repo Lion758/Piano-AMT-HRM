@@ -124,12 +124,14 @@ class SingleWavDataset(Dataset):
             dataframe_midi = sm_tokenizer.notes_to_midi_events(
                 dataframe_midi,
                 use_truth_offsets=self.config.data.get("use_truth_offsets", False),
+                emit_pedal_tokens=self.config.data.get("emit_pedal_tokens", True),
             )
         else:
             dataframe_midi = sm_tokenizer.midi_to_dataframe(self.midi_path)
             dataframe_midi = sm_tokenizer.notes_to_midi_events(
                 dataframe_midi,
                 use_truth_offsets=self.config.data.get("use_truth_offsets", False),
+                emit_pedal_tokens=self.config.data.get("emit_pedal_tokens", True),
             )
 
         self.dataframe_midi = dataframe_midi.sort_values(by="onset_sec").reset_index(drop=True)
