@@ -6,8 +6,6 @@ import {
 import { midiToNoteName, isBlackKey, getNotePosition } from '../utils/noteHelpers.js';
 
 export default function PianoKeyboard({ activeNotes = [], containerWidth = 1200 }) {
-  const whiteKeyWidth = containerWidth / TOTAL_WHITE_KEYS;
-
   const keys = useMemo(() => {
     const result = [];
     for (let midi = MIDI_MIN; midi <= MIDI_MAX; midi++) {
@@ -57,10 +55,10 @@ export default function PianoKeyboard({ activeNotes = [], containerWidth = 1200 
               height: keyboardHeight,
               background: isActive
                 ? activeColor
-                : 'linear-gradient(to bottom, #f8f8f8, #e8e8e8)',
-              border: '1px solid #999',
-              borderTop: '1px solid #bbb',
-              borderRadius: '0 0 4px 4px',
+                : `linear-gradient(to bottom, ${COLORS.whiteKey}, ${COLORS.whiteKeyShadow})`,
+              border: '1px solid rgba(84, 52, 43, 0.4)',
+              borderTop: '1px solid rgba(255, 248, 242, 0.55)',
+              borderRadius: '0 0 10px 10px',
               boxSizing: 'border-box',
               display: 'flex',
               flexDirection: 'column',
@@ -104,9 +102,9 @@ export default function PianoKeyboard({ activeNotes = [], containerWidth = 1200 
               height: blackKeyHeight,
               background: isActive
                 ? activeColor
-                : 'linear-gradient(to bottom, #2a2a3e, #111122)',
+                : `linear-gradient(to bottom, ${COLORS.blackKey}, ${COLORS.blackKeyShadow})`,
               border: '1px solid #000',
-              borderRadius: '0 0 3px 3px',
+              borderRadius: '0 0 8px 8px',
               boxSizing: 'border-box',
               cursor: 'pointer',
               transition: 'background 0.08s',
@@ -123,7 +121,7 @@ export default function PianoKeyboard({ activeNotes = [], containerWidth = 1200 
         left: 0,
         right: 0,
         height: 2,
-        background: '#e74c3c',
+        background: COLORS.canvasGuide,
         zIndex: 3,
       }} />
     </div>

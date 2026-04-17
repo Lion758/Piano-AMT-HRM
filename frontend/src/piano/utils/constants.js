@@ -23,15 +23,22 @@ export const BLACK_KEY_HEIGHT_RATIO = 0.62;
 
 // Colors
 export const COLORS = {
-  leftHand: '#4a9eff',   // blue
-  rightHand: '#ff8c42',  // orange
-  activeGlow: 'rgba(255, 255, 255, 0.3)',
-  whiteKey: '#f0f0f0',
-  whiteKeyActive: '#d0d0d0',
-  blackKey: '#1a1a2e',
-  blackKeyActive: '#333355',
-  keyLabel: '#666',
-  keyLabelBlack: '#aaa',
+  leftHand: '#9f7a50',
+  rightHand: '#dcc099',
+  activeGlow: 'rgba(236, 211, 164, 0.32)',
+  whiteKey: '#f3ede3',
+  whiteKeyShadow: '#d9c8b1',
+  blackKey: '#1a1410',
+  blackKeyShadow: '#4f3926',
+  keyLabel: '#6d5744',
+  keyLabelBlack: '#d9c8b4',
+  canvasBg: '#100c09',
+  canvasGrid: 'rgba(243, 232, 213, 0.05)',
+  canvasBlackLane: 'rgba(16, 12, 9, 0.2)',
+  canvasGuide: 'rgba(214, 178, 123, 0.64)',
+  sustainGlow: 'rgba(223, 194, 140, 0.24)',
+  noteStroke: 'rgba(255, 246, 231, 0.16)',
+  noteLabelBg: 'rgba(28, 20, 14, 0.6)',
 };
 
 // Speed options

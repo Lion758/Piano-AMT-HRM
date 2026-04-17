@@ -17,7 +17,7 @@ training:
   evaluate_every_n_steps: 50
   cal_metrics_every_n_steps: 50
   checking_steps: 1000
-  online_testing: true
+  online_testing: false
   evaluation_epochs: 1
   
   mode: train

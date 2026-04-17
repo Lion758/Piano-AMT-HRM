@@ -591,7 +591,8 @@ class SymbolicMusicTokenizer:
             missing_columns = sorted(required_truth_columns - set(df.columns))
             if missing_columns:
                 raise ValueError(
-                    "TSV is missing truth offset columns %s. Regenerate the cache with the dual-offset TSV generator before setting data.use_truth_offsets=true."
+                    "TSV is missing raw-offset columns %s. Regenerate the cache with the dual-offset TSV generator before setting "
+                    "data.use_note_extensions=false (or legacy data.use_truth_offsets=true)."
                     % missing_columns
                 )
             offset_column = "offset_sec_truth"

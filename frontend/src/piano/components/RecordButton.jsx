@@ -5,6 +5,7 @@ export default function RecordButton({ isRecording, onStart, onStop, audioURL, e
         className={`tc-btn record-btn ${isRecording ? 'recording' : ''}`}
         onClick={isRecording ? onStop : onStart}
         title={isRecording ? 'Stop recording' : 'Record from microphone'}
+        type="button"
       >
         <span className={`record-dot ${isRecording ? 'pulse' : ''}`} />
         <span className="record-label">{isRecording ? 'Stop' : 'Rec'}</span>

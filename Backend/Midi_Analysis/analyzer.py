@@ -14,18 +14,44 @@ Also supports backend selection:
 - paper_best: src.paper_time_alignment.PaperBestTimeAlignment (parangonar)
 """
 import argparse
-import os
 import json
+import os
 import sys
-import argparse
+from importlib import import_module
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
-from midi_parser import MIDIParser
-from time_alignment import TimeAlignment
-from paper_time_alignment import PaperBestTimeAlignment
-from error_analysis import ErrorAnalysis
-from json_summarization import JSONSummarization
+
+def _import_local(module_name: str, attr_name: str):
+    if __package__ in {None, ""}:
+        module = import_module(module_name)
+    else:
+        module = import_module(f".{module_name}", __package__)
+    return getattr(module, attr_name)
+
+
+def _get_midi_parser_cls():
+    return _import_local("midi_parser", "MIDIParser")
+
+
+def _get_time_alignment_cls():
+    return _import_local("time_alignment", "TimeAlignment")
+
+
+def _get_paper_time_alignment_cls():
+    return _import_local("paper_time_alignment", "PaperBestTimeAlignment")
+
+
+def _get_error_analysis_cls():
+    return _import_local("error_analysis", "ErrorAnalysis")
+
+
+def _get_json_summarization_cls():
+    return _import_local("json_summarization", "JSONSummarization")
+
+
+def _get_gpt_tutor_cls():
+    return _import_local("gpt_tutor", "GPTTutor")
 
 
 class MIDIAnalyzer:
@@ -35,7 +61,7 @@ class MIDIAnalyzer:
     """
 
     def __init__(self):
-        self.parser = MIDIParser()
+        self.parser = _get_midi_parser_cls()()
         self.analysis_results: Dict[str, Any] = {}
 
     # -------------------------
@@ -104,7 +130,7 @@ class MIDIAnalyzer:
 
         # 3) Error analysis
         print("3. Analyzing performance errors...")
-        error_analyzer = ErrorAnalysis(
+        error_analyzer = _get_error_analysis_cls()(
             {
                 "reference": reference_parsed,
                 "performance": performance_parsed,
@@ -122,7 +148,7 @@ class MIDIAnalyzer:
             "alignment_statistics": alignment_stats,
             "error_analysis": error_analysis,
         }
-        summarizer = JSONSummarization(analysis_data)
+        summarizer = _get_json_summarization_cls()(analysis_data)
         gpt_summary = summarizer.create_summary()
 
         # Compile final results
@@ -281,7 +307,7 @@ class MIDIAnalyzer:
         backend = (alignment_backend or "native").strip().lower()
 
         if backend == "paper_best":
-            return PaperBestTimeAlignment(reference_path, performance_path, model=alignment_model)
+            return _get_paper_time_alignment_cls()(reference_path, performance_path, model=alignment_model)
 
         if backend != "native":
             raise ValueError(
@@ -294,10 +320,10 @@ class MIDIAnalyzer:
 
             reference_midi = pretty_midi.PrettyMIDI(reference_path)
             performance_midi = pretty_midi.PrettyMIDI(performance_path)
-            return TimeAlignment(reference_midi, performance_midi)
+            return _get_time_alignment_cls()(reference_midi, performance_midi)
         except Exception as e:
             print(f"Warning: PrettyMIDI load failed; using parsed data. Reason: {e}")
-            return TimeAlignment(reference_parsed, performance_parsed)
+            return _get_time_alignment_cls()(reference_parsed, performance_parsed)
 
     # -------------------------
     # Metrics + utility
@@ -554,7 +580,7 @@ def _run_cli_compare_tutor(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        from gpt_tutor import GPTTutor
+        GPTTutor = _get_gpt_tutor_cls()
     except ModuleNotFoundError as exc:
         missing = exc.name or "unknown"
         print(

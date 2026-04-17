@@ -52,7 +52,7 @@ training:
   batch_inference: 256
   learning_rate: 1e-4
   evaluation_epochs: 1 #5
-  online_testing: true
+  online_testing: false
 
   debug_log_offline: false
   losses:
