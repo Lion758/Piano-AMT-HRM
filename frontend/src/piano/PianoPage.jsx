@@ -17,6 +17,8 @@ export default function PianoPage({ midiUrl }) {
   const mainRef = useRef(null);
   const [dimensions, setDimensions] = useState({ width: 1200, height: 500 });
   const [activeMidiUrl, setActiveMidiUrl] = useState(midiUrl || null);
+  const [midiAnalysis, setMidiAnalysis] = useState(null);
+  const [isAnalyzingMidi, setIsAnalyzingMidi] = useState(false);
   const [selectedAudioFile, setSelectedAudioFile] = useState(null);
   const [isTranscribingUpload, setIsTranscribingUpload] = useState(false);
   const [uploadError, setUploadError] = useState('');
@@ -40,6 +42,51 @@ export default function PianoPage({ midiUrl }) {
   useEffect(() => {
     setActiveMidiUrl(midiUrl || null);
   }, [midiUrl]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!activeMidiUrl) {
+      setMidiAnalysis(null);
+      setIsAnalyzingMidi(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    async function analyzeMidi() {
+      setIsAnalyzingMidi(true);
+      try {
+        const response = await fetch(`${API_BASE}/midi/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ midi_url: activeMidiUrl }),
+        });
+
+        if (!response.ok) {
+          throw new Error('Failed to analyze MIDI.');
+        }
+
+        const data = await response.json();
+        if (!cancelled) {
+          setMidiAnalysis(data);
+        }
+      } catch {
+        if (!cancelled) {
+          setMidiAnalysis(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsAnalyzingMidi(false);
+        }
+      }
+    }
+
+    analyzeMidi();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMidiUrl]);
 
   // Track container dimensions
   useEffect(() => {
@@ -148,6 +195,8 @@ export default function PianoPage({ midiUrl }) {
         onToggle={() => setChatOpen(v => !v)}
         midiUrl={activeMidiUrl}
         notes={notes}
+        analysisData={midiAnalysis}
+        analysisLoading={isAnalyzingMidi}
       />
 
       <div className="pp-top">

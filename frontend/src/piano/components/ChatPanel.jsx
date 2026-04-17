@@ -6,7 +6,14 @@ const WELCOME_MESSAGE = {
   text: "Hi! I'm your AI piano tutor. Once you load a MIDI piece, I can analyse it and help you practise. Ask me anything — fingering tips, tricky passages, theory questions, you name it.",
 };
 
-export default function ChatPanel({ isOpen, onToggle, midiUrl = null, notes = [] }) {
+export default function ChatPanel({
+  isOpen,
+  onToggle,
+  midiUrl = null,
+  notes = [],
+  analysisData = null,
+  analysisLoading = false,
+}) {
   const [messages, setMessages] = useState([WELCOME_MESSAGE]);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
@@ -19,21 +26,31 @@ export default function ChatPanel({ isOpen, onToggle, midiUrl = null, notes = []
   }, [messages, isOpen]);
 
   useEffect(() => {
-    if (midiUrl && notes.length > 0) {
-      const noteCount = notes.length;
-      const pieceDuration = notes.reduce((max, note) => Math.max(max, note.time + note.duration), 0);
-      const mins = Math.floor(pieceDuration / 60);
-      const secs = Math.round(pieceDuration % 60);
-
-      setMessages([
-        WELCOME_MESSAGE,
-        {
-          role: 'tutor',
-          text: `I can see your piece has been loaded — ${noteCount} notes, ${mins}m ${secs}s long. Play it and I'll give you feedback, or ask me anything about the piece.`,
-        },
-      ]);
+    if (!midiUrl || notes.length === 0) {
+      return;
     }
-  }, [midiUrl, notes]);
+
+    const noteCount = notes.length;
+    const pieceDuration = notes.reduce((max, note) => Math.max(max, note.time + note.duration), 0);
+    const mins = Math.floor(pieceDuration / 60);
+    const secs = Math.round(pieceDuration % 60);
+    const intro = `I can see your piece has been loaded — ${noteCount} notes, ${mins}m ${secs}s long.`;
+
+    let analysisMessage = "Play it and I'll give you feedback, or ask me anything about the piece.";
+    if (analysisLoading) {
+      analysisMessage = "I'm also analyzing the MIDI now so I can give you more specific practice feedback.";
+    } else if (analysisData?.analysis_overview) {
+      analysisMessage = `${analysisData.analysis_overview} Ask me about timing, phrasing, difficulty, or how to practise it.`;
+    }
+
+    setMessages([
+      WELCOME_MESSAGE,
+      {
+        role: 'tutor',
+        text: `${intro} ${analysisMessage}`,
+      },
+    ]);
+  }, [midiUrl, notes, analysisData, analysisLoading]);
 
   const sendMessage = async () => {
     const text = input.trim();
@@ -47,7 +64,7 @@ export default function ChatPanel({ isOpen, onToggle, midiUrl = null, notes = []
 
     try {
       const midiContext = midiUrl
-        ? `The user has loaded a MIDI file. It has ${notes.length} notes and lasts ${Math.round(notes.reduce((max, note) => Math.max(max, note.time + note.duration), 0))} seconds.`
+        ? `The user has loaded a MIDI file. It has ${notes.length} notes and lasts ${Math.round(notes.reduce((max, note) => Math.max(max, note.time + note.duration), 0))} seconds.${analysisData?.analysis_overview ? ` MIDI analysis: ${analysisData.analysis_overview}` : ''}`
         : 'No MIDI is currently loaded.';
 
       const conversationHistory = messages.map((message) => ({
@@ -62,6 +79,7 @@ export default function ChatPanel({ isOpen, onToggle, midiUrl = null, notes = []
           message: text,
           context: midiContext,
           history: conversationHistory,
+          midi_analysis: analysisData,
         }),
       });
 
@@ -75,7 +93,7 @@ export default function ChatPanel({ isOpen, onToggle, midiUrl = null, notes = []
         { role: 'tutor', text: data.reply || data.message || 'I had trouble responding. Please try again.' },
       ]);
     } catch {
-      setMessages((prev) => [...prev, { role: 'tutor', text: getFallbackReply(text) }]);
+      setMessages((prev) => [...prev, { role: 'tutor', text: getFallbackReply(text, analysisData) }]);
     } finally {
       setIsThinking(false);
     }
@@ -100,7 +118,9 @@ export default function ChatPanel({ isOpen, onToggle, midiUrl = null, notes = []
             </div>
             <div>
               <h4 className="chat-title">AI Piano Tutor</h4>
-              <span className="chat-status">{midiUrl ? 'Piece loaded' : 'No piece loaded'}</span>
+              <span className="chat-status">
+                {!midiUrl ? 'No piece loaded' : analysisLoading ? 'Analyzing MIDI' : analysisData ? 'MIDI analyzed' : 'Piece loaded'}
+              </span>
             </div>
           </div>
 
@@ -176,19 +196,30 @@ export default function ChatPanel({ isOpen, onToggle, midiUrl = null, notes = []
   );
 }
 
-function getFallbackReply(text) {
+function getFallbackReply(text, analysisData) {
   const normalized = text.toLowerCase();
+  const metrics = analysisData?.metrics || {};
+  const recommendations = analysisData?.practice_recommendations || [];
+  const dynamicRange = Math.round(metrics?.velocity_stats?.dynamic_range || 0);
+  const noteDensity = Number(metrics?.notes_per_second || 0).toFixed(2);
+  const avgDuration = Number(metrics?.duration_stats?.mean || 0).toFixed(2);
 
   if (normalized.includes('finger') || normalized.includes('hand')) {
     return "Fingering depends on the passage. Generally, keep your wrist relaxed and let your thumb cross naturally under longer phrases. For fast runs, practice hands separately first.";
   }
 
   if (normalized.includes('slow') || normalized.includes('speed')) {
+    if (metrics?.notes_per_second) {
+      return `This MIDI sits around ${noteDensity} notes per second, so start below performance speed and only increase tempo when the passage stays even. A good target is 50-70% speed with clean attacks before building back up.`;
+    }
     return "Practising slowly is one of the best techniques. Try 50% speed and focus on clean articulation before building up tempo. The speed control at the top of the player will help.";
   }
 
   if (normalized.includes('mistake') || normalized.includes('miss') || normalized.includes('error')) {
-    return "Isolate the exact measure where you're making the mistake. Loop just those 2–4 bars at a slower tempo until muscle memory kicks in, then gradually increase speed.";
+    if (recommendations.length > 0) {
+      return `The analysis already points us toward this: ${recommendations[0]}. Isolate the exact bar that breaks down, loop 2-4 bars slowly, and rebuild the passage with a steady pulse.`;
+    }
+    return "Isolate the exact measure where you're making the mistake. Loop just those 2-4 bars at a slower tempo until muscle memory kicks in, then gradually increase speed.";
   }
 
   if (normalized.includes('left hand') || normalized.includes('right hand')) {
@@ -203,5 +234,9 @@ function getFallbackReply(text) {
     return "A metronome is your best friend for timing. Start very slow, nail the rhythm, then increase BPM by 5–10 each session.";
   }
 
-  return "Great question. Try practicing the passage at 50–70% speed with a metronome, and break it into small sections before bringing the hands back together.";
+  if (analysisData?.analysis_overview) {
+    return `From the MIDI analysis, I’m seeing ${dynamicRange} dynamic-range points and an average note length of ${avgDuration}s. ${recommendations[0] || 'Try practicing in short sections with a metronome and listen for even tone and timing.'}`;
+  }
+
+  return "Great question. Try practicing the passage at 50-70% speed with a metronome, and break it into small sections before bringing the hands back together.";
 }

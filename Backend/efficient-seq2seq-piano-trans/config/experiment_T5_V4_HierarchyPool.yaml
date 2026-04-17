@@ -4,7 +4,7 @@ defaults:
 audio_path: "audio/piano_test.mp3"
 
 model:
-  checkpoint_path: checkpoints/Baseline_120k_NoExtentions.ckpt #checkpoints/T5_V4_steps_200000-OG.ckpt
+  checkpoint_path:  checkpoints/T5_V4_steps_200000-OG.ckpt #checkpoints/Baseline_120k_NoExtentions.ckpt
   cross_attention_hierarchy_pooling: true
   pooling_sizes: [4, 4, 2, 2, 1, 1]
 
@@ -16,7 +16,9 @@ data:
   use_note_extensions: false
 
 training:
-  training_steps: 120000
+  training_steps: 180000
+  resume_ckpt_path: "runs/Transformer-T5/260414-220851_Efficient_Transformer_V4_HierarchyPool_noteExtensions=False/cpt/full/last.ckpt" 
+
   # resume_ckpt_path: /home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/runs/Transformer-T5/260414-005926_Efficient_Transformer_V4_HierarchyPool_noteExtensions=False/cpt/full/last.ckpt
   notes: "Efficient_Transformer_V4_HierarchyPool_noteExtensions=${data.use_note_extensions}"
   
