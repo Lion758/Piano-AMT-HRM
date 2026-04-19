@@ -2,8 +2,8 @@ defaults:
   - experiment_T5_V3_HybridGlobalLocalCrossAttn
 
 model:
-  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260412-032031_Efficient_Transformer_V4_Pedal_seq_length:1353/AMT-audio-to-midi/ne271omy/checkpoints/epoch=101-step=160000.ckpt
-  mlp_activations: relu
+  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260417-013647_Efficient_Transformer_V4_Pedal_swiglu/AMT-audio-to-midi/ft2rxxk3/checkpoints/epoch=127-step=200000.ckpt #/home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260416-002246_Efficient_Transformer_V4_Pedal_swiglu/AMT-audio-to-midi/1xgemrn4/checkpoints/epoch=59-step=93000.ckpt 
+  mlp_activations: 
   
 
   cross_attention_hierarchy_pooling: true
@@ -11,5 +11,5 @@ model:
   # pooling_sizes: [4, 4, 4, 4, 4, 4]
 
 training:
-  training_steps: 200000
+  training_steps: 113000
   notes: "Efficient_Transformer_V4_Pedal_swiglu"

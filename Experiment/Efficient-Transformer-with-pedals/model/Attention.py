@@ -8,11 +8,18 @@ import torch.nn as nn
 from model.Layers import *
 from model.Mask import *
 import math
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+try:
+    from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+except ImportError:  # pragma: no cover - optional dependency
+    flash_attn_qkvpacked_func = None
+    flash_attn_func = None
 
-
-from xformers.ops import memory_efficient_attention
-import xformers.ops.fmha.attn_bias as xformer_attn_bias
+try:
+    from xformers.ops import memory_efficient_attention
+    import xformers.ops.fmha.attn_bias as xformer_attn_bias
+except ImportError:  # pragma: no cover - optional dependency
+    memory_efficient_attention = None
+    xformer_attn_bias = None
 
 
 # from torch.nn.attention.flex_attention import flex_attention, create_block_mask
@@ -33,6 +40,29 @@ class Multi_Head_Attention(nn.Module):
         
         self.is_causal = is_causal
         self.window_size = window_size
+
+    def scaled_dot_product_sliding_window_attention(self, query, key, value, decode=False):
+        assert self.window_size is not None, "Sliding window attention requires a window size."
+
+        seq_len = query.size(1)
+        mask = make_sliding_window_mask(
+            seq_len,
+            int(self.window_size),
+            bool(self.is_causal),
+        ).to(query.device)
+        attention_bias = torch.where(
+            mask > 0,
+            torch.zeros_like(mask, dtype=torch.float32, device=query.device),
+            torch.full_like(mask, float("-inf"), dtype=torch.float32, device=query.device),
+        )
+
+        q = query.permute(0, 2, 1, 3).to(torch.float32)
+        k = key.permute(0, 2, 1, 3).to(torch.float32)
+        v = value.permute(0, 2, 1, 3).to(torch.float32)
+        dropout_p = 0.0 if decode else float(self.dropout_rate)
+
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_bias, dropout_p=dropout_p)
+        return x.permute(0, 2, 1, 3).to(query.dtype)
             
 
     def dot_product_attention(self, query, key, value, bias=None, deterministic=False):
@@ -65,6 +95,8 @@ class Multi_Head_Attention(nn.Module):
     
     def flash_attn_sliding_window_attention(self, query, key, value,decode=False):
         assert self.window_size is not None, 'Sliding window attention requires a window size.'
+        if flash_attn_func is None:
+            return self.scaled_dot_product_sliding_window_attention(query, key, value, decode=decode)
         if self.is_causal:
             window_size = (self.window_size - (self.window_size%2), -1)
         else:
@@ -79,6 +111,8 @@ class Multi_Head_Attention(nn.Module):
         
     def xformers_sliding_window_attention(self, query, key, value, dropout_p=0.0):
         assert self.window_size is not None, 'Sliding window attention requires a window size.'
+        if memory_efficient_attention is None or xformer_attn_bias is None:
+            return self.scaled_dot_product_sliding_window_attention(query, key, value, decode=(dropout_p == 0.0))
         
         window_left = window_right = self.window_size // 2
         if self.is_causal:

@@ -1,111 +1,117 @@
-import os
-import sys
-import torch
-import torchaudio
-import torch.nn.functional as F
-from data.constants import *
-import os
-from train import MT3Trainer, detect_checkpoint_format, extract_model_state_dict, remove_ignored_layers, validate_transformer_ffn_activation_compatibility
-import numpy as np
-from tqdm import tqdm
-import gc
 import argparse
+import gc
+import os
+from pathlib import Path
 
-
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torchaudio
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
-import hydra
+from tqdm import tqdm
 
+from data.constants import *
+from train import (
+    MT3Trainer,
+    detect_checkpoint_format,
+    extract_model_state_dict,
+    remove_ignored_layers,
+    validate_transformer_ffn_activation_compatibility,
+)
 from utils import sequence_processing
-from pytorch_memlab import MemReporter
-from torch.profiler import profile, record_function, ProfilerActivity
+
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "7"
-
 trainer = None
 
-@hydra.main(config_path="config", config_name="main_config", version_base = None)
-def my_main(config: OmegaConf):
-    torch.cuda.empty_cache()
-    checkpoint_path = config.model.checkpoint_path
-    
-    ####################################################
-    # Create model.
-    global trainer
-    if trainer is None:
-        trainer = MT3Trainer(config)
-        print("Loading model from checkpoint:", checkpoint_path)
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-        checkpoint_format = detect_checkpoint_format(checkpoint)
-        state_dict = extract_model_state_dict(checkpoint, checkpoint_format)
-        validate_transformer_ffn_activation_compatibility(state_dict, config.model.mlp_activations)
-        remove_ignored_layers(state_dict, config.model.checkpoint_ignore_layres)
 
-        trainer.model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
-        trainer.model = trainer.model.to(device).eval()
+def load_config(config_path: str | None, config_name: str, overrides: list[str]) -> OmegaConf:
+    if config_path is not None:
+        config_file = Path(config_path).expanduser().resolve()
+        config_dir = str(config_file.parent)
+        config_stem = config_file.stem
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            config = compose(config_name=config_stem, overrides=overrides)
+    else:
+        config_dir = str((Path(__file__).resolve().parent / "config").resolve())
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            config = compose(config_name=config_name, overrides=overrides)
+    return config
+
+
+def _load_model_if_needed(config: OmegaConf) -> None:
+    global trainer
+    checkpoint_path = config.model.checkpoint_path
+
+    if trainer is not None:
+        return
+
+    trainer = MT3Trainer(config)
+    print("Loading model from checkpoint:", checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint_format = detect_checkpoint_format(checkpoint)
+    state_dict = extract_model_state_dict(checkpoint, checkpoint_format)
+    validate_transformer_ffn_activation_compatibility(state_dict, config.model.mlp_activations)
+    remove_ignored_layers(state_dict, config.model.checkpoint_ignore_layres)
+
+    trainer.model.load_state_dict(state_dict, strict=config.model.strict_checkpoint)
+    trainer.model = trainer.model.to(device).eval()
+
+
+def run_inference(config: OmegaConf) -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    _load_model_if_needed(config)
 
     audio_path = config.audio_path
-    
     wav, sr = torchaudio.load(audio_path)
-    # Merge channels if stereo.
     if wav.shape[0] > 1:
         wav = wav.to(device).mean(dim=0, keepdim=True)
     if sr != DEFAULT_SAMPLE_RATE:
         wav = torchaudio.transforms.Resample(sr, DEFAULT_SAMPLE_RATE).to(device)(wav)
 
     clip_len = config.data.n_frames * config.data.hop_length
-    clip_len_in_second = clip_len/DEFAULT_SAMPLE_RATE
+    clip_len_in_second = clip_len / DEFAULT_SAMPLE_RATE
 
-    ## Input Features
     with torch.no_grad():
-        # => [B, T, F]
         encoder_inputs = trainer.features_extracter.to(device)(wav[:, :-1]).transpose(-1, -2)
         encoder_inputs = encoder_inputs.detach()
-        if trainer.config.data.amplitude_to_db:
-            # assert self.config.data.features != "mel"
-            if trainer.config.data.features != "mel":
-                encoder_inputs = torchaudio.transforms.AmplitudeToDB(top_db=80.0)(encoder_inputs)
-                
+        if trainer.config.data.amplitude_to_db and trainer.config.data.features != "mel":
+            encoder_inputs = torchaudio.transforms.AmplitudeToDB(top_db=80.0)(encoder_inputs)
+
     if encoder_inputs.shape[1] % config.data.n_frames != 0:
-        # pad to the next multiple of n_frames
         pad_len = config.data.n_frames - (encoder_inputs.shape[1] % config.data.n_frames)
-        encoder_inputs = F.pad(encoder_inputs, (0, 0, 0, pad_len), value=0.0)   
+        encoder_inputs = F.pad(encoder_inputs, (0, 0, 0, pad_len), value=0.0)
 
     clip_num = encoder_inputs.shape[1] // config.data.n_frames
-    # reshape to [B, T, F]
     encoder_inputs = encoder_inputs.view(clip_num, config.data.n_frames, -1)
-                
+
     batch_size = config.training.batch_inference
-    num_batches = np.ceil( encoder_inputs.shape[0] / batch_size ).astype(int)
+    num_batches = int(np.ceil(encoder_inputs.shape[0] / batch_size))
     notes_list = []
     pedal_events_list = []
     max_seq_len = config.data.max_token_length
-    torch.cuda.synchronize("cuda")
-    torch.cuda.empty_cache()
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize("cuda")
+        torch.cuda.empty_cache()
     gc.collect()
 
     for i in tqdm(range(num_batches), desc="Inference"):
         start = i * batch_size
         end = min((i + 1) * batch_size, encoder_inputs.shape[0])
         encoder_inputs_i = encoder_inputs[start:end].to(device)
-        
-        
-        # torch.cuda.memory._record_memory_history(max_entries=100000)
 
         with torch.no_grad():
-            decoder_output_tokens = trainer.model.generate(encoder_inputs_i, target_seq_length=max_seq_len, berak_on_eos=True)
-        
-        # try:
-        #     # https://docs.pytorch.org/memory_viz
-        #     # https://pytorch.org/blog/understanding-gpu-memory-1/
-        #     torch.cuda.memory._dump_snapshot(f"gpu_memory_dump_snapshot.pickle")
-        # except Exception as e:
-        #     print(f"Failed to capture memory snapshot {e}")
-        
-        
-        # get_output_seq_lens
-        output_eos_tokens_flag = decoder_output_tokens
-        output_eos_tokens_flag = (output_eos_tokens_flag == sm_tokenizer.EOS).int() * sm_tokenizer.EOS
+            decoder_output_tokens = trainer.model.generate(
+                encoder_inputs_i,
+                target_seq_length=max_seq_len,
+                berak_on_eos=True,
+            )
+
+        output_eos_tokens_flag = (decoder_output_tokens == sm_tokenizer.EOS).int() * sm_tokenizer.EOS
         output_seq_lens = sequence_processing.get_sequence_lengths(output_eos_tokens_flag, sm_tokenizer.EOS)
         for b in range(encoder_inputs_i.shape[0]):
             output_seq_len = output_seq_lens[b].item()
@@ -118,28 +124,28 @@ def my_main(config: OmegaConf):
             notes_list.extend(notes_list_b)
             pedal_events_list.extend(pedal_events_b)
 
-    # save midi
-    if hasattr(config, "midi_path"):
-        midi_path = config.midi_path
-    else:
-        basename = os.path.basename(audio_path)
-        midi_path = os.path.splitext(basename)[0] + ".output.mid"
-        midi_path = os.path.join("outputs", midi_path)
-    os.makedirs(os.path.dirname(midi_path), exist_ok=True)
-    sm_tokenizer.save_midi(notes_list, midi_path, pedal_event_list=pedal_events_list)
-    
+    midi_path = Path(getattr(config, "midi_path", "") or os.path.join(
+        "outputs",
+        os.path.splitext(os.path.basename(audio_path))[0] + ".output.mid",
+    )).expanduser()
+    midi_path.parent.mkdir(parents=True, exist_ok=True)
+    sm_tokenizer.save_midi(notes_list, str(midi_path), pedal_event_list=pedal_events_list)
+    print("Saved MIDI to:", midi_path)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run inference with either the standard config tree or an explicit Hydra YAML config path.")
+    parser.add_argument("--config-path", type=str, default=None, help="Path to a Hydra config file such as config/experiment_T5_V4_HierarchyPool.yaml or a saved experiment_config.yaml")
+    parser.add_argument("--config-name", type=str, default="main_config", help="Config name under ./config when --config-path is not used")
+    parser.add_argument("overrides", nargs="*", help="Hydra/OmegaConf dotlist overrides such as model.checkpoint_path=... audio_path=...")
+    return parser.parse_args()
+
+
+def my_main():
+    args = parse_args()
+    config = load_config(args.config_path, args.config_name, args.overrides)
+    run_inference(config)
+
 
 if __name__ == "__main__":
-    # assert len(sys.argv) == 3
-    # audio_path = sys.argv[1]
-    # midi_path = sys.argv[2]
-    
-    # argparse.ArgumentParser(description="Inference script for AMT-MIDI")
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument("--audio_path", type=str, default=None, help="Path to the audio file")
-    # # parser.add_argument("--midi_path", type=str, default=midi_path, help="Path to save the output MIDI file")
-    # args = parser.parse_args()
-    # audio_path = args.audio_path
-    # midi_path = args.midi_path
-    
     my_main()

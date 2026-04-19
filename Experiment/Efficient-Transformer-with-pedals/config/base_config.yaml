@@ -43,7 +43,7 @@ model:
   ]
 
 evaluation:
-  report_pedal_extended: false # if true, additionally evaluate pedal-re-extended predictions vs TSV offset_sec
+  report_pedal_extended: true # if true, additionally evaluate pedal-re-extended predictions vs TSV offset_sec
 
 training:
   notes: "T5"

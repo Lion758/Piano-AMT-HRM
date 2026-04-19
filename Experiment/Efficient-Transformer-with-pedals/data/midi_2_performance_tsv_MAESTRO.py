@@ -9,18 +9,10 @@ from glob import glob
 from tqdm import tqdm
 from multiprocessing import Pool
 import shutil
-import numpy as np
 import symusic
+from data.pedal_extension_utils import pedal_records_to_spans, extend_offset_array_with_pedal_spans
 
 dataset_dir = "/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0"
-
-
-def compute_pedal_extended_offsets(raw_offsets, pedals):
-    extended_offsets = np.copy(raw_offsets)
-    for pedal_start, pedal_end in zip(pedals["time"], pedals["end"]):
-        mask = (raw_offsets >= pedal_start) & (raw_offsets <= pedal_end)
-        extended_offsets[mask] = pedal_end
-    return extended_offsets
 
 def process_midi_file(midi_path):
     
@@ -38,10 +30,15 @@ def process_midi_file(midi_path):
     note_array = track.notes.numpy()
     pedals = track.pedals.numpy()
     pedals["end"] = pedals["time"] + pedals["duration"]
+    pedal_spans = pedal_records_to_spans(pedals)
 
     onset_sec = note_array["time"]
     offset_sec_truth = note_array["time"] + note_array["duration"]
-    offset_sec_pedal_extended = compute_pedal_extended_offsets(offset_sec_truth, pedals)
+    offset_sec_pedal_extended = extend_offset_array_with_pedal_spans(
+        offset_sec_truth,
+        pedal_spans,
+        onset_times=onset_sec,
+    )
     df_notes = pd.DataFrame({
         "type": "note",
         "type_id": 1,  # 1 for note

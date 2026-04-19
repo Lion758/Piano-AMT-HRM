@@ -5,6 +5,7 @@ import importlib.util
 import os
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 
@@ -14,22 +15,77 @@ from omegaconf import OmegaConf
 
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_ROOT = BASE_DIR / "efficient-seq2seq-piano-trans"
-INFERENCE_PATH = MODEL_ROOT / "inference.py"
+REPO_ROOT = BASE_DIR.parent
 TRANSCRIPTIONS_DIR = Path("transcriptions")
+BACKEND_ENV_VAR = "TRANSCRIPTION_MODEL_BACKEND"
+DEFAULT_BACKEND_NAME = "experiment_pedals"
+
+
+@dataclass(frozen=True)
+class RuntimeBackend:
+    name: str
+    root: Path
+
+    @property
+    def inference_path(self) -> Path:
+        return self.root / "inference.py"
+
+
+BACKEND_REGISTRY = {
+    "experiment_pedals": RuntimeBackend(
+        name="experiment_pedals",
+        root=(REPO_ROOT / "Experiment" / "Efficient-Transformer-with-pedals").resolve(),
+    ),
+    "seq2seq": RuntimeBackend(
+        name="seq2seq",
+        root=(BASE_DIR / "efficient-seq2seq-piano-trans").resolve(),
+    ),
+}
 
 _RUNTIME_LOCK = threading.Lock()
 _RUNTIMES: dict[str, ModuleType] = {}
+_ACTIVE_BACKEND_NAME: str | None = None
 
 
-def _selector_key(config_path: str | None, config_name: str | None) -> str:
+def _normalize_backend_name(name: str | None) -> str:
+    return (name or DEFAULT_BACKEND_NAME).strip().lower() or DEFAULT_BACKEND_NAME
+
+
+def _get_backend(backend_name: str | None = None) -> RuntimeBackend:
+    requested_name = _normalize_backend_name(backend_name or os.getenv(BACKEND_ENV_VAR, DEFAULT_BACKEND_NAME))
+
+    try:
+        return BACKEND_REGISTRY[requested_name]
+    except KeyError as exc:
+        supported = ", ".join(sorted(BACKEND_REGISTRY))
+        raise ValueError(
+            f"Unsupported transcription backend '{requested_name}'. "
+            f"Set {BACKEND_ENV_VAR} to one of: {supported}."
+        ) from exc
+
+
+def get_active_backend_name() -> str:
+    global _ACTIVE_BACKEND_NAME
+
+    backend = _get_backend()
+    if _ACTIVE_BACKEND_NAME is None:
+        _ACTIVE_BACKEND_NAME = backend.name
+    elif _ACTIVE_BACKEND_NAME != backend.name:
+        raise RuntimeError(
+            "Transcription backend is process-sticky and has already been initialized as "
+            f"'{_ACTIVE_BACKEND_NAME}'. Restart the server to switch to '{backend.name}'."
+        )
+    return _ACTIVE_BACKEND_NAME
+
+
+def _selector_key(backend_name: str, config_path: str | None, config_name: str | None) -> str:
     if config_path:
-        return f"path:{Path(config_path).expanduser().resolve()}"
-    return f"name:{(config_name or 'main_config').strip() or 'main_config'}"
+        return f"{backend_name}:path:{Path(config_path).expanduser().resolve()}"
+    return f"{backend_name}:name:{(config_name or 'main_config').strip() or 'main_config'}"
 
 
-def _ensure_model_root_on_path() -> None:
-    model_root = str(MODEL_ROOT)
+def _ensure_model_root_on_path(backend: RuntimeBackend) -> None:
+    model_root = str(backend.root)
     if model_root not in sys.path:
         sys.path.insert(0, model_root)
 
@@ -81,22 +137,22 @@ def _patch_cpu_attention_backends() -> None:
         hrm_layers_module.flash_attn_func = None
 
 
-def _load_runtime(selector_key: str) -> ModuleType:
+def _load_runtime(backend: RuntimeBackend, selector_key: str) -> ModuleType:
     with _RUNTIME_LOCK:
         runtime = _RUNTIMES.get(selector_key)
         if runtime is not None:
             return runtime
 
-        if not INFERENCE_PATH.is_file():
-            raise FileNotFoundError(f"Inference entrypoint not found: {INFERENCE_PATH}")
+        if not backend.inference_path.is_file():
+            raise FileNotFoundError(f"Inference entrypoint not found: {backend.inference_path}")
 
         _prepare_runtime_env()
-        _ensure_model_root_on_path()
+        _ensure_model_root_on_path(backend)
 
-        module_name = f"seq2seq_inference_{hashlib.sha1(selector_key.encode('utf-8')).hexdigest()}"
-        spec = importlib.util.spec_from_file_location(module_name, INFERENCE_PATH)
+        module_name = f"{backend.name}_inference_{hashlib.sha1(selector_key.encode('utf-8')).hexdigest()}"
+        spec = importlib.util.spec_from_file_location(module_name, backend.inference_path)
         if spec is None or spec.loader is None:
-            raise ImportError(f"Unable to load inference module from {INFERENCE_PATH}")
+            raise ImportError(f"Unable to load inference module from {backend.inference_path}")
 
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
@@ -118,6 +174,7 @@ def _resolve_existing_path(path_value: str) -> Path:
 
     if not candidate.is_absolute():
         candidates.append(BASE_DIR / candidate)
+        candidates.append(REPO_ROOT / candidate)
 
     for current in candidates:
         resolved = current.resolve()
@@ -127,32 +184,33 @@ def _resolve_existing_path(path_value: str) -> Path:
     raise FileNotFoundError(f"Audio file not found: {path_value}")
 
 
-def _resolve_model_file(path_value: str) -> Path:
+def _resolve_backend_file(path_value: str, backend: RuntimeBackend) -> Path:
     candidate = Path(path_value).expanduser()
     candidates = [candidate]
 
     if not candidate.is_absolute():
-        candidates.append(MODEL_ROOT / candidate)
+        candidates.append(backend.root / candidate)
         candidates.append(BASE_DIR / candidate)
+        candidates.append(REPO_ROOT / candidate)
 
     for current in candidates:
         resolved = current.resolve()
         if resolved.is_file():
             return resolved
 
-    raise FileNotFoundError(f"Model file not found: {path_value}")
+    raise FileNotFoundError(f"Model/config file not found for backend '{backend.name}': {path_value}")
 
 
-def _resolve_checkpoint(config) -> str:
+def _resolve_checkpoint(config, backend: RuntimeBackend) -> str:
     checkpoint_path = OmegaConf.select(config, "model.checkpoint_path")
     if checkpoint_path:
-        resolved_checkpoint = _resolve_model_file(checkpoint_path)
+        resolved_checkpoint = _resolve_backend_file(checkpoint_path, backend)
         config.model.checkpoint_path = str(resolved_checkpoint)
         return str(resolved_checkpoint)
 
     resume_checkpoint = OmegaConf.select(config, "training.resume_ckpt_path")
     if resume_checkpoint:
-        resolved_checkpoint = _resolve_model_file(resume_checkpoint)
+        resolved_checkpoint = _resolve_backend_file(resume_checkpoint, backend)
         config.model.checkpoint_path = str(resolved_checkpoint)
         return str(resolved_checkpoint)
 
@@ -196,19 +254,22 @@ def run_transcription(
     if not audio_path or not audio_path.strip():
         raise ValueError("audio_path is required.")
 
+    backend_name = get_active_backend_name()
+    backend = _get_backend(backend_name)
+
     resolved_config_path = None
     if config_path:
-        resolved_config_path = str(_resolve_model_file(config_path))
-
-    selector = _selector_key(resolved_config_path, config_name)
-    runtime = _load_runtime(selector)
+        resolved_config_path = str(_resolve_backend_file(config_path, backend))
 
     effective_config_name = (config_name or "main_config").strip() or "main_config"
+    selector = _selector_key(backend_name, resolved_config_path, effective_config_name)
+    runtime = _load_runtime(backend, selector)
+
     resolved_audio_path = _resolve_existing_path(audio_path)
     resolved_output_path, relative_output_path = _resolve_output_path(resolved_audio_path, midi_output_path)
 
     config = runtime.load_config(resolved_config_path, effective_config_name, [])
-    _resolve_checkpoint(config)
+    _resolve_checkpoint(config, backend)
     OmegaConf.update(config, "audio_path", str(resolved_audio_path), force_add=True)
     OmegaConf.update(config, "midi_path", str(resolved_output_path), force_add=True)
 
@@ -224,4 +285,5 @@ def run_transcription(
         "midi_url": f"/transcriptions/{relative_output_path}",
         "config_path": resolved_config_path,
         "config_name": effective_config_name,
+        "model_backend": backend_name,
     }

@@ -15,13 +15,19 @@ from sklearn import metrics
 from mir_eval.util import midi_to_hz
 from mir_eval.multipitch import evaluate as evaluate_frames
 from mir_eval.transcription import precision_recall_f1_overlap as evaluate_notes
+from mir_eval.transcription_velocity import precision_recall_f1_overlap as evaluate_notes_with_velocity
 
 import utils.pianoroll_parser as pianoroll_parser
 
 from data.notes_parser import frame_tokens_to_interval_and_pitch
+from data.pedal_extension_utils import (
+    PEDAL_MIN_DURATION,
+    infer_piece_end_time as shared_infer_piece_end_time,
+    pedal_events_to_spans as shared_pedal_events_to_spans,
+    extend_notes_with_pedal_events,
+)
 
 PEDAL_DUMMY_MIDI = 21
-PEDAL_MIN_DURATION = 1e-6
 PEDAL_EVENT_TOLERANCE = 0.05
 
 def pianoroll_frame_metrics(name, output_pianoroll_frame, target_pianoroll_frame):
@@ -405,58 +411,18 @@ def cal_multihot_notes_metrics(name, decoder_outputs_note, decoder_targets_note)
 
 
 def infer_piece_end_time(note_lists=(), pedal_event_lists=(), minimum_end_time=0.05):
-    piece_end_time = float(minimum_end_time)
-
-    for note_list in note_lists:
-        for note in note_list:
-            piece_end_time = max(piece_end_time, float(note.get("offset", note.get("onset", 0.0))))
-
-    for pedal_event_list in pedal_event_lists:
-        for event in pedal_event_list:
-            piece_end_time = max(piece_end_time, float(event.get("time", 0.0)))
-
-    return piece_end_time
+    return shared_infer_piece_end_time(
+        note_lists=note_lists,
+        pedal_event_lists=pedal_event_lists,
+        minimum_end_time=minimum_end_time,
+    )
 
 
 def pedal_events_to_spans(pedal_event_list, piece_end_time):
-    sorted_events = sorted(
-        (
-            {
-                "time": float(event["time"]),
-                "type": event["type"],
-            }
-            for event in pedal_event_list
-            if event.get("type") in {"PedalOn", "PedalOff"} and "time" in event
-        ),
-        key=lambda event: (event["time"], 0 if event["type"] == "PedalOff" else 1),
+    return shared_pedal_events_to_spans(
+        pedal_event_list,
+        piece_end_time=piece_end_time,
     )
-
-    pedal_spans = []
-    pedal_on_time = None
-    for event in sorted_events:
-        if event["type"] == "PedalOn":
-            if pedal_on_time is None:
-                pedal_on_time = event["time"]
-            continue
-
-        if pedal_on_time is None:
-            continue
-
-        pedal_off_time = max(event["time"], pedal_on_time + PEDAL_MIN_DURATION)
-        pedal_spans.append({
-            "onset": pedal_on_time,
-            "offset": pedal_off_time,
-        })
-        pedal_on_time = None
-
-    if pedal_on_time is not None:
-        pedal_off_time = max(float(piece_end_time), pedal_on_time + PEDAL_MIN_DURATION)
-        pedal_spans.append({
-            "onset": pedal_on_time,
-            "offset": pedal_off_time,
-        })
-
-    return pedal_spans
 
 
 def pedal_spans_to_event_list(pedal_spans):
@@ -482,6 +448,12 @@ def _pedal_spans_to_intervals(pedal_spans):
         dtype=np.float32,
     )
     intervals[:, 1] = np.maximum(intervals[:, 1], intervals[:, 0] + PEDAL_MIN_DURATION)
+    return intervals
+
+
+def _ensure_minimum_note_duration(intervals, minimum_duration=0.05):
+    if len(intervals) > 0:
+        intervals[:, 1] = np.maximum(intervals[:, 1], intervals[:, 0] + minimum_duration)
     return intervals
 
 
@@ -595,6 +567,86 @@ def cal_pedal_metrics(output_pedal_event_list, target_pedal_event_list, piece_en
         "pedal_off_f1": pedal_off_f1,
     }
     return metric_dict, output_pedal_spans, target_pedal_spans
+
+
+def build_pedal_extended_note_metric_inputs(output_note_data_list, output_pedal_event_list, tsv_df, piece_end_time):
+    tsv_notes = tsv_df[tsv_df["type"] == "note"] if "type" in tsv_df.columns else tsv_df
+    output_notes_ext = extend_notes_with_pedal_events(
+        output_note_data_list,
+        output_pedal_event_list,
+        piece_end_time=piece_end_time,
+    )
+
+    gt_onsets = tsv_notes["onset_sec"].to_numpy(dtype=np.float32)
+    gt_offsets = tsv_notes["offset_sec"].to_numpy(dtype=np.float32)
+    gt_pitches_raw = tsv_notes["pitch"].to_numpy(dtype=np.float32)
+    gt_velocities = tsv_notes["velocity"].to_numpy(dtype=np.float32)
+
+    gt_interval_ext = (
+        np.stack([gt_onsets, gt_offsets], axis=1).astype(np.float32, copy=False)
+        if len(gt_onsets)
+        else np.zeros((0, 2), dtype=np.float32)
+    )
+    out_interval_ext = (
+        np.array([(note["onset"], note["offset"]) for note in output_notes_ext], dtype=np.float32)
+        if len(output_notes_ext)
+        else np.zeros((0, 2), dtype=np.float32)
+    )
+
+    gt_interval_ext = _ensure_minimum_note_duration(gt_interval_ext)
+    out_interval_ext = _ensure_minimum_note_duration(out_interval_ext)
+
+    return {
+        "gt_interval_ext": gt_interval_ext,
+        "gt_pitches_hz": midi_to_hz(gt_pitches_raw) if len(gt_pitches_raw) else np.array([], dtype=np.float32),
+        "gt_velocities": gt_velocities,
+        "out_interval_ext": out_interval_ext,
+        "out_pitches_ext": midi_to_hz(np.array([note["pitch"] for note in output_notes_ext], dtype=np.float32))
+        if len(output_notes_ext)
+        else np.array([], dtype=np.float32),
+        "out_vel_ext": np.array([note["velocity"] for note in output_notes_ext], dtype=np.float32)
+        if len(output_notes_ext)
+        else np.array([], dtype=np.float32),
+    }
+
+
+def cal_pedal_extended_note_metrics(output_note_data_list, output_pedal_event_list, tsv_df, piece_end_time):
+    metric_inputs = build_pedal_extended_note_metric_inputs(
+        output_note_data_list,
+        output_pedal_event_list,
+        tsv_df,
+        piece_end_time,
+    )
+
+    if len(metric_inputs["gt_interval_ext"]) == 0 or len(metric_inputs["out_interval_ext"]) == 0:
+        note_precision = note_recall = note_f1 = 0.0
+        note_vel_precision = note_vel_recall = note_vel_f1 = 0.0
+    else:
+        note_precision, note_recall, note_f1, _ = evaluate_notes(
+            metric_inputs["gt_interval_ext"],
+            metric_inputs["gt_pitches_hz"],
+            metric_inputs["out_interval_ext"],
+            metric_inputs["out_pitches_ext"],
+        )
+        note_vel_precision, note_vel_recall, note_vel_f1, _ = evaluate_notes_with_velocity(
+            metric_inputs["gt_interval_ext"],
+            metric_inputs["gt_pitches_hz"],
+            metric_inputs["gt_velocities"],
+            metric_inputs["out_interval_ext"],
+            metric_inputs["out_pitches_ext"],
+            metric_inputs["out_vel_ext"],
+            velocity_tolerance=0.1,
+        )
+
+    metric_dict = {
+        "note+offset_precision_pedal_extended": note_precision,
+        "note+offset_recall_pedal_extended": note_recall,
+        "note+offset_f1_pedal_extended": note_f1,
+        "note+offset+velocity_precision_pedal_extended": note_vel_precision,
+        "note+offset+velocity_recall_pedal_extended": note_vel_recall,
+        "note+offset+velocity_f1_pedal_extended": note_vel_f1,
+    }
+    return metric_dict, metric_inputs
 
 
 def get_intervals_notes(midi_path):

@@ -702,36 +702,16 @@ class MT3Trainer(pl.LightningModule):
             # offsets loaded from the TSV. Makes note+offset(+velocity) F1
             # directly comparable to the baseline's pedal-extended metric.
             if self.config.get("evaluation", {}).get("report_pedal_extended", False):
-                from data.symbolic_music_tokenizer import extend_offsets_with_pedals
-                output_notes_ext = extend_offsets_with_pedals(
-                    output_note_data_list, output_pedal_event_list, next_onset_cap=True,
-                )
                 tsv_path = os.path.splitext(target_midi_path)[0] + ".midi-notes.tsv"
                 tsv_df = pd.read_csv(tsv_path, sep="\t")
-                tsv_notes = tsv_df[tsv_df["type"] == "note"] if "type" in tsv_df.columns else tsv_df
-                gt_onsets = tsv_notes["onset_sec"].to_numpy()
-                gt_offsets = tsv_notes["offset_sec"].to_numpy()
-                gt_pitches_raw = tsv_notes["pitch"].to_numpy()
-                gt_velocities = tsv_notes["velocity"].to_numpy()
-                gt_interval_ext = np.stack([gt_onsets, gt_offsets], axis=1) if len(gt_onsets) else np.zeros((0, 2))
-                gt_pitches_hz = mir_eval.util.midi_to_hz(gt_pitches_raw) if len(gt_pitches_raw) else np.array([])
-                out_interval_ext = np.array([(n["onset"], n["offset"]) for n in output_notes_ext]) if len(output_notes_ext) else np.zeros((0, 2))
-                out_pitches_ext = mir_eval.util.midi_to_hz(np.array([n["pitch"] for n in output_notes_ext])) if len(output_notes_ext) else np.array([])
-                out_vel_ext = np.array([n["velocity"] for n in output_notes_ext]) if len(output_notes_ext) else np.array([])
-
-                precision, recall, f1, _ = evaluate_notes(gt_interval_ext, gt_pitches_hz, out_interval_ext, out_pitches_ext)
-                metric_dict["note+offset_f1_pedal_extended"].append(f1)
-                metric_dict["note+offset_precision_pedal_extended"].append(precision)
-                metric_dict["note+offset_recall_pedal_extended"].append(recall)
-
-                precision, recall, f1, _ = evaluate_notes_with_velocity(
-                    gt_interval_ext, gt_pitches_hz, gt_velocities,
-                    out_interval_ext, out_pitches_ext, out_vel_ext,
-                    velocity_tolerance=0.1,
+                pedal_extended_metrics, _ = transcription_metrics.cal_pedal_extended_note_metrics(
+                    output_note_data_list,
+                    output_pedal_event_list,
+                    tsv_df,
+                    piece_end_time=piece_end_time,
                 )
-                metric_dict["note+offset+velocity_f1_pedal_extended"].append(f1)
-                metric_dict["note+offset+velocity_precision_pedal_extended"].append(precision)
-                metric_dict["note+offset+velocity_recall_pedal_extended"].append(recall)
+                for metric_name, metric_value in pedal_extended_metrics.items():
+                    metric_dict[metric_name].append(metric_value)
 
             target_len = max(len(concat_target_tokens), 1) # Avoid division by zero.
             
@@ -761,7 +741,7 @@ class MT3Trainer(pl.LightningModule):
         avg_value = df.select_dtypes(include="number").mean()
         df.loc["Average"] = avg_value
         df = pd.concat([df.loc[["Average"]], df.drop("Average")])
-        df.to_csv(test_output_dir + "/test_metrics_summary.csv", index=False)
+        df.to_csv(test_output_dir + "/!test_metrics_summary.csv", index=False)
         
         # Log Metrics.
         if self.config.training.mode == "train":
@@ -891,7 +871,7 @@ def my_main(config: OmegaConf):
 
     process_note = str(config.training.notes).strip() if config.training.notes is not None else ""
     process_name = experiment_name if not process_note else f"{experiment_name}_{process_note}"
-    set_training_process_name("group 5 will end 4/17 ~ 8:00")
+    set_training_process_name("group 5 will end 4/19 ~ 08:00")
     ####################################################
     # Create model.
     model = MT3Trainer(config)

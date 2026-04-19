@@ -1,14 +1,24 @@
-import torch
-import pytorch_lightning as pl
-import torch
 import inspect
 import textwrap
-# import pynvml
-from scalene import scalene_profiler
-from pytorch_memlab import LineProfiler
-from pytorch_memlab import MemReporter
+
+import pytorch_lightning as pl
+import torch
+
+try:  # pragma: no cover - optional dependency
+    from scalene import scalene_profiler
+except ImportError:  # pragma: no cover - optional dependency
+    scalene_profiler = None
+
+try:  # pragma: no cover - optional dependency
+    from pytorch_memlab import LineProfiler
+    from pytorch_memlab import MemReporter
+except ImportError:  # pragma: no cover - optional dependency
+    LineProfiler = None
+    MemReporter = None
 
 def log_gpu_memory_usage(trainer: pl.LightningModule):
+        if not torch.cuda.is_available():
+                return
         # log memory usage
         trainer.log("device_memory_usage/%s_max"%str(trainer.device), torch.cuda.max_memory_allocated()/(1024*1024))
         trainer.log("device_memory_usage/%s"%str(trainer.device), torch.cuda.memory_allocated()/(1024*1024))
@@ -28,6 +38,8 @@ def log_gpu_memory_usage(trainer: pl.LightningModule):
 
 def profile_cuda_memory(func):
         def wrapper(*args, **kwargs):
+                if LineProfiler is None:
+                        return func(*args, **kwargs)
                 
                 profiler = LineProfiler()
                 profiler.add_function(func)

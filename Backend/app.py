@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from separation_service import run_spleeter
-from transcription_service import run_transcription
+from transcription_service import get_active_backend_name, run_transcription
 
 app = FastAPI()
 
@@ -139,12 +139,18 @@ def _build_missing_dependency_detail(exc: ModuleNotFoundError) -> str:
 
 @app.get("/")
 async def root():
-    return {"message": "FastAPI backend is running"}
+    return {
+        "message": "FastAPI backend is running",
+        "transcription_backend": get_active_backend_name(),
+    }
 
 
 @app.get("/ping")
 async def ping():
-    return {"message": "pong"}
+    return {
+        "message": "pong",
+        "transcription_backend": get_active_backend_name(),
+    }
 
 
 @app.post("/separate")

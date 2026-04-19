@@ -8,6 +8,12 @@ import pretty_midi
 import symusic
 from collections import defaultdict
 from utils.pianoroll_parser import get_notes_with_pedal
+from data.pedal_extension_utils import (
+    pedal_events_to_spans as shared_pedal_events_to_spans,
+    pedal_records_to_spans,
+    extend_notes_with_pedal_events,
+    extend_offset_array_with_pedal_spans,
+)
 
 
 
@@ -346,13 +352,6 @@ class SymbolicMusicTokenizer:
         else:
             assert isinstance(midi, symusic.Score), "midi should be a symusic.Score object or a path to a MIDI file."
             
-        def compute_pedal_extended_offsets(raw_offsets, pedals):
-            extended_offsets = np.copy(raw_offsets)
-            for pedal_start, pedal_end in zip(pedals["time"], pedals["end"]):
-                mask = (raw_offsets >= pedal_start) & (raw_offsets <= pedal_end)
-                extended_offsets[mask] = pedal_end
-            return extended_offsets
-
         # iterate through tracks, save track name, is_drum, program, notes to dataframes, and concat dataframes together.
         df_list = []
 
@@ -364,9 +363,14 @@ class SymbolicMusicTokenizer:
             notes = track.notes.numpy()
             pedals = track.pedals.numpy()
             pedals["end"] = pedals["time"] + pedals["duration"]
+            pedal_spans = pedal_records_to_spans(pedals)
             onset_sec = notes["time"]
             offset_sec_truth = notes["time"] + notes["duration"]
-            offset_sec_pedal_extended = compute_pedal_extended_offsets(offset_sec_truth, pedals)
+            offset_sec_pedal_extended = extend_offset_array_with_pedal_spans(
+                offset_sec_truth,
+                pedal_spans,
+                onset_times=onset_sec,
+            )
 
             df = pd.DataFrame({
                 "type": "note",
@@ -800,54 +804,51 @@ class SymbolicMusicTokenizer:
         return True
         
         
-def pedal_events_to_spans(pedal_event_list):
-    spans = []
-    open_time = None
-    for ev in sorted(pedal_event_list, key=lambda e: e["time"]):
-        if ev["type"] == "PedalOn":
-            if open_time is None:
-                open_time = ev["time"]
-        elif ev["type"] == "PedalOff":
-            if open_time is not None:
-                spans.append((open_time, ev["time"]))
-                open_time = None
-    return spans
+def pedal_events_to_spans(pedal_event_list, piece_end_time=None):
+    return shared_pedal_events_to_spans(
+        pedal_event_list,
+        piece_end_time=piece_end_time,
+    )
 
 
-def extend_offsets_with_pedals(notes, pedal_event_list, next_onset_cap: bool = True):
-    """Return a new list of notes whose offsets are extended by sustain pedal spans.
-
-    Mirrors the canonical MAESTRO preprocessing: if a note's offset falls inside
-    a pedal span, extend it to the pedal release, capped at the next onset of
-    the same pitch (when next_onset_cap=True).
-    """
-    if len(notes) == 0:
-        return []
-    spans = pedal_events_to_spans(pedal_event_list)
+def _cap_note_offsets_to_next_onset(notes):
     notes_sorted = sorted(notes, key=lambda n: (n["pitch"], n["onset"]))
-    next_onset_by_pitch = {}
-    if next_onset_cap:
-        for i, n in enumerate(notes_sorted):
-            if i + 1 < len(notes_sorted) and notes_sorted[i + 1]["pitch"] == n["pitch"]:
-                next_onset_by_pitch[id(n)] = notes_sorted[i + 1]["onset"]
-    out = []
-    for n in notes:
-        offset = n["offset"]
-        for ps, pe in spans:
-            if ps <= offset <= pe:
-                offset = pe
-                break
-        if next_onset_cap:
-            cap = next_onset_by_pitch.get(id(n))
-            if cap is not None and offset > cap:
-                offset = cap
-        if offset < n["onset"]:
-            offset = n["onset"]
-        new_note = dict(n)
-        new_note["offset"] = offset
-        new_note["duration"] = offset - n["onset"]
-        out.append(new_note)
-    return out
+    next_onset_by_note = {}
+    for idx, note in enumerate(notes_sorted[:-1]):
+        next_note = notes_sorted[idx + 1]
+        if next_note["pitch"] == note["pitch"]:
+            next_onset_by_note[id(note)] = next_note["onset"]
+
+    capped_notes = []
+    for note in notes:
+        capped_offset = float(note["offset"])
+        next_onset = next_onset_by_note.get(id(note))
+        if next_onset is not None and capped_offset > next_onset:
+            capped_offset = float(next_onset)
+
+        new_note = dict(note)
+        new_note["offset"] = max(capped_offset, float(note["onset"]))
+        new_note["duration"] = new_note["offset"] - float(note["onset"])
+        capped_notes.append(new_note)
+
+    return capped_notes
+
+
+def extend_offsets_with_pedals(notes, pedal_event_list, next_onset_cap: bool = False, piece_end_time=None):
+    """Return notes extended with pedal semantics that match cached TSV `offset_sec`.
+
+    When `next_onset_cap` is requested, a same-pitch cap is applied after the
+    TSV-aligned extension pass for backwards compatibility with older callers.
+    """
+    extended_notes = extend_notes_with_pedal_events(
+        notes,
+        pedal_event_list,
+        piece_end_time=piece_end_time,
+    )
+    if not next_onset_cap:
+        return extended_notes
+
+    return _cap_note_offsets_to_next_onset(extended_notes)
 
 
 if __name__ == "__main__":
