@@ -441,13 +441,19 @@ def pedal_spans_to_event_list(pedal_spans):
 
 def _pedal_spans_to_intervals(pedal_spans):
     if len(pedal_spans) == 0:
-        return np.empty((0, 2), dtype=np.float32)
+        return np.empty((0, 2), dtype=np.float64)
 
     intervals = np.array(
         [[float(span["onset"]), float(span["offset"])] for span in pedal_spans],
-        dtype=np.float32,
+        dtype=np.float64,
     )
     intervals[:, 1] = np.maximum(intervals[:, 1], intervals[:, 0] + PEDAL_MIN_DURATION)
+    non_positive_duration_mask = intervals[:, 1] <= intervals[:, 0]
+    if np.any(non_positive_duration_mask):
+        intervals[non_positive_duration_mask, 1] = np.nextafter(
+            intervals[non_positive_duration_mask, 0],
+            np.inf,
+        )
     return intervals
 
 

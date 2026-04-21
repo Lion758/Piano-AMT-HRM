@@ -25,16 +25,26 @@ export default function PianoPage({ midiUrl }) {
   const [uploadStatus, setUploadStatus] = useState('Upload a song to transcribe it and start learning.');
 
   // Load MIDI
-  const { notes, duration, tempo, isLoading, error } = useMidi(activeMidiUrl);
+  const {
+    notes,
+    duration,
+    tempo,
+    isLoading,
+    error,
+    sustainEvents,
+    sustainSpans,
+    playbackDuration,
+  } = useMidi(activeMidiUrl);
 
   // Player
-  const player = usePianoPlayer(notes, duration, tempo);
+  const player = usePianoPlayer(notes, duration, tempo, sustainSpans, playbackDuration);
 
   // Recorder
   const recorder = useRecorder();
   const hasMidi = Boolean(activeMidiUrl);
   const hasNotes = notes.length > 0 && duration > 0;
   const controlsReady = player.isLoaded && hasNotes;
+  const timelineDuration = player.duration || playbackDuration || duration;
 
   // Speed-synced visual time
   const visualTime = player.currentTime;
@@ -123,7 +133,7 @@ export default function PianoPage({ midiUrl }) {
           break;
         case 'ArrowRight':
           e.preventDefault();
-          player.seek(Math.min(player.duration, player.currentTime + 5));
+          player.seek(Math.min(timelineDuration, player.currentTime + 5));
           break;
         case 'Escape':
           setMenuOpen(false);
@@ -133,7 +143,7 @@ export default function PianoPage({ midiUrl }) {
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [player]);
+  }, [player, timelineDuration]);
 
   const handleAudioSelection = useCallback((event) => {
     const file = event.target.files?.[0] || null;
@@ -203,7 +213,7 @@ export default function PianoPage({ midiUrl }) {
         <TopControls
           isPlaying={player.isPlaying}
           currentTime={visualTime}
-          duration={player.duration || duration}
+          duration={timelineDuration}
           speed={player.speed}
           volume={player.volume}
           isLoaded={controlsReady}
@@ -311,7 +321,7 @@ export default function PianoPage({ midiUrl }) {
             currentTime={visualTime}
             containerWidth={dimensions.width}
             containerHeight={dimensions.height}
-            isPlaying={player.isPlaying}
+            sustainEvents={sustainEvents}
           />
         )}
       </div>
@@ -326,7 +336,7 @@ export default function PianoPage({ midiUrl }) {
       <div className="pp-progress-bar">
         <div
           className="pp-progress-fill"
-          style={{ width: duration ? `${(visualTime / duration) * 100}%` : '0%' }}
+          style={{ width: timelineDuration ? `${Math.min((visualTime / timelineDuration) * 100, 100)}%` : '0%' }}
         />
       </div>
     </div>

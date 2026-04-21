@@ -1,11 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as Tone from 'tone';
+import { extendNotesWithSustain } from '../utils/pedalHelpers.js';
 
 const PLAYBACK_LOOKAHEAD_SECONDS = 0.02;
 const INITIAL_VOLUME = 0.8;
 
-export function usePianoPlayer(notes, duration, _baseTempo = 120) {
+export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans = [], playbackDuration = duration) {
   void _baseTempo;
+
+  const resolvedDuration = playbackDuration || duration || 0;
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -18,7 +21,7 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
   const noteEventsRef = useRef([]);
   const animFrameRef = useRef(null);
   const currentTimeRef = useRef(0);
-  const durationRef = useRef(duration || 0);
+  const durationRef = useRef(resolvedDuration);
   const speedRef = useRef(1);
   const scheduledSpeedRef = useRef(1);
   const isPlayingRef = useRef(false);
@@ -254,11 +257,13 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
   }, [clearPlaybackSession]);
 
   useEffect(() => {
-    durationRef.current = duration || 0;
-  }, [duration]);
+    durationRef.current = resolvedDuration;
+  }, [resolvedDuration]);
 
   useEffect(() => {
-    noteEventsRef.current = notes.map((note) => ({
+    const playbackNotes = extendNotesWithSustain(notes, sustainSpans);
+
+    noteEventsRef.current = playbackNotes.map((note) => ({
       time: note.time,
       note: note.name || Tone.Frequency(note.midi, 'midi').toNote(),
       duration: note.duration,
@@ -268,7 +273,7 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
     clearPlaybackSession();
     syncCurrentTime(0);
     setPlayingState(false);
-  }, [notes, clearPlaybackSession, setPlayingState, syncCurrentTime]);
+  }, [notes, sustainSpans, clearPlaybackSession, setPlayingState, syncCurrentTime]);
 
   const play = useCallback(async () => {
     if (!noteEventsRef.current.length) {
@@ -344,7 +349,7 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120) {
     setSpeed,
     setVolume,
     currentTime,
-    duration,
+    duration: resolvedDuration,
     isPlaying,
     speed,
     volume,

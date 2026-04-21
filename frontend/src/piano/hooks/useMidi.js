@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Midi } from '@tonejs/midi';
 import { assignHands } from '../utils/noteHelpers.js';
+import { extractSustainEvents, extendNotesWithSustain } from '../utils/pedalHelpers.js';
 import { resolveApiUrl } from '../../lib/api.js';
 
 const MIDI_FETCH_RETRIES = 8;
@@ -13,6 +14,9 @@ export function useMidi(url = null) {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [midiData, setMidiData] = useState(null);
+  const [sustainEvents, setSustainEvents] = useState([]);
+  const [sustainSpans, setSustainSpans] = useState([]);
+  const [playbackDuration, setPlaybackDuration] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -23,6 +27,9 @@ export function useMidi(url = null) {
       setDuration(0);
       setTempo(120);
       setMidiData(null);
+      setSustainEvents([]);
+      setSustainSpans([]);
+      setPlaybackDuration(0);
       setError(null);
       setIsLoading(false);
       return () => { cancelled = true; };
@@ -73,15 +80,29 @@ export function useMidi(url = null) {
         const tracksWithNotes = midi.tracks.filter(t => t.notes.length > 0);
         const allNotes = assignHands(tracksWithNotes);
 
-        // Calculate total duration
-        const maxEnd = allNotes.reduce(
+        // Keep visual note timing unchanged, and compute pedal-aware playback timing separately.
+        const rawNoteEnd = allNotes.reduce(
           (max, n) => Math.max(max, n.time + n.duration), 0
         );
+        const basePieceEndTime = Math.max(rawNoteEnd, Number(midi.duration) || 0);
+        const {
+          sustainEvents: nextSustainEvents,
+          sustainSpans: nextSustainSpans,
+          pieceEndTime,
+        } = extractSustainEvents(midi, basePieceEndTime);
+        const playbackNotes = extendNotesWithSustain(allNotes, nextSustainSpans);
+        const extendedNoteEnd = playbackNotes.reduce(
+          (max, n) => Math.max(max, n.time + n.duration), 0
+        );
+        const nextPlaybackDuration = Math.max(rawNoteEnd, pieceEndTime, extendedNoteEnd);
 
         setMidiData(midi);
         setNotes(allNotes);
-        setDuration(maxEnd);
+        setDuration(rawNoteEnd);
         setTempo(tempoVal);
+        setSustainEvents(nextSustainEvents);
+        setSustainSpans(nextSustainSpans);
+        setPlaybackDuration(nextPlaybackDuration);
       } catch (err) {
         if (!cancelled) setError(err.message);
       } finally {
@@ -93,5 +114,15 @@ export function useMidi(url = null) {
     return () => { cancelled = true; };
   }, [url]);
 
-  return { notes, duration, tempo, isLoading, error, midiData };
+  return {
+    notes,
+    duration,
+    tempo,
+    isLoading,
+    error,
+    midiData,
+    sustainEvents,
+    sustainSpans,
+    playbackDuration,
+  };
 }

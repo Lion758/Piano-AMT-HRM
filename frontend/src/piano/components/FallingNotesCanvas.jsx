@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback } from 'react';
 import { COLORS, DEFAULT_PPS, TOTAL_WHITE_KEYS } from '../utils/constants.js';
 import { getNotePosition, midiToShortName, findFirstNoteIndex, isBlackKey } from '../utils/noteHelpers.js';
+import { isSustainActiveAtTime } from '../utils/pedalHelpers.js';
 
 function drawRoundedRect(ctx, x, y, w, h, r = 4) {
   const rr = Math.min(r, w / 2, h / 2);
@@ -98,21 +99,7 @@ export default function FallingNotesCanvas({
       ctx.fillRect(pos.x * w, 0, pos.width * w, h);
     }
 
-    let sustainActive = false;
-
-    if (sustainEvents.length > 0) {
-      let lastSustain = null;
-      for (const ev of sustainEvents) {
-        if (ev.time <= time) lastSustain = ev;
-        else break;
-      }
-      sustainActive = lastSustain ? lastSustain.value >= 64 : false;
-    } else {
-      const simultaneousActive = notes.filter(
-        (n) => time >= n.time && time < n.time + n.duration
-      );
-      sustainActive = simultaneousActive.length >= 3;
-    }
+    const sustainActive = isSustainActiveAtTime(time, sustainEvents);
 
     if (sustainActive) {
       const bandH = 20;
