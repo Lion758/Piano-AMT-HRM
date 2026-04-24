@@ -47,6 +47,7 @@ class JSONSummarization:
             'metadata': self._create_metadata(),
             'performance_overview': self._create_performance_overview(),
             'error_analysis_summary': self._create_error_summary(),
+            'pedaling': self._create_pedaling_section(),
             'practice_recommendations': self._create_practice_recommendations(),
             'musical_analysis': self._create_musical_analysis(),
             'progress_metrics': self._create_progress_metrics(),
@@ -149,6 +150,10 @@ class JSONSummarization:
                 'summary': self._summarize_articulation_errors(error_metrics.get('articulation', {})),
                 'priority': 'medium'
             },
+            'pedaling': {
+                'summary': self._summarize_pedaling(error_metrics.get('pedaling', {})),
+                'priority': self._determine_pedaling_priority(error_metrics.get('pedaling', {}))
+            },
             'error_distribution': self._calculate_error_distribution(error_categories),
             'categorized_errors': self._build_categorized_errors(
                 error_metrics,
@@ -191,6 +196,27 @@ class JSONSummarization:
             'general_practice_tips': categorized['general'],
             'practice_schedule': self._create_practice_schedule(categorized),
             'specific_exercises': self._suggest_exercises()
+        }
+
+    def _create_pedaling_section(self) -> Dict[str, Any]:
+        """Expose pedal-specific results in a dedicated summary section."""
+        pedaling_metrics = self.error_analysis.get('metrics', {}).get('pedaling', {})
+        pedaling_categories = self.error_analysis.get('error_categories', {}).get('pedaling', {})
+        pedaling_recommendations = self.error_analysis.get('pedaling_recommendations', [])
+
+        if not isinstance(pedaling_recommendations, list) or not pedaling_recommendations:
+            pedaling_recommendations = [
+                rec for rec in self.error_analysis.get('practice_recommendations', [])
+                if 'pedal' in str(rec).lower()
+            ]
+
+        return {
+            'available': bool(pedaling_metrics.get('pedal_analysis_available', False)),
+            'mode': pedaling_metrics.get('mode', self.error_analysis.get('analysis_mode', 'reference_comparison')),
+            'summary': self._summarize_pedaling(pedaling_metrics),
+            'metrics': pedaling_metrics,
+            'error_categories': pedaling_categories,
+            'practice_suggestions': self._dedupe_text_list(pedaling_recommendations),
         }
     
     def _create_musical_analysis(self) -> Dict[str, Any]:
@@ -319,6 +345,17 @@ class JSONSummarization:
             characteristics.append("Crisp, articulated playing")
         elif legato > 50:
             characteristics.append("Smooth, connected playing")
+
+        pedaling = error_metrics.get('pedaling', {})
+        if pedaling.get('pedal_analysis_available', False):
+            if str(pedaling.get('mode', 'reference_comparison')) == 'solo':
+                stability = str(pedaling.get('stability', '')).lower()
+                if stability == 'stable':
+                    characteristics.append("Consistent supportive pedaling")
+                elif stability == 'excessive':
+                    characteristics.append("Heavy sustained pedal wash")
+            elif float(pedaling.get('mean_overlap_ratio', 0.0) or 0.0) >= 0.8:
+                characteristics.append("Pedaling closely follows the reference plan")
         
         return characteristics if characteristics else ["Balanced musical approach"]
     
@@ -454,6 +491,59 @@ class JSONSummarization:
             consistency_text = "variable"
 
         return f"{consistency_text} articulation with {staccato:.1f}% staccato and {legato:.1f}% legato notes."
+
+    def _summarize_pedaling(self, pedaling_data: Dict) -> str:
+        """Create summary text for pedaling results."""
+        if not pedaling_data or not pedaling_data.get('pedal_analysis_available', False):
+            return "No pedal analysis was available from the current MIDI data."
+
+        mode = str(pedaling_data.get('mode', 'reference_comparison'))
+        if mode == 'solo':
+            segment_count = int(pedaling_data.get('pedal_segment_count', 0))
+            avg_hold = float(pedaling_data.get('average_hold_duration', 0.0) or 0.0)
+            stability = str(pedaling_data.get('stability', 'unknown')).replace('_', ' ')
+            phrase_ratio = pedaling_data.get('phrase_end_release_ratio', None)
+            phrase_text = ""
+            if isinstance(phrase_ratio, (int, float)):
+                phrase_text = f" Releases land near phrase endings {float(phrase_ratio) * 100:.0f}% of the time."
+            return (
+                f"The performance uses {segment_count} pedal spans with an average hold of {avg_hold:.2f}s, "
+                f"and the overall pedaling profile feels {stability}.{phrase_text}"
+            ).strip()
+
+        missed = int(pedaling_data.get('missed_pedals', 0))
+        extra = int(pedaling_data.get('extra_pedals', 0))
+        overlap = float(pedaling_data.get('mean_overlap_ratio', 0.0) or 0.0)
+        release_issues = int(pedaling_data.get('late_release_count', 0)) + int(pedaling_data.get('early_release_count', 0))
+        return (
+            f"Pedal alignment averages {overlap:.2f} overlap with the reference, with "
+            f"{missed} missed pedals, {extra} extra pedals, and {release_issues} notable release-timing issues."
+        )
+
+    def _determine_pedaling_priority(self, pedaling_data: Dict) -> str:
+        """Assign a priority level to pedaling feedback."""
+        if not pedaling_data or not pedaling_data.get('pedal_analysis_available', False):
+            return 'low'
+
+        if str(pedaling_data.get('mode', 'reference_comparison')) == 'solo':
+            if bool(pedaling_data.get('excessive_pedaling', False)):
+                return 'medium'
+            phrase_ratio = pedaling_data.get('phrase_end_release_ratio', None)
+            if isinstance(phrase_ratio, (int, float)) and phrase_ratio < 0.4:
+                return 'medium'
+            return 'low'
+
+        issue_count = (
+            int(pedaling_data.get('missed_pedals', 0))
+            + int(pedaling_data.get('extra_pedals', 0))
+            + int(pedaling_data.get('harmonic_blur_count', 0))
+            + int(pedaling_data.get('phrase_boundary_clearance_issues', 0))
+        )
+        if issue_count >= 4:
+            return 'high'
+        if issue_count >= 1:
+            return 'medium'
+        return 'low'
     
     def _calculate_error_distribution(self, error_categories: Dict) -> Dict[str, float]:
         """
@@ -467,8 +557,19 @@ class JSONSummarization:
         error_keys = {
             'note_accuracy': ['missing', 'extra', 'wrong'],
             'timing': ['rushing', 'dragging'],
-            # Add more categories here later if you implement them as error lists
-            # e.g. 'pedaling': ['incorrect', 'missing', ...]
+            'pedaling': [
+                'missed',
+                'extra',
+                'split',
+                'merged',
+                'late_onset',
+                'early_onset',
+                'late_release',
+                'early_release',
+                'harmonic_blur',
+                'phrase_boundary_clearance',
+                'early_release_while_notes_ring',
+            ],
         }
 
         counts = {}
@@ -507,6 +608,7 @@ class JSONSummarization:
         """Expose explicit error categories and counts for downstream consumers."""
         note_acc = error_metrics.get('note_accuracy', {}) if isinstance(error_metrics, dict) else {}
         timing = error_metrics.get('timing_errors', {}) if isinstance(error_metrics, dict) else {}
+        pedaling = error_metrics.get('pedaling', {}) if isinstance(error_metrics, dict) else {}
 
         total_ref = max(1, int(note_acc.get('total_reference_notes', 0)))
         missing = int(note_acc.get('missing_notes', 0))
@@ -514,6 +616,7 @@ class JSONSummarization:
         wrong = int(note_acc.get('wrong_notes', 0))
 
         note_cat = error_categories.get('note_accuracy', {}) if isinstance(error_categories, dict) else {}
+        pedal_cat = error_categories.get('pedaling', {}) if isinstance(error_categories, dict) else {}
 
         def _samples(items: Any, n: int = 10) -> List[Dict[str, Any]]:
             out = []
@@ -561,12 +664,29 @@ class JSONSummarization:
                 'rushing_percentage': float(timing.get('rushing_percentage', 0.0)),
                 'dragging_percentage': float(timing.get('dragging_percentage', 0.0))
             },
+            'pedaling_errors': {
+                'missed_pedals': int(pedaling.get('missed_pedals', 0)),
+                'extra_pedals': int(pedaling.get('extra_pedals', 0)),
+                'split_reference_spans': int(pedaling.get('split_reference_spans', 0)),
+                'merged_performance_spans': int(pedaling.get('merged_performance_spans', 0)),
+                'late_release_count': int(pedaling.get('late_release_count', 0)),
+                'early_release_count': int(pedaling.get('early_release_count', 0)),
+                'harmonic_blur_count': int(pedaling.get('harmonic_blur_count', 0)),
+                'phrase_boundary_clearance_issues': int(pedaling.get('phrase_boundary_clearance_issues', 0)),
+                'mode': pedaling.get('mode', 'reference_comparison'),
+            },
             'other_error_types': by_error_type
         }
         if include_samples:
             out['note_errors']['missing_notes']['samples'] = _samples(note_cat.get('missing', []), n=sample_limit)
             out['note_errors']['extra_notes']['samples'] = _samples(note_cat.get('extra', []), n=sample_limit)
             out['note_errors']['wrong_notes']['samples'] = _samples(note_cat.get('wrong', []), n=sample_limit)
+            out['pedaling_errors']['samples'] = {
+                'missed': pedal_cat.get('missed', [])[:sample_limit] if isinstance(pedal_cat.get('missed', []), list) else [],
+                'extra': pedal_cat.get('extra', [])[:sample_limit] if isinstance(pedal_cat.get('extra', []), list) else [],
+                'late_release': pedal_cat.get('late_release', [])[:sample_limit] if isinstance(pedal_cat.get('late_release', []), list) else [],
+                'phrase_boundary_clearance': pedal_cat.get('phrase_boundary_clearance', [])[:sample_limit] if isinstance(pedal_cat.get('phrase_boundary_clearance', []), list) else [],
+            }
         return out
     
     def _create_practice_schedule(self, categorized_recs: Dict) -> Dict[str, Any]:
@@ -612,6 +732,17 @@ class JSONSummarization:
         note_acc = error_metrics.get('note_accuracy', {})
         if note_acc.get('accuracy_percentage', 100) < 90:
             exercises.append("Hands-separate practice of difficult passages")
+
+        pedaling = error_metrics.get('pedaling', {})
+        if pedaling.get('pedal_analysis_available', False):
+            if str(pedaling.get('mode', 'reference_comparison')) == 'solo':
+                if bool(pedaling.get('excessive_pedaling', False)):
+                    exercises.append("Half-bar pedal refresh drills to clear resonance without breaking the line")
+            elif (
+                int(pedaling.get('late_release_count', 0)) > 0
+                or int(pedaling.get('phrase_boundary_clearance_issues', 0)) > 0
+            ):
+                exercises.append("Slow pedal-only practice, coordinating releases with harmonic changes and phrase ends")
         
         return exercises[:5]  # Top 5 exercises
     

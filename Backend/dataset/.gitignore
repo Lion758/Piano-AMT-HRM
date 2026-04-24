@@ -1,0 +1,5 @@
+maps/raw/
+maps/audio.h5
+maps/cache/
+maps/maps_metadata.csv
+maps/subset_*.tsv

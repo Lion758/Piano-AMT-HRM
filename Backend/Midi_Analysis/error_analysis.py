@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 from collections import defaultdict
 import statistics
 
@@ -23,6 +23,7 @@ class ErrorAnalysis:
         self.reference_data = analysis_data.get('reference', {})
         self.performance_data = analysis_data.get('performance', {})
         self.aligned_notes = analysis_data.get('alignment', [])
+        self.mode = self._detect_analysis_mode()
         
         # Performance metrics storage
         self.metrics = {}
@@ -63,9 +64,42 @@ class ErrorAnalysis:
             'metrics': self.metrics,
             'error_categories': self.error_categories,
             'practice_recommendations': self.practice_recommendations,
+            'pedaling_recommendations': self._collect_pedaling_recommendations(),
+            'analysis_mode': self.mode,
             'detailed_errors': self._get_detailed_error_list(),
             'performance_summary': self._get_performance_summary()
         }
+
+    def analyze_pedaling(self) -> Dict[str, Any]:
+        """Run only the pedaling stream for solo or compare workflows."""
+        self.metrics = {}
+        self.error_categories = {}
+        self.practice_recommendations = []
+
+        self._analyze_pedaling_errors()
+        self.practice_recommendations = self._collect_pedaling_recommendations()
+
+        return {
+            'metrics': {'pedaling': self.metrics.get('pedaling', {})},
+            'error_categories': {'pedaling': self.error_categories.get('pedaling', {})},
+            'practice_recommendations': self.practice_recommendations,
+            'pedaling_recommendations': self.practice_recommendations,
+            'analysis_mode': self.mode,
+        }
+
+    def _detect_analysis_mode(self) -> str:
+        """Infer whether this run is compare-mode or solo-mode."""
+        if self.reference_data.get('notes'):
+            return 'reference_comparison'
+
+        reference_pedaling = self.reference_data.get('pedaling', {}) if isinstance(self.reference_data, dict) else {}
+        if reference_pedaling.get('raw_events') or reference_pedaling.get('segments'):
+            return 'reference_comparison'
+
+        if self.aligned_notes:
+            return 'reference_comparison'
+
+        return 'solo'
 
     def _analyze_alignment_reliability(self):
         """Flag whether there are enough aligned note pairs for stable error metrics."""
@@ -501,15 +535,575 @@ class ErrorAnalysis:
                 })
         
         return patterns[:5]  # Return top 5 patterns
+
     def _analyze_pedaling_errors(self):
-        """Analyze sustain pedal usage (if pedal data is available)."""
-        # This is a placeholder for pedaling analysis
-        # In real implementation, you would parse control change messages for pedal
-        
+        """Analyze sustain pedal usage as a dedicated stream."""
+        categories = self._empty_pedaling_categories()
+        self.error_categories['pedaling'] = categories
+
+        performance_segments = self._get_pedal_segments(self.performance_data)
+        performance_raw_events = self.performance_data.get('pedaling', {}).get('raw_events', [])
+        performance_summary = self.performance_data.get('pedaling', {}).get('summary', {})
+
+        if self.mode == 'reference_comparison':
+            reference_segments = self._get_pedal_segments(self.reference_data)
+            reference_raw_events = self.reference_data.get('pedaling', {}).get('raw_events', [])
+            reference_summary = self.reference_data.get('pedaling', {}).get('summary', {})
+            self._analyze_compare_pedaling(
+                reference_segments=reference_segments,
+                performance_segments=performance_segments,
+                reference_raw_events=reference_raw_events,
+                performance_raw_events=performance_raw_events,
+                reference_summary=reference_summary,
+                performance_summary=performance_summary,
+                categories=categories,
+            )
+            return
+
+        self._analyze_solo_pedaling(
+            performance_segments=performance_segments,
+            performance_raw_events=performance_raw_events,
+            performance_summary=performance_summary,
+            categories=categories,
+        )
+
+    def _analyze_compare_pedaling(
+        self,
+        reference_segments: List[Dict[str, Any]],
+        performance_segments: List[Dict[str, Any]],
+        reference_raw_events: List[Dict[str, Any]],
+        performance_raw_events: List[Dict[str, Any]],
+        reference_summary: Dict[str, Any],
+        performance_summary: Dict[str, Any],
+        categories: Dict[str, List[Dict[str, Any]]],
+    ) -> None:
+        if not reference_raw_events and not performance_raw_events:
+            self.metrics['pedaling'] = {
+                'available': False,
+                'pedal_analysis_available': False,
+                'mode': 'reference_comparison',
+                'included_in_overall_score': False,
+                'reference_segment_count': 0,
+                'performance_segment_count': 0,
+                'note': 'No CC64 sustain-pedal data was found in either MIDI.',
+            }
+            return
+
+        ref_times, perf_times, mapping_source = self._build_reference_to_performance_map()
+        mapped_reference_segments = [
+            self._map_segment_to_performance_time(seg, ref_times, perf_times)
+            for seg in reference_segments
+        ]
+
+        pairing = self._pair_pedal_segments(mapped_reference_segments, performance_segments)
+        matched_records = pairing['matched_records']
+        clean_matches = [m for m in matched_records if m.get('clean_match')]
+
+        onset_errors = [m['onset_error_ms'] for m in matched_records]
+        release_errors = [m['release_error_ms'] for m in matched_records]
+        overlap_ratios = [m['overlap_ratio'] for m in matched_records]
+
+        categories['missed'] = [mapped_reference_segments[idx] for idx in pairing['missed_reference_indices']]
+        categories['extra'] = [performance_segments[idx] for idx in pairing['extra_performance_indices']]
+        categories['split'] = [
+            {
+                'reference_segment': mapped_reference_segments[idx],
+                'performance_segments': [performance_segments[p_idx] for p_idx in pairing['ref_to_perf'][idx]],
+            }
+            for idx in pairing['split_reference_indices']
+        ]
+        categories['merged'] = [
+            {
+                'performance_segment': performance_segments[idx],
+                'reference_segments': [mapped_reference_segments[r_idx] for r_idx in pairing['perf_to_ref'][idx]],
+            }
+            for idx in pairing['merged_performance_indices']
+        ]
+
+        onset_threshold_ms = 150.0
+        release_threshold_ms = 180.0
+        categories['late_onset'] = [m for m in matched_records if m['onset_error_ms'] > onset_threshold_ms]
+        categories['early_onset'] = [m for m in matched_records if m['onset_error_ms'] < -onset_threshold_ms]
+        categories['late_release'] = [m for m in matched_records if m['release_error_ms'] > release_threshold_ms]
+        categories['early_release'] = [m for m in matched_records if m['release_error_ms'] < -release_threshold_ms]
+
+        interaction_issues = self._collect_compare_pedal_interaction_issues(
+            mapped_reference_segments=mapped_reference_segments,
+            performance_segments=performance_segments,
+            matched_records=matched_records,
+            ref_times=ref_times,
+            perf_times=perf_times,
+        )
+        categories['harmonic_blur'] = interaction_issues['harmonic_blur']
+        categories['phrase_boundary_clearance'] = interaction_issues['phrase_boundary_clearance']
+        categories['early_release_while_notes_ring'] = interaction_issues['early_release_while_notes_ring']
+
+        performance_duration = (
+            self.performance_data.get('total_duration')
+            or self.performance_data.get('metadata', {}).get('total_duration')
+            or 0.0
+        )
+        mapped_reference_pedal_time = sum(float(seg.get('duration', 0.0)) for seg in mapped_reference_segments)
+        performance_pedal_time = sum(float(seg.get('duration', 0.0)) for seg in performance_segments)
+
         self.metrics['pedaling'] = {
-            'pedal_analysis_available': False,
-            'note': 'Pedal analysis requires parsing of control change messages'
+            'available': True,
+            'pedal_analysis_available': True,
+            'mode': 'reference_comparison',
+            'included_in_overall_score': False,
+            'mapping_source': mapping_source,
+            'reference_segment_count': int(len(reference_segments)),
+            'performance_segment_count': int(len(performance_segments)),
+            'matched_segment_count': int(len(matched_records)),
+            'clean_match_count': int(len(clean_matches)),
+            'missed_pedals': int(len(categories['missed'])),
+            'extra_pedals': int(len(categories['extra'])),
+            'split_reference_spans': int(len(categories['split'])),
+            'merged_performance_spans': int(len(categories['merged'])),
+            'mean_onset_error_ms': round(float(statistics.mean(onset_errors)), 1) if onset_errors else None,
+            'mean_release_error_ms': round(float(statistics.mean(release_errors)), 1) if release_errors else None,
+            'mean_overlap_ratio': round(float(statistics.mean(overlap_ratios)), 3) if overlap_ratios else 0.0,
+            'median_overlap_ratio': round(float(statistics.median(overlap_ratios)), 3) if overlap_ratios else 0.0,
+            'late_onset_count': int(len(categories['late_onset'])),
+            'early_onset_count': int(len(categories['early_onset'])),
+            'late_release_count': int(len(categories['late_release'])),
+            'early_release_count': int(len(categories['early_release'])),
+            'harmonic_blur_count': int(len(categories['harmonic_blur'])),
+            'phrase_boundary_clearance_issues': int(len(categories['phrase_boundary_clearance'])),
+            'early_release_while_notes_ring_count': int(len(categories['early_release_while_notes_ring'])),
+            'reference_pedal_time': round(float(mapped_reference_pedal_time), 3),
+            'performance_pedal_time': round(float(performance_pedal_time), 3),
+            'reference_pedal_coverage_ratio': (
+                round(float(mapped_reference_pedal_time / performance_duration), 4)
+                if performance_duration > 1e-9 else float(reference_summary.get('pedal_coverage_ratio', 0.0) or 0.0)
+            ),
+            'performance_pedal_coverage_ratio': (
+                round(float(performance_pedal_time / performance_duration), 4)
+                if performance_duration > 1e-9 else float(performance_summary.get('pedal_coverage_ratio', 0.0) or 0.0)
+            ),
+            'reference_raw_event_count': int(len(reference_raw_events)),
+            'performance_raw_event_count': int(len(performance_raw_events)),
         }
+
+    def _analyze_solo_pedaling(
+        self,
+        performance_segments: List[Dict[str, Any]],
+        performance_raw_events: List[Dict[str, Any]],
+        performance_summary: Dict[str, Any],
+        categories: Dict[str, List[Dict[str, Any]]],
+    ) -> None:
+        if not performance_raw_events:
+            self.metrics['pedaling'] = {
+                'available': False,
+                'pedal_analysis_available': False,
+                'mode': 'solo',
+                'included_in_overall_score': False,
+                'pedal_segment_count': 0,
+                'note': 'No CC64 sustain-pedal data was found in the performance MIDI.',
+            }
+            return
+
+        total_duration = (
+            self.performance_data.get('total_duration')
+            or self.performance_data.get('metadata', {}).get('total_duration')
+            or 0.0
+        )
+        durations = [float(seg.get('duration', 0.0)) for seg in performance_segments]
+        mean_duration = statistics.mean(durations) if durations else 0.0
+        duration_cv = (
+            (statistics.stdev(durations) / mean_duration)
+            if len(durations) > 1 and mean_duration > 1e-9 else 0.0
+        )
+        longest_hold = max(durations) if durations else 0.0
+        long_hold_threshold = max(4.0, (statistics.median(durations) * 1.75) if durations else 4.0)
+
+        categories['long_holds'] = [
+            seg for seg in performance_segments
+            if float(seg.get('duration', 0.0)) >= long_hold_threshold
+        ]
+        phrase_data = self._collect_solo_phrase_release_data(performance_segments)
+        categories['phrase_boundary_releases'] = phrase_data['near_releases']
+        categories['phrase_boundary_misses'] = phrase_data['misses']
+        categories['excessive_holds'] = categories['long_holds'] if (
+            float(performance_summary.get('pedal_coverage_ratio', 0.0) or 0.0) > 0.75 or longest_hold >= 6.0
+        ) else []
+
+        pedals_per_minute = (
+            len(performance_segments) / max(total_duration / 60.0, 1e-9)
+            if total_duration > 1e-9 else 0.0
+        )
+        coverage_ratio = float(performance_summary.get('pedal_coverage_ratio', 0.0) or 0.0)
+
+        if coverage_ratio > 0.75 or longest_hold >= 6.0:
+            stability = 'excessive'
+        elif coverage_ratio < 0.08 and len(performance_segments) <= 1:
+            stability = 'light'
+        elif duration_cv <= 0.45:
+            stability = 'stable'
+        else:
+            stability = 'variable'
+
+        phrase_ratio = phrase_data['matched_ratio']
+
+        self.metrics['pedaling'] = {
+            'available': True,
+            'pedal_analysis_available': True,
+            'mode': 'solo',
+            'included_in_overall_score': False,
+            'pedal_segment_count': int(len(performance_segments)),
+            'raw_event_count': int(len(performance_raw_events)),
+            'pedals_per_minute': round(float(pedals_per_minute), 2),
+            'average_hold_duration': round(float(mean_duration), 3) if durations else 0.0,
+            'median_hold_duration': round(float(statistics.median(durations)), 3) if durations else 0.0,
+            'longest_hold_duration': round(float(longest_hold), 3) if durations else 0.0,
+            'long_hold_threshold_s': round(float(long_hold_threshold), 3),
+            'long_hold_count': int(len(categories['long_holds'])),
+            'pedal_coverage_ratio': round(float(coverage_ratio), 4),
+            'duration_cv': round(float(duration_cv), 3),
+            'stability': stability,
+            'excessive_pedaling': bool(stability == 'excessive'),
+            'phrase_end_release_count': int(len(categories['phrase_boundary_releases'])),
+            'phrase_end_release_ratio': round(float(phrase_ratio), 3) if phrase_ratio is not None else None,
+        }
+
+    def _empty_pedaling_categories(self) -> Dict[str, List[Dict[str, Any]]]:
+        return {
+            'missed': [],
+            'extra': [],
+            'split': [],
+            'merged': [],
+            'late_onset': [],
+            'early_onset': [],
+            'late_release': [],
+            'early_release': [],
+            'harmonic_blur': [],
+            'phrase_boundary_clearance': [],
+            'early_release_while_notes_ring': [],
+            'long_holds': [],
+            'phrase_boundary_releases': [],
+            'phrase_boundary_misses': [],
+            'excessive_holds': [],
+        }
+
+    def _get_pedal_segments(self, parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        pedaling = parsed_data.get('pedaling', {}) if isinstance(parsed_data, dict) else {}
+        segments = pedaling.get('segments', []) if isinstance(pedaling, dict) else []
+
+        normalized = []
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            start = float(seg.get('start', 0.0))
+            end = float(seg.get('end', start))
+            if end < start:
+                end = start
+            normalized.append(
+                {
+                    **seg,
+                    'start': start,
+                    'end': end,
+                    'duration': float(seg.get('duration', max(0.0, end - start))),
+                }
+            )
+        normalized.sort(key=lambda x: (float(x.get('start', 0.0)), float(x.get('end', 0.0))))
+        return normalized
+
+    def _build_reference_to_performance_map(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
+        aligned_pairs = [
+            p for p in self.aligned_notes
+            if p.get('reference_note') and p.get('performance_note')
+        ]
+        if len(aligned_pairs) < 2:
+            return None, None, 'identity_fallback'
+
+        points: List[Tuple[float, float]] = []
+        for pair in aligned_pairs:
+            ref = pair['reference_note']
+            perf = pair['performance_note']
+            points.append((float(ref.get('start', 0.0)), float(perf.get('start', 0.0))))
+            if ref.get('end') is not None and perf.get('end') is not None:
+                points.append((float(ref.get('end', 0.0)), float(perf.get('end', 0.0))))
+
+        points.sort(key=lambda x: x[0])
+        ref_points: List[float] = []
+        perf_points: List[float] = []
+        current_ref = None
+        bucket: List[float] = []
+
+        for ref_t, perf_t in points:
+            if current_ref is None or abs(ref_t - current_ref) <= 1e-6:
+                current_ref = ref_t if current_ref is None else current_ref
+                bucket.append(perf_t)
+                continue
+            ref_points.append(float(current_ref))
+            perf_points.append(float(statistics.mean(bucket)))
+            current_ref = ref_t
+            bucket = [perf_t]
+
+        if current_ref is not None and bucket:
+            ref_points.append(float(current_ref))
+            perf_points.append(float(statistics.mean(bucket)))
+
+        if len(ref_points) < 2:
+            return None, None, 'identity_fallback'
+
+        return np.asarray(ref_points, dtype=float), np.asarray(perf_points, dtype=float), 'aligned_notes'
+
+    def _map_reference_time(
+        self,
+        time_value: float,
+        ref_times: Optional[np.ndarray],
+        perf_times: Optional[np.ndarray],
+    ) -> float:
+        t = float(time_value)
+        if ref_times is None or perf_times is None or len(ref_times) < 2 or len(perf_times) < 2:
+            return t
+
+        if t <= ref_times[0]:
+            dt = ref_times[1] - ref_times[0]
+            slope = (perf_times[1] - perf_times[0]) / dt if abs(dt) > 1e-9 else 1.0
+            return float(perf_times[0] + (t - ref_times[0]) * slope)
+
+        if t >= ref_times[-1]:
+            dt = ref_times[-1] - ref_times[-2]
+            slope = (perf_times[-1] - perf_times[-2]) / dt if abs(dt) > 1e-9 else 1.0
+            return float(perf_times[-1] + (t - ref_times[-1]) * slope)
+
+        return float(np.interp(t, ref_times, perf_times))
+
+    def _map_segment_to_performance_time(
+        self,
+        segment: Dict[str, Any],
+        ref_times: Optional[np.ndarray],
+        perf_times: Optional[np.ndarray],
+    ) -> Dict[str, Any]:
+        mapped_start = self._map_reference_time(float(segment.get('start', 0.0)), ref_times, perf_times)
+        mapped_end = self._map_reference_time(float(segment.get('end', mapped_start)), ref_times, perf_times)
+        if mapped_end < mapped_start:
+            mapped_end = mapped_start
+
+        return {
+            **segment,
+            'reference_start': float(segment.get('start', 0.0)),
+            'reference_end': float(segment.get('end', mapped_end)),
+            'start': float(mapped_start),
+            'end': float(mapped_end),
+            'duration': float(max(0.0, mapped_end - mapped_start)),
+            'mapped_from_reference': True,
+        }
+
+    def _pair_pedal_segments(
+        self,
+        reference_segments: List[Dict[str, Any]],
+        performance_segments: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        ref_to_perf = defaultdict(list)
+        perf_to_ref = defaultdict(list)
+        candidate_pairs = []
+
+        for ref_idx, ref_seg in enumerate(reference_segments):
+            ref_dur = max(1e-6, float(ref_seg.get('duration', 0.0)))
+            for perf_idx, perf_seg in enumerate(performance_segments):
+                perf_dur = max(1e-6, float(perf_seg.get('duration', 0.0)))
+                overlap = self._segment_overlap(ref_seg, perf_seg)
+                onset_diff = abs(float(perf_seg.get('start', 0.0)) - float(ref_seg.get('start', 0.0)))
+                release_diff = abs(float(perf_seg.get('end', 0.0)) - float(ref_seg.get('end', 0.0)))
+                tolerance = max(0.18, min(0.8, 0.45 * max(ref_dur, perf_dur)))
+
+                if overlap <= 0 and onset_diff > tolerance and release_diff > tolerance:
+                    continue
+
+                union = max(
+                    1e-6,
+                    max(float(ref_seg.get('end', 0.0)), float(perf_seg.get('end', 0.0)))
+                    - min(float(ref_seg.get('start', 0.0)), float(perf_seg.get('start', 0.0))),
+                )
+                overlap_ratio = overlap / union
+                score = (0.75 * overlap_ratio) + (0.25 / (1.0 + onset_diff + release_diff))
+                candidate_pairs.append((score, ref_idx, perf_idx, overlap_ratio))
+                ref_to_perf[ref_idx].append(perf_idx)
+                perf_to_ref[perf_idx].append(ref_idx)
+
+        matched_records = []
+        used_refs = set()
+        used_perfs = set()
+
+        for score, ref_idx, perf_idx, overlap_ratio in sorted(candidate_pairs, key=lambda x: x[0], reverse=True):
+            if ref_idx in used_refs or perf_idx in used_perfs:
+                continue
+            used_refs.add(ref_idx)
+            used_perfs.add(perf_idx)
+            ref_seg = reference_segments[ref_idx]
+            perf_seg = performance_segments[perf_idx]
+            matched_records.append(
+                {
+                    'reference_segment': ref_seg,
+                    'performance_segment': perf_seg,
+                    'match_score': round(float(score), 4),
+                    'overlap_ratio': round(float(overlap_ratio), 4),
+                    'onset_error_ms': round((float(perf_seg.get('start', 0.0)) - float(ref_seg.get('start', 0.0))) * 1000.0, 1),
+                    'release_error_ms': round((float(perf_seg.get('end', 0.0)) - float(ref_seg.get('end', 0.0))) * 1000.0, 1),
+                    'clean_match': len(ref_to_perf[ref_idx]) == 1 and len(perf_to_ref[perf_idx]) == 1,
+                }
+            )
+
+        return {
+            'matched_records': matched_records,
+            'ref_to_perf': ref_to_perf,
+            'perf_to_ref': perf_to_ref,
+            'missed_reference_indices': [idx for idx in range(len(reference_segments)) if not ref_to_perf[idx]],
+            'extra_performance_indices': [idx for idx in range(len(performance_segments)) if not perf_to_ref[idx]],
+            'split_reference_indices': [idx for idx, matches in ref_to_perf.items() if len(matches) > 1],
+            'merged_performance_indices': [idx for idx, matches in perf_to_ref.items() if len(matches) > 1],
+        }
+
+    def _collect_compare_pedal_interaction_issues(
+        self,
+        mapped_reference_segments: List[Dict[str, Any]],
+        performance_segments: List[Dict[str, Any]],
+        matched_records: List[Dict[str, Any]],
+        ref_times: Optional[np.ndarray],
+        perf_times: Optional[np.ndarray],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        mapped_chords = sorted(
+            self._map_reference_time(float(ch.get('start_time', 0.0)), ref_times, perf_times)
+            for ch in self.reference_data.get('harmony', {}).get('chords', [])
+            if isinstance(ch, dict)
+        )
+        phrase_boundaries = sorted(
+            self._map_reference_time(float(ph.get('end_time', 0.0)), ref_times, perf_times)
+            for ph in self.reference_data.get('structure', {}).get('phrases', [])[:-1]
+            if isinstance(ph, dict) and ph.get('end_time') is not None
+        )
+        mapped_reference_notes = [
+            {
+                'start': self._map_reference_time(float(note.get('start', 0.0)), ref_times, perf_times),
+                'end': self._map_reference_time(float(note.get('end', note.get('start', 0.0))), ref_times, perf_times),
+                'pitch': int(note.get('pitch', 0)),
+            }
+            for note in self.reference_data.get('notes', [])
+            if isinstance(note, dict)
+        ]
+
+        harmonic_blur = []
+        early_release_while_notes_ring = []
+
+        for match in matched_records:
+            ref_seg = match['reference_segment']
+            perf_seg = match['performance_segment']
+
+            if match['release_error_ms'] > 180.0:
+                crossed_changes = [
+                    t for t in mapped_chords
+                    if float(ref_seg.get('end', 0.0)) + 0.05 <= t <= float(perf_seg.get('end', 0.0)) - 0.05
+                ]
+                if crossed_changes:
+                    harmonic_blur.append(
+                        {
+                            **match,
+                            'crossed_harmonic_change_count': int(len(crossed_changes)),
+                            'harmonic_change_times': [round(float(t), 3) for t in crossed_changes[:5]],
+                        }
+                    )
+
+            if match['release_error_ms'] < -180.0:
+                lingering_notes = [
+                    note for note in mapped_reference_notes
+                    if float(ref_seg.get('start', 0.0)) - 0.05 <= note['start'] <= float(ref_seg.get('end', 0.0)) + 0.05
+                    and note['end'] >= float(perf_seg.get('end', 0.0)) + 0.12
+                ]
+                if lingering_notes:
+                    early_release_while_notes_ring.append(
+                        {
+                            **match,
+                            'remaining_note_count': int(len(lingering_notes)),
+                            'latest_expected_ring_end': round(float(max(n['end'] for n in lingering_notes)), 3),
+                        }
+                    )
+
+        phrase_boundary_clearance = []
+        for boundary in phrase_boundaries:
+            ref_active = self._find_active_segment(mapped_reference_segments, boundary)
+            perf_active = self._find_active_segment(performance_segments, boundary)
+            if ref_active is None or perf_active is None:
+                continue
+            if float(ref_active.get('end', 0.0)) <= boundary + 0.18 and float(perf_active.get('end', 0.0)) > boundary + 0.22:
+                phrase_boundary_clearance.append(
+                    {
+                        'boundary_time': round(float(boundary), 3),
+                        'reference_release_time': round(float(ref_active.get('end', 0.0)), 3),
+                        'performance_release_time': round(float(perf_active.get('end', 0.0)), 3),
+                        'overhang_ms': round((float(perf_active.get('end', 0.0)) - float(boundary)) * 1000.0, 1),
+                    }
+                )
+
+        return {
+            'harmonic_blur': harmonic_blur,
+            'phrase_boundary_clearance': phrase_boundary_clearance,
+            'early_release_while_notes_ring': early_release_while_notes_ring,
+        }
+
+    def _collect_solo_phrase_release_data(
+        self,
+        performance_segments: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        phrases = self.performance_data.get('structure', {}).get('phrases', [])
+        if not phrases:
+            return {'near_releases': [], 'misses': [], 'matched_ratio': None}
+
+        near_releases = []
+        misses = []
+        release_times = [float(seg.get('end', 0.0)) for seg in performance_segments]
+
+        for phrase in phrases[:-1]:
+            boundary = float(phrase.get('end_time', 0.0))
+            nearest = None
+            nearest_dist = None
+            for seg, release_time in zip(performance_segments, release_times):
+                dist = abs(release_time - boundary)
+                if nearest is None or dist < nearest_dist:
+                    nearest = seg
+                    nearest_dist = dist
+            if nearest is not None and nearest_dist is not None and nearest_dist <= 0.35:
+                near_releases.append(
+                    {
+                        'phrase_end_time': round(float(boundary), 3),
+                        'release_time': round(float(nearest.get('end', 0.0)), 3),
+                        'distance_ms': round(float(nearest_dist * 1000.0), 1),
+                    }
+                )
+            else:
+                misses.append({'phrase_end_time': round(float(boundary), 3)})
+
+        total_boundaries = len(phrases[:-1])
+        matched_ratio = (len(near_releases) / total_boundaries) if total_boundaries > 0 else None
+        return {
+            'near_releases': near_releases,
+            'misses': misses,
+            'matched_ratio': matched_ratio,
+        }
+
+    def _find_active_segment(
+        self,
+        segments: List[Dict[str, Any]],
+        time_value: float,
+    ) -> Optional[Dict[str, Any]]:
+        t = float(time_value)
+        for seg in segments:
+            if float(seg.get('start', 0.0)) <= t <= float(seg.get('end', 0.0)):
+                return seg
+        return None
+
+    def _segment_overlap(
+        self,
+        a: Dict[str, Any],
+        b: Dict[str, Any],
+    ) -> float:
+        return max(
+            0.0,
+            min(float(a.get('end', 0.0)), float(b.get('end', 0.0)))
+            - max(float(a.get('start', 0.0)), float(b.get('start', 0.0))),
+        )
     
     def _calculate_performance_score(self):
         """Calculate an overall performance score based on all metrics."""
@@ -658,6 +1252,8 @@ class ErrorAnalysis:
             if consistency < 0.7:
                 recommendations.append("Work on rhythmic consistency: practice with subdivision counting")
 
+        recommendations.extend(self._collect_pedaling_recommendations())
+
         deduped: List[str] = []
         seen = set()
         for rec in recommendations:
@@ -668,6 +1264,48 @@ class ErrorAnalysis:
             deduped.append(rec)
 
         self.practice_recommendations = deduped
+
+    def _collect_pedaling_recommendations(self) -> List[str]:
+        """Generate pedal-specific recommendations from the pedaling metrics."""
+        pedaling = self.metrics.get('pedaling', {})
+        if not isinstance(pedaling, dict) or not pedaling.get('pedal_analysis_available', False):
+            return []
+
+        recommendations: List[str] = []
+
+        if pedaling.get('mode') == 'reference_comparison':
+            if int(pedaling.get('missed_pedals', 0)) > 0:
+                recommendations.append("Add the missing pedal changes from the reference so key harmonic arrivals stay supported")
+            if int(pedaling.get('extra_pedals', 0)) > 0:
+                recommendations.append("Remove extra pedal taps that are not present in the reference pedaling plan")
+            if int(pedaling.get('split_reference_spans', 0)) > 0:
+                recommendations.append("Avoid splitting a single reference pedal span into multiple lifts unless the harmony clearly changes")
+            if int(pedaling.get('merged_performance_spans', 0)) > 0:
+                recommendations.append("Clear the pedal between adjacent reference pedal spans instead of merging them into one long hold")
+            if int(pedaling.get('late_release_count', 0)) > 0 or int(pedaling.get('phrase_boundary_clearance_issues', 0)) > 0:
+                recommendations.append("Practice releasing the pedal a little earlier at phrase ends and harmonic changes")
+            if int(pedaling.get('early_release_count', 0)) > 0 or int(pedaling.get('early_release_while_notes_ring_count', 0)) > 0:
+                recommendations.append("Hold the pedal slightly longer where the reference lets tones continue ringing")
+            if int(pedaling.get('harmonic_blur_count', 0)) > 0:
+                recommendations.append("Listen for harmonic blur and clear the pedal before the next harmony arrives")
+            return recommendations
+
+        if bool(pedaling.get('excessive_pedaling', False)):
+            recommendations.append("Use shorter pedal cycles and listen for cleaner resonance instead of one continuous wash")
+        if int(pedaling.get('long_hold_count', 0)) > 0:
+            recommendations.append("Break up very long pedal holds with planned refreshes so the texture stays clear")
+
+        phrase_ratio = pedaling.get('phrase_end_release_ratio', None)
+        if isinstance(phrase_ratio, (int, float)) and phrase_ratio < 0.45:
+            recommendations.append("Try coordinating more pedal releases with phrase endings so musical sentences can breathe")
+
+        stability = str(pedaling.get('stability', '')).strip().lower()
+        if stability == 'variable':
+            recommendations.append("Keep pedal depth and release timing more consistent from one gesture to the next")
+        elif stability == 'light':
+            recommendations.append("Experiment with a few more supportive pedal changes in sustained passages if the sound feels dry")
+
+        return recommendations
     
     # Helper Methods
     
@@ -946,6 +1584,19 @@ class ErrorAnalysis:
             expression = self.metrics['dynamic_control'].get('expression_level', '')
             if 'Expressive' in expression:
                 strengths.append("Good dynamic expression")
+
+        pedaling = self.metrics.get('pedaling', {})
+        if pedaling.get('pedal_analysis_available', False):
+            if pedaling.get('mode') == 'reference_comparison':
+                if (
+                    int(pedaling.get('missed_pedals', 0)) == 0
+                    and int(pedaling.get('extra_pedals', 0)) == 0
+                    and float(pedaling.get('mean_overlap_ratio', 0.0)) >= 0.75
+                ):
+                    strengths.append("Pedal changes track the reference well")
+            else:
+                if str(pedaling.get('stability', '')).lower() == 'stable':
+                    strengths.append("Pedaling is generally stable and supportive")
         
         return strengths if strengths else ["Solid foundation - keep practicing!"]
     
@@ -962,6 +1613,17 @@ class ErrorAnalysis:
             rushing = self.metrics['timing_errors'].get('rushing_percentage', 0)
             if rushing > 30:
                 weaknesses.append("Tendency to rush")
+
+        pedaling = self.metrics.get('pedaling', {})
+        if pedaling.get('pedal_analysis_available', False):
+            if pedaling.get('mode') == 'reference_comparison':
+                if (
+                    int(pedaling.get('harmonic_blur_count', 0)) > 0
+                    or int(pedaling.get('phrase_boundary_clearance_issues', 0)) > 0
+                ):
+                    weaknesses.append("Pedal releases are blurring harmonic or phrase boundaries")
+            elif bool(pedaling.get('excessive_pedaling', False)):
+                weaknesses.append("Pedal is being held too continuously")
         
         return weaknesses
 

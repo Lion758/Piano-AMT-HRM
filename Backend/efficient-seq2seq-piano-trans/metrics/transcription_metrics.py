@@ -422,6 +422,57 @@ def get_intervals_notes(midi_path):
     return intervals, pit, pedals
 
 
+def _precision_recall_f1(tp, fp, fn):
+    precision = tp / (tp + fp) if tp + fp > 0 else 0.0
+    recall = tp / (tp + fn) if tp + fn > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
+    return precision, recall, f1
+
+
+def _match_event_times(est_times, ref_times, tolerance):
+    est_times = sorted(float(t) for t in est_times)
+    ref_times = sorted(float(t) for t in ref_times)
+    used_est = set()
+    tp = 0
+    for ref_time in ref_times:
+        best_idx = None
+        best_delta = tolerance
+        for idx, est_time in enumerate(est_times):
+            if idx in used_est:
+                continue
+            delta = abs(est_time - ref_time)
+            if delta <= best_delta:
+                best_idx = idx
+                best_delta = delta
+        if best_idx is not None:
+            used_est.add(best_idx)
+            tp += 1
+    fp = len(est_times) - tp
+    fn = len(ref_times) - tp
+    return _precision_recall_f1(tp, fp, fn)
+
+
+def cal_pedal_event_metrics(est_pedal_events, ref_pedal_events, tolerance=0.05, prefix="pedal"):
+    metrics_dict = {}
+    for event_type, metric_name in [("PedalOn", "on"), ("PedalOff", "off")]:
+        est_times = [event["time"] for event in est_pedal_events if event.get("type") == event_type]
+        ref_times = [event["time"] for event in ref_pedal_events if event.get("type") == event_type]
+        precision, recall, f1 = _match_event_times(est_times, ref_times, tolerance)
+        metrics_dict[f"{prefix}_{metric_name}_precision"] = precision
+        metrics_dict[f"{prefix}_{metric_name}_recall"] = recall
+        metrics_dict[f"{prefix}_{metric_name}_f1"] = f1
+    return metrics_dict
+
+
+def pedals_to_event_list(pedals):
+    pedal_events = []
+    for start, end in zip(pedals["time"], pedals["end"]):
+        pedal_events.append({"type": "PedalOn", "time": float(start), "value": 127})
+        pedal_events.append({"type": "PedalOff", "time": float(end), "value": 0})
+    pedal_events.sort(key=lambda x: (x["time"], x["type"]))
+    return pedal_events
+
+
 def cal_midi_files_metrics(est_midi_paths: list, ref_midi_paths: list, result_path):
     result_dict = defaultdict(list)
     for est_path, ref_path in tqdm(zip(est_midi_paths, ref_midi_paths)):
@@ -452,6 +503,13 @@ def cal_midi_files_metrics(est_midi_paths: list, ref_midi_paths: list, result_pa
         result_dict["note_f1"].append(f*100)
         result_dict["note_num"].append(len(ref_pitches))
 
+        pedal_metrics = cal_pedal_event_metrics(
+            pedals_to_event_list(est_pedals),
+            pedals_to_event_list(ref_pedals),
+        )
+        for metric_name, metric_value in pedal_metrics.items():
+            result_dict[metric_name].append(metric_value * 100)
+
         # ref_dur = ref_intervals[:, 1] - ref_intervals[:, 0]
         # est_dur = est_intervals[:, 1] - est_intervals[:, 0]
         # errors = np.abs(ref_dur - est_dur)
@@ -475,4 +533,3 @@ def cal_midi_files_metrics(est_midi_paths: list, ref_midi_paths: list, result_pa
     df.to_csv(result_path, float_format="%.2f")
     # print(df.tail(10))
     
-

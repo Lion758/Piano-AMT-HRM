@@ -11,6 +11,19 @@ import { useRecorder } from './hooks/useRecorder.js';
 import { API_BASE, resolveApiUrl } from '../lib/api.js';
 import grandPianoTheater from '../assets/grand-piano-indoors-theater-place-generative-ai.jpg';
 
+const PREPARATION_STEP_LABELS = {
+  uploading: 'Uploading',
+  transcribing: 'Transcribing',
+  comparing: 'Comparing',
+  ready: 'Tutor ready',
+};
+
+function getPreparationSteps(includeComparison) {
+  return includeComparison
+    ? ['uploading', 'transcribing', 'comparing', 'ready']
+    : ['uploading', 'transcribing', 'ready'];
+}
+
 export default function PianoPage({ midiUrl }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
@@ -20,9 +33,13 @@ export default function PianoPage({ midiUrl }) {
   const [midiAnalysis, setMidiAnalysis] = useState(null);
   const [isAnalyzingMidi, setIsAnalyzingMidi] = useState(false);
   const [selectedAudioFile, setSelectedAudioFile] = useState(null);
-  const [isTranscribingUpload, setIsTranscribingUpload] = useState(false);
+  const [referenceMidiFile, setReferenceMidiFile] = useState(null);
+  const [compareToOriginal, setCompareToOriginal] = useState(false);
+  const [isPreparingTutor, setIsPreparingTutor] = useState(false);
+  const [preparePhase, setPreparePhase] = useState('idle');
   const [uploadError, setUploadError] = useState('');
-  const [uploadStatus, setUploadStatus] = useState('Upload a song to transcribe it and start learning.');
+  const [uploadStatus, setUploadStatus] = useState('Add your performance audio to open the tutor workspace.');
+  const [preparedTutor, setPreparedTutor] = useState(null);
 
   // Load MIDI
   const {
@@ -149,30 +166,83 @@ export default function PianoPage({ midiUrl }) {
     const file = event.target.files?.[0] || null;
     setSelectedAudioFile(file);
     setUploadError('');
+    setPreparedTutor(null);
     if (file) {
-      setUploadStatus(`Ready to transcribe: ${file.name}`);
+      setUploadStatus(`Performance ready: ${file.name}`);
     } else {
-      setUploadStatus('Upload a song to transcribe it and start learning.');
+      setUploadStatus('Add your performance audio to open the tutor workspace.');
     }
   }, []);
 
-  const handleUploadAndTranscribe = useCallback(async () => {
-    if (!selectedAudioFile) {
-      setUploadError('Choose an audio file first.');
+  const handleReferenceSelection = useCallback((event) => {
+    const file = event.target.files?.[0] || null;
+    setReferenceMidiFile(file);
+    setUploadError('');
+    setPreparedTutor(null);
+    if (file) {
+      setUploadStatus(`Reference ready: ${file.name}`);
+    } else if (compareToOriginal) {
+      setUploadStatus('Add the original MIDI to prepare a comparison tutor.');
+    }
+  }, [compareToOriginal]);
+
+  const handleCompareToggle = useCallback((event) => {
+    const checked = event.target.checked;
+    setCompareToOriginal(checked);
+    setUploadError('');
+    setPreparedTutor(null);
+    if (!checked) {
+      setReferenceMidiFile(null);
+      setUploadStatus(
+        selectedAudioFile
+          ? `Performance ready: ${selectedAudioFile.name}`
+          : 'Add your performance audio to open the tutor workspace.',
+      );
       return;
     }
+
+    setUploadStatus('Comparison mode enabled. Add the original MIDI to compare against.');
+  }, [selectedAudioFile]);
+
+  const handlePrepareTutor = useCallback(async () => {
+    if (!selectedAudioFile) {
+      setUploadError('Choose your performance audio first.');
+      return;
+    }
+    if (compareToOriginal && !referenceMidiFile) {
+      setUploadError('Choose the original MIDI before starting comparison mode.');
+      return;
+    }
+
+    const phaseSteps = getPreparationSteps(compareToOriginal);
+    let phaseIndex = 0;
+    let phaseTimer = null;
+
     setUploadError('');
-    setIsTranscribingUpload(true);
-    setUploadStatus('Uploading audio and transcribing with the seq2seq model...');
+    setPreparedTutor(null);
+    setIsPreparingTutor(true);
+    setPreparePhase(phaseSteps[0]);
+    setUploadStatus(compareToOriginal
+      ? 'Uploading your files and preparing the comparison tutor...'
+      : 'Uploading your performance and preparing the tutor...');
+
+    phaseTimer = window.setInterval(() => {
+      phaseIndex = Math.min(phaseIndex + 1, phaseSteps.length - 2);
+      setPreparePhase(phaseSteps[phaseIndex]);
+    }, 1800);
+
     try {
       const formData = new FormData();
-      formData.append('file', selectedAudioFile);
-      const response = await fetch(`${API_BASE}/transcribe-upload`, {
+      formData.append('performance_audio', selectedAudioFile);
+      if (compareToOriginal && referenceMidiFile) {
+        formData.append('reference_midi', referenceMidiFile);
+      }
+      const response = await fetch(`${API_BASE}/tutor/prepare`, {
         method: 'POST',
         body: formData,
       });
       if (!response.ok) {
-        let message = 'Failed to transcribe audio.';
+        let message = 'Failed to prepare the tutor session.';
         try {
           const payload = await response.json();
           if (payload?.detail) message = payload.detail;
@@ -182,19 +252,34 @@ export default function PianoPage({ midiUrl }) {
         throw new Error(message);
       }
       const data = await response.json();
-      const nextMidiUrl = resolveApiUrl(data.midi_url);
-      setUploadStatus('Opening your transcription...');
+      const nextMidiUrl = resolveApiUrl(data.performance_midi_url);
+      setPreparePhase('ready');
+      setUploadStatus('Tutor ready. Opening your practice workspace...');
       setSelectedAudioFile(null);
+      setReferenceMidiFile(null);
+      setCompareToOriginal(false);
       setUploadError('');
+      setPreparedTutor({
+        mode: data.mode || 'solo',
+        summaryCards: data.summary_cards || null,
+        suggestedQuestions: Array.isArray(data.suggested_questions) ? data.suggested_questions : [],
+        sessionId: data.tutor?.session_id || null,
+        openingMessage: data.tutor?.opening_message || '',
+      });
       setActiveMidiUrl(nextMidiUrl);
+      setChatOpen(true);
       window.location.hash = `#/piano?midi=${encodeURIComponent(nextMidiUrl)}`;
     } catch (err) {
       setUploadError(err.message || 'Something went wrong.');
-      setUploadStatus('Upload a song to transcribe it and start learning.');
+      setPreparePhase('idle');
+      setUploadStatus('Add your files and try again.');
     } finally {
-      setIsTranscribingUpload(false);
+      if (phaseTimer) window.clearInterval(phaseTimer);
+      setIsPreparingTutor(false);
     }
-  }, [selectedAudioFile]);
+  }, [compareToOriginal, referenceMidiFile, selectedAudioFile]);
+
+  const preparationSteps = getPreparationSteps(compareToOriginal);
 
   return (
     <div className="piano-page">
@@ -207,6 +292,7 @@ export default function PianoPage({ midiUrl }) {
         notes={notes}
         analysisData={midiAnalysis}
         analysisLoading={isAnalyzingMidi}
+        preparedTutor={preparedTutor}
       />
 
       <div className="pp-top">
@@ -243,7 +329,7 @@ export default function PianoPage({ midiUrl }) {
           {hasMidi ? 'Tutor stage active' : 'Awaiting transcription'}
         </div>
 
-        {!hasMidi && !isTranscribingUpload && (
+        {!hasMidi && !isPreparingTutor && (
           <div className="pp-overlay">
             <div className="pp-upload-card">
               <div className="pp-upload-photo">
@@ -254,40 +340,74 @@ export default function PianoPage({ midiUrl }) {
                 />
                 <div className="pp-upload-photo-overlay">
                   <span>Stage Reference</span>
-                  <strong>Grand piano, amber lighting, and a concert-hall mood</strong>
+                  <strong>Performance audio in, guided coaching out, with an optional original MIDI for comparison.</strong>
                 </div>
               </div>
-              <div className="pp-upload-kicker">Tutor Workspace</div>
-              <h2>Bring a recording into the piano stage</h2>
-              <p>Transcribe the performance, open the falling-note view, and keep the practice controls in the same workspace.</p>
+              <div className="pp-upload-kicker">Comparison Tutor</div>
+              <h2>Bring your performance into the tutor studio</h2>
+              <p>Upload your performance audio, optionally add the original MIDI, and open straight into a coach-ready practice session.</p>
               <div className="pp-upload-highlights">
-                <span>Audio input</span>
-                <span>MIDI output</span>
-                <span>Guided practice</span>
+                <span>Performance audio</span>
+                <span>Optional reference MIDI</span>
+                <span>Guided coaching</span>
               </div>
               <label className="pp-upload-picker">
-                <span>Choose audio file</span>
+                <span>Your performance audio</span>
                 <input type="file" accept="audio/*" onChange={handleAudioSelection} />
               </label>
+              <label className="pp-compare-toggle">
+                <input
+                  type="checkbox"
+                  checked={compareToOriginal}
+                  onChange={handleCompareToggle}
+                />
+                <span>Compare this performance to the original MIDI</span>
+              </label>
+              {compareToOriginal && (
+                <label className="pp-upload-picker pp-upload-picker-secondary">
+                  <span>Original / reference MIDI</span>
+                  <input type="file" accept=".mid,.midi,audio/midi,audio/x-midi" onChange={handleReferenceSelection} />
+                </label>
+              )}
+              <div className="pp-upload-steps">
+                {preparationSteps.map((step) => (
+                  <div key={step} className="pp-upload-step pending">
+                    <span>{PREPARATION_STEP_LABELS[step]}</span>
+                  </div>
+                ))}
+              </div>
               <button
                 className="pp-upload-action"
-                onClick={handleUploadAndTranscribe}
-                disabled={!selectedAudioFile}
+                onClick={handlePrepareTutor}
+                disabled={!selectedAudioFile || (compareToOriginal && !referenceMidiFile)}
               >
-                Transcribe Song
+                {compareToOriginal ? 'Prepare comparison tutor' : 'Open solo tutor'}
               </button>
               <p className="pp-upload-status">{uploadStatus}</p>
-              {selectedAudioFile && <p className="pp-upload-file">{selectedAudioFile.name}</p>}
+              {selectedAudioFile && <p className="pp-upload-file">Performance: {selectedAudioFile.name}</p>}
+              {compareToOriginal && referenceMidiFile && <p className="pp-upload-file">Reference: {referenceMidiFile.name}</p>}
               {uploadError && <p className="pp-upload-error">{uploadError}</p>}
             </div>
           </div>
         )}
 
-        {isTranscribingUpload && (
+        {isPreparingTutor && (
           <div className="pp-overlay">
             <div className="pp-loader">
               <div className="spinner" />
               <p>{uploadStatus}</p>
+              <div className="pp-upload-steps pp-upload-steps-live">
+                {preparationSteps.map((step) => {
+                  const stepIndex = preparationSteps.indexOf(step);
+                  const activeIndex = preparationSteps.indexOf(preparePhase);
+                  const state = activeIndex > stepIndex ? 'done' : activeIndex === stepIndex ? 'active' : 'pending';
+                  return (
+                    <div key={step} className={`pp-upload-step ${state}`}>
+                      <span>{PREPARATION_STEP_LABELS[step]}</span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         )}

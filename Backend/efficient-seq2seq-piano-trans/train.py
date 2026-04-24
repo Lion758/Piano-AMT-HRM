@@ -708,6 +708,8 @@ class MT3Trainer(pl.LightningModule):
                 target_event_data_list += sm_tokenizer.detokenize(row["target_tokens"], offsets_sec)
             output_note_data_list = sm_tokenizer.midi_events_to_notes(output_event_data_list)
             target_note_data_list = sm_tokenizer.midi_events_to_notes(target_event_data_list)
+            output_pedal_data_list = sm_tokenizer.midi_events_to_pedals(output_event_data_list)
+            target_pedal_data_list = sm_tokenizer.midi_events_to_pedals(target_event_data_list)
             
             # Onset only Metrics
             output_interval = np.array([(note["onset"], note["offset"]) for note in output_note_data_list])
@@ -733,6 +735,10 @@ class MT3Trainer(pl.LightningModule):
             metric_dict["note+offset+velocity_precision"].append(precision)
             metric_dict["note+offset+velocity_recall"].append(recall)
             metric_dict["note+offset+velocity_f1"].append(f1)
+
+            pedal_metrics = transcription_metrics.cal_pedal_event_metrics(output_pedal_data_list, target_pedal_data_list)
+            for metric_name, metric_value in pedal_metrics.items():
+                metric_dict[metric_name].append(metric_value)
             
             target_len = max(len(concat_target_tokens), 1) # Avoid division by zero.
             
@@ -746,13 +752,15 @@ class MT3Trainer(pl.LightningModule):
                     "audio_id": audio_id,
                     "audio_name": audio_name,
                     "midi_path": target_midi_basename,
+                    "output_pedals": output_pedal_data_list,
+                    "target_pedals": target_pedal_data_list,
                     "data_list": data_list
                 }
                 json.dump(data_dict, f, ensure_ascii=False, indent=2)
                 
             try:
                 output_midi_path = test_output_dir + "/" + os.path.splitext(target_midi_basename)[0] + ".output.mid"
-                sm_tokenizer.save_midi(output_note_data_list, output_midi_path)
+                sm_tokenizer.save_midi(output_note_data_list, output_midi_path, pedal_event_list=output_pedal_data_list)
             except Exception as e:
                 print("Error saving midi file:", e)
                 

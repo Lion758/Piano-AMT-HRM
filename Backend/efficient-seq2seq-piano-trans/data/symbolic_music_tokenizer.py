@@ -103,12 +103,16 @@ class TokenBase():
         
     @classmethod
     def set_begin(cls, begin_index:int):
-        assert cls.begin_index is None # 确保只被赋值一次
-        cls.begin_index = begin_index
+        if cls.begin_index is None:
+            cls.begin_index = begin_index
+        else:
+            assert cls.begin_index == begin_index
     @classmethod
     def set_size(cls, size:int):
-        assert cls.__size is None
-        cls.__size = size
+        if cls.__size is None:
+            cls.__size = size
+        else:
+            assert cls.__size == size
         
     @classmethod
     def get_size(cls) -> int:
@@ -138,8 +142,6 @@ class TokenBase():
     
     @classmethod
     def set_cp_index(cls, index:int, force=False):
-        if force == False:
-            assert cls.cp_index is None
         cls.cp_index = index
     
     
@@ -457,10 +459,12 @@ class SymbolicMusicTokenizer:
             onset_sec = row["onset_sec"]
             onset = row["start_index"]
             
-            # Pedal Off
-            if row["type"] == "PedalOff":
-                pedal_off_token = TokenPedal(0)  # 0 for pedal off
-                append_token(cp_word, pedal_off_token)
+            # Pedal
+            if row["type"] == "PedalOn" or row["type"] == "PedalOff":
+                onset_token = TokenOnset(onset)
+                pedal_token = TokenPedal(1 if row["type"] == "PedalOn" else 0)
+                append_token(cp_word, onset_token)
+                append_token(cp_word, pedal_token)
                 
             elif row['type'] == 'NoteOn' or row['type'] == 'NoteOff':
                 # Pitch Token
@@ -577,14 +581,18 @@ class SymbolicMusicTokenizer:
         
         return midi_event_list
     
-    def notes_to_midi_events(self, df: pd.DataFrame, use_truth_offsets: bool = False) -> List[Dict[str, Union[int, float]]]:
+    def notes_to_midi_events(
+        self,
+        df: pd.DataFrame,
+        use_truth_offsets: bool = False,
+        include_pedal_events: bool = False,
+    ) -> pd.DataFrame:
         """
         Args:
             midi_note_list: List of MIDI note data dictionaries.
         Returns:
             midi_event_list: List of MIDI event dictionaries.
         """
-        midi_event_list = []
         offset_column = "offset_sec"
         if use_truth_offsets:
             required_truth_columns = {"offset_sec_truth", "duration_sec_truth"}
@@ -610,17 +618,16 @@ class SymbolicMusicTokenizer:
         df_note_off = df_note_off[["pitch", "onset_sec", "type", "type_id", "velocity"]]
         # remove duplicate NoteOff events with the same pitch and offset
         df_note_off = df_note_off.drop_duplicates(subset=["pitch", "onset_sec"])
-        
-        # df_pedal_off = df[df["type"] == "pedal"].copy()
-        # df_pedal_off["type"] = "PedalOff"
-        # df_pedal_off["type_id"] = 3  # For sorting
-        # df_pedal_off["pitch"] = -1  # Pedal does not have pitch.
-        # df_pedal_off["velocity"] = -1  # Pedal does not have velocity.
-        # df_pedal_off["onset_sec"] = df_pedal_off["end_sec"]
-        # df_pedal_off = df_pedal_off[["pitch", "onset_sec", "type", "type_id", "velocity"]]
-        
-                
-        df_midi_events = pd.concat([df_note_on, df_note_off], ignore_index=True)
+        df_frames = [df_note_on, df_note_off]
+        if include_pedal_events:
+            df_pedal = df[df["type"].isin(["PedalOn", "PedalOff"])].copy()
+            if len(df_pedal) > 0:
+                df_pedal["type_id"] = 0
+                df_pedal["pitch"] = -1
+                df_pedal["velocity"] = 0
+                df_frames.append(df_pedal[["pitch", "onset_sec", "type", "type_id", "velocity"]])
+
+        df_midi_events = pd.concat(df_frames, ignore_index=True)
         df_midi_events = df_midi_events.sort_values(by=["onset_sec", "type_id", "pitch"], ascending=[True, True, True])
         
         return df_midi_events
@@ -666,8 +673,21 @@ class SymbolicMusicTokenizer:
         # Sort the notes by onset time
         midi_note_list.sort(key=lambda x: (x['onset'],x["pitch"]) )
         return midi_note_list
+
+    def midi_events_to_pedals(self, midi_event_list: List[Dict[str, Union[int, float]]]) -> List[Dict[str, Union[int, float]]]:
+        pedal_event_list = []
+        for event in midi_event_list:
+            if event.get("type") not in {"PedalOn", "PedalOff"}:
+                continue
+            pedal_event_list.append({
+                "time": float(event["time"]),
+                "type": event["type"],
+                "value": 127 if event["type"] == "PedalOn" else 0,
+            })
+        pedal_event_list.sort(key=lambda x: (x["time"], x["type"]))
+        return pedal_event_list
     
-    def save_midi(self, midi_note_list, midi_path, performance_downbeats = [], performance_timesignatures = []):
+    def save_midi(self, midi_note_list, midi_path, performance_downbeats = [], performance_timesignatures = [], pedal_event_list = None):
         # symusic_score = symusic.Score(midi_path, ttype=symusic.TimeUnit.second)
         midi = pretty_midi.PrettyMIDI()
 
@@ -728,7 +748,7 @@ class SymbolicMusicTokenizer:
         
         ##############################################
         # Add notes and chords to the MIDI file
-        track_num = len(set(note_data["staff"] for note_data in midi_note_list))
+        track_num = max([int(note_data["staff"]) for note_data in midi_note_list], default=0) + 1
         for i in range(track_num):
             # Create a new instrument for each staff
             midi.instruments.append(pretty_midi.Instrument(program=0, name=f"staff{i}"))
@@ -748,6 +768,16 @@ class SymbolicMusicTokenizer:
                 end=end_sec,
             )
             midi.instruments[staff].notes.append(midi_note)
+
+        if pedal_event_list:
+            for pedal_event in pedal_event_list:
+                value = 127 if pedal_event["type"] == "PedalOn" else 0
+                control = pretty_midi.ControlChange(
+                    number=64,
+                    value=value,
+                    time=float(pedal_event["time"]),
+                )
+                midi.instruments[0].control_changes.append(control)
 
         midi.write(midi_path)
         return True

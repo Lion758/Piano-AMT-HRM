@@ -85,13 +85,26 @@ class MIDIAnalyzer:
         )
 
         metrics = self._calculate_basic_metrics(notes, float(total_duration))
+        pedal_analysis = _get_error_analysis_cls()(
+            {
+                "reference": {},
+                "performance": performance_data,
+                "alignment": [],
+            }
+        ).analyze_pedaling()
+        metrics["pedaling"] = pedal_analysis.get("metrics", {}).get("pedaling", {})
+        recommendations = self._dedupe_text_list(
+            self._generate_solo_recommendations(metrics)
+            + pedal_analysis.get("practice_recommendations", [])
+        )
 
         self.analysis_results = {
             "analysis_type": "solo_performance",
             "performance_file": performance_path,
             "parsed_data": performance_data,
             "metrics": metrics,
-            "practice_recommendations": self._generate_solo_recommendations(metrics),
+            "performance_analysis": pedal_analysis,
+            "practice_recommendations": recommendations,
         }
         return self.analysis_results
 
@@ -392,6 +405,20 @@ class MIDIAnalyzer:
 
         return recommendations
 
+    def _dedupe_text_list(self, values: List[str]) -> List[str]:
+        deduped: List[str] = []
+        seen = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(text)
+        return deduped
+
     def _save_analysis_reports(self, output_dir: str) -> None:
         os.makedirs(output_dir, exist_ok=True)
 
@@ -443,6 +470,12 @@ class MIDIAnalyzer:
         print(f"Total Notes: {metrics.get('note_count', 0)}")
         print(f"Duration: {metrics.get('total_duration', 0.0):.2f} seconds")
         print(f"Note Density: {metrics.get('notes_per_second', 0.0):.2f} notes/sec")
+        pedaling = metrics.get("pedaling", {})
+        if pedaling.get("pedal_analysis_available", False):
+            print(
+                f"Pedal Segments: {pedaling.get('pedal_segment_count', 0)}"
+                f" | Avg Hold: {pedaling.get('average_hold_duration', 0.0):.2f}s"
+            )
 
         print("\nPRACTICE RECOMMENDATIONS:")
         recommendations = self.analysis_results.get("practice_recommendations", [])

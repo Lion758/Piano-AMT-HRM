@@ -1,0 +1,13 @@
+defaults:
+  - experiment_T5_V4_HierarchyPool
+  - _self_
+
+data:
+  dataset_dirs: [../dataset/maps]
+  dataset_sequence_types: [performance-sequence]
+  include_pedal_events: true
+  use_note_extensions: false
+
+training:
+  mode: test
+  notes: "MAPS_OneShot_ENSTDkAm_ENSTDkCl_MUS"

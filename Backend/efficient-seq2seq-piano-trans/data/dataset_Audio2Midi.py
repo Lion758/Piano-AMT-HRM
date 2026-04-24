@@ -94,7 +94,7 @@ class SingleWavDataset(Dataset):
         assert duration <= 3000 # 1600 # <= 10 min
         # Check audio name and midi name.
         audio_path = self.audio_h5[self.audio_idx]["path"][()].decode()
-        self.audio_name = os.path.split(audio_path)[1].replace(".flac", "")
+        self.audio_name = os.path.splitext(os.path.split(audio_path)[1])[0]
         # assert midi_name == audio_name
         self.audio_size = self.audio_h5[self.audio_idx]["audio"].shape[0]
         
@@ -126,12 +126,14 @@ class SingleWavDataset(Dataset):
             dataframe_midi = sm_tokenizer.notes_to_midi_events(
                 dataframe_midi,
                 use_truth_offsets=use_truth_offsets,
+                include_pedal_events=bool(getattr(self.config.data, "include_pedal_events", False)),
             )
         else:
             dataframe_midi = sm_tokenizer.midi_to_dataframe(self.midi_path)
             dataframe_midi = sm_tokenizer.notes_to_midi_events(
                 dataframe_midi,
                 use_truth_offsets=use_truth_offsets,
+                include_pedal_events=bool(getattr(self.config.data, "include_pedal_events", False)),
             )
 
         self.dataframe_midi = dataframe_midi.sort_values(by="onset_sec").reset_index(drop=True)
@@ -288,12 +290,21 @@ def get_subset(subset_list_path):
     with open(subset_list_path) as f:
         lines = f.readlines()
         for line in lines:
-            line = line.strip().split("\t")
-            assert len(line) == 2
-            idx, path = line
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t")
+            assert len(parts) == 2
+            idx, path = parts
             paths.append([idx, path])
         
     return paths
+
+
+def get_cached_midi_path(root_dir, cache_dir_name, audio_relative_path):
+    audio_stem = os.path.splitext(audio_relative_path)[0]
+    cache_basename = audio_stem.replace("/", ">").replace("\\", ">") + ".mid"
+    return os.path.join(root_dir, cache_dir_name, cache_basename)
 
 class Audio2Midi_Dataset(Dataset):
     def __init__(self, config, dataset_dir:str, dataset_index:int, subset='train', dataset_size = -1, random_clip = True) -> None:
@@ -332,7 +343,7 @@ class Audio2Midi_Dataset(Dataset):
                 # break
                 pass
             
-            mid_path = os.path.join(root_dir, config.data.cache_dir_name, os.path.splitext(path)[0].replace("/", ">") + ".mid")
+            mid_path = get_cached_midi_path(root_dir, config.data.cache_dir_name, path)
             
             if os.path.exists(mid_path):
                 idx_list.append(idx)
@@ -364,7 +375,7 @@ class Audio2Midi_Dataset(Dataset):
                                                 audio_id_contiguous=self.audio_id_to_contiguous.get(int(i), 0)) 
             for i, path in tqdm(zip(idx_list, mid_paths), total=len(mid_paths))
         ]
-        self.datasets = ConcatDataset(self.dataset_list)
+        self.datasets = ConcatDataset(self.dataset_list) if self.dataset_list else []
         if dataset_size > 0:
             self.length = dataset_size
         else:

@@ -18,3 +18,4 @@
   hop_length: 320 # 160 # 320
   max_token_length: 512 #1024
   use_truth_offsets: false
+  include_pedal_events: false

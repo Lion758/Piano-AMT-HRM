@@ -3,7 +3,7 @@ import { API_BASE } from '../../lib/api.js';
 
 const WELCOME_MESSAGE = {
   role: 'tutor',
-  text: "Hi! I'm your AI piano tutor. Once you load a MIDI piece, I can analyse it and help you practise. Ask me anything — fingering tips, tricky passages, theory questions, you name it.",
+  text: "Hi! I'm your AI piano tutor. Once you load a MIDI piece, I can analyse it and help you practise. Ask me anything - fingering tips, tricky passages, theory questions, you name it.",
 };
 
 export default function ChatPanel({
@@ -13,11 +13,18 @@ export default function ChatPanel({
   notes = [],
   analysisData = null,
   analysisLoading = false,
+  preparedTutor = null,
 }) {
   const [messages, setMessages] = useState([WELCOME_MESSAGE]);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
   const bottomRef = useRef(null);
+
+  const summaryCards = preparedTutor?.summaryCards || null;
+  const suggestedQuestions = Array.isArray(preparedTutor?.suggestedQuestions)
+    ? preparedTutor.suggestedQuestions
+    : [];
+  const preparedSessionId = preparedTutor?.sessionId || null;
 
   useEffect(() => {
     if (isOpen) {
@@ -26,7 +33,19 @@ export default function ChatPanel({
   }, [messages, isOpen]);
 
   useEffect(() => {
+    if (summaryCards || preparedTutor?.openingMessage || preparedSessionId) {
+      setMessages([
+        {
+          role: 'tutor',
+          text: preparedTutor?.openingMessage?.trim()
+            || 'Your tutor session is ready. Ask about this performance or use one of the starter prompts below.',
+        },
+      ]);
+      return;
+    }
+
     if (!midiUrl || notes.length === 0) {
+      setMessages([WELCOME_MESSAGE]);
       return;
     }
 
@@ -34,7 +53,7 @@ export default function ChatPanel({
     const pieceDuration = notes.reduce((max, note) => Math.max(max, note.time + note.duration), 0);
     const mins = Math.floor(pieceDuration / 60);
     const secs = Math.round(pieceDuration % 60);
-    const intro = `I can see your piece has been loaded — ${noteCount} notes, ${mins}m ${secs}s long.`;
+    const intro = `I can see your piece has been loaded - ${noteCount} notes, ${mins}m ${secs}s long.`;
 
     let analysisMessage = "Play it and I'll give you feedback, or ask me anything about the piece.";
     if (analysisLoading) {
@@ -50,10 +69,10 @@ export default function ChatPanel({
         text: `${intro} ${analysisMessage}`,
       },
     ]);
-  }, [midiUrl, notes, analysisData, analysisLoading]);
+  }, [midiUrl, notes, analysisData, analysisLoading, preparedSessionId, preparedTutor?.openingMessage, summaryCards]);
 
-  const sendMessage = async () => {
-    const text = input.trim();
+  const sendMessage = async (prefilledText = null) => {
+    const text = (prefilledText ?? input).trim();
     if (!text || isThinking) {
       return;
     }
@@ -63,37 +82,36 @@ export default function ChatPanel({
     setIsThinking(true);
 
     try {
-      const midiContext = midiUrl
-        ? `The user has loaded a MIDI file. It has ${notes.length} notes and lasts ${Math.round(notes.reduce((max, note) => Math.max(max, note.time + note.duration), 0))} seconds.${analysisData?.analysis_overview ? ` MIDI analysis: ${analysisData.analysis_overview}` : ''}`
-        : 'No MIDI is currently loaded.';
+      if (preparedSessionId) {
+        const response = await fetch(`${API_BASE}/tutor/message`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: preparedSessionId,
+            message: text,
+          }),
+        });
 
-      const conversationHistory = messages.map((message) => ({
-        role: message.role === 'tutor' ? 'assistant' : 'user',
-        content: message.text,
-      }));
+        if (!response.ok) {
+          throw new Error('Tutor request failed');
+        }
 
-      const response = await fetch(`${API_BASE}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: text,
-          context: midiContext,
-          history: conversationHistory,
-          midi_analysis: analysisData,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Chat request failed');
+        const data = await response.json();
+        setMessages((prev) => [
+          ...prev,
+          { role: 'tutor', text: data.reply || 'I had trouble responding. Please try again.' },
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          { role: 'tutor', text: getFallbackReply(text, analysisData, summaryCards) },
+        ]);
       }
-
-      const data = await response.json();
+    } catch {
       setMessages((prev) => [
         ...prev,
-        { role: 'tutor', text: data.reply || data.message || 'I had trouble responding. Please try again.' },
+        { role: 'tutor', text: getFallbackReply(text, analysisData, summaryCards) },
       ]);
-    } catch {
-      setMessages((prev) => [...prev, { role: 'tutor', text: getFallbackReply(text, analysisData) }]);
     } finally {
       setIsThinking(false);
     }
@@ -105,6 +123,18 @@ export default function ChatPanel({
       sendMessage();
     }
   };
+
+  const chatStatus = !midiUrl
+    ? 'No piece loaded'
+    : preparedTutor?.mode === 'compare'
+      ? 'Comparison ready'
+      : preparedSessionId
+        ? 'Tutor ready'
+        : analysisLoading
+          ? 'Analyzing MIDI'
+          : analysisData
+            ? 'MIDI analyzed'
+            : 'Piece loaded';
 
   return (
     <div className={`chat-panel ${isOpen ? 'open' : ''}`}>
@@ -118,9 +148,7 @@ export default function ChatPanel({
             </div>
             <div>
               <h4 className="chat-title">AI Piano Tutor</h4>
-              <span className="chat-status">
-                {!midiUrl ? 'No piece loaded' : analysisLoading ? 'Analyzing MIDI' : analysisData ? 'MIDI analyzed' : 'Piece loaded'}
-              </span>
+              <span className="chat-status">{chatStatus}</span>
             </div>
           </div>
 
@@ -137,18 +165,81 @@ export default function ChatPanel({
         </div>
 
         <div className="chat-messages">
+          {summaryCards && (
+            <div className="chat-summary">
+              <div className="chat-summary-card">
+                <span className="chat-summary-kicker">Overall Assessment</span>
+                <h5>{summaryCards.overall_assessment?.headline || 'Tutor feedback is ready'}</h5>
+                {summaryCards.overall_assessment?.summary && <p>{summaryCards.overall_assessment.summary}</p>}
+                {summaryCards.overall_assessment?.stats?.length > 0 && (
+                  <div className="chat-summary-stats">
+                    {summaryCards.overall_assessment.stats.map((stat) => (
+                      <div key={`${stat.label}-${stat.value}`} className="chat-summary-stat">
+                        <span>{stat.label}</span>
+                        <strong>{stat.value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {summaryCards.strengths?.length > 0 && (
+                  <div className="chat-summary-tags">
+                    {summaryCards.strengths.map((strength) => (
+                      <span key={strength}>{strength}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="chat-summary-card">
+                <span className="chat-summary-kicker">What To Fix First</span>
+                <ul className="chat-summary-list">
+                  {(summaryCards.immediate_focus || []).map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="chat-summary-card">
+                <span className="chat-summary-kicker">Practice Plan</span>
+                <ul className="chat-summary-list">
+                  {(summaryCards.practice_plan || []).map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
           {messages.map((message, index) => (
-            <div key={index} className={`chat-msg ${message.role}`}>
-              {message.role === 'tutor' && (
-                <div className="chat-msg-avatar">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
-                  </svg>
+            <div key={`${message.role}-${index}`}>
+              <div className={`chat-msg ${message.role}`}>
+                {message.role === 'tutor' && (
+                  <div className="chat-msg-avatar">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
+                    </svg>
+                  </div>
+                )}
+                <div className="chat-bubble">
+                  <p>{message.text}</p>
+                </div>
+              </div>
+
+              {message.role === 'tutor' && index === 0 && suggestedQuestions.length > 0 && (
+                <div className="chat-suggested-prompts">
+                  {suggestedQuestions.map((question) => (
+                    <button
+                      key={question}
+                      className="chat-suggested-btn"
+                      onClick={() => sendMessage(question)}
+                      disabled={isThinking}
+                      type="button"
+                    >
+                      {question}
+                    </button>
+                  ))}
                 </div>
               )}
-              <div className="chat-bubble">
-                <p>{message.text}</p>
-              </div>
             </div>
           ))}
 
@@ -182,7 +273,7 @@ export default function ChatPanel({
           />
           <button
             className="chat-send-btn"
-            onClick={sendMessage}
+            onClick={() => sendMessage()}
             disabled={!input.trim() || isThinking}
             type="button"
           >
@@ -196,13 +287,28 @@ export default function ChatPanel({
   );
 }
 
-function getFallbackReply(text, analysisData) {
+function getFallbackReply(text, analysisData, summaryCards = null) {
   const normalized = text.toLowerCase();
   const metrics = analysisData?.metrics || {};
   const recommendations = analysisData?.practice_recommendations || [];
   const dynamicRange = Math.round(metrics?.velocity_stats?.dynamic_range || 0);
   const noteDensity = Number(metrics?.notes_per_second || 0).toFixed(2);
   const avgDuration = Number(metrics?.duration_stats?.mean || 0).toFixed(2);
+  const preparedFocus = summaryCards?.immediate_focus || [];
+  const preparedPlan = summaryCards?.practice_plan || [];
+  const preparedStrengths = summaryCards?.strengths || [];
+
+  if (normalized.includes('practice first') || normalized.includes('start with')) {
+    if (preparedFocus.length > 0) {
+      return `Start with this first: ${preparedFocus[0]}. Once that feels more reliable, move to ${preparedFocus[1] || 'another short section at the same slow tempo'}.`;
+    }
+  }
+
+  if (normalized.includes('15-minute') || normalized.includes('practice plan')) {
+    if (preparedPlan.length > 0) {
+      return `Try this short block: 5 minutes on ${preparedPlan[0].toLowerCase()}, 5 minutes on ${preparedPlan[1]?.toLowerCase() || 'your hardest short section'}, then finish with ${preparedPlan[2]?.toLowerCase() || 'one controlled full run-through'}.`;
+    }
+  }
 
   if (normalized.includes('finger') || normalized.includes('hand')) {
     return "Fingering depends on the passage. Generally, keep your wrist relaxed and let your thumb cross naturally under longer phrases. For fast runs, practice hands separately first.";
@@ -216,6 +322,9 @@ function getFallbackReply(text, analysisData) {
   }
 
   if (normalized.includes('mistake') || normalized.includes('miss') || normalized.includes('error')) {
+    if (preparedFocus.length > 0) {
+      return `The clearest first correction is this: ${preparedFocus[0]}. Isolate the exact bar that breaks down, loop 2-4 bars slowly, and rebuild the passage with a steady pulse.`;
+    }
     if (recommendations.length > 0) {
       return `The analysis already points us toward this: ${recommendations[0]}. Isolate the exact bar that breaks down, loop 2-4 bars slowly, and rebuild the passage with a steady pulse.`;
     }
@@ -231,11 +340,19 @@ function getFallbackReply(text, analysisData) {
   }
 
   if (normalized.includes('rhythm') || normalized.includes('timing')) {
-    return "A metronome is your best friend for timing. Start very slow, nail the rhythm, then increase BPM by 5–10 each session.";
+    return "A metronome is your best friend for timing. Start very slow, nail the rhythm, then increase BPM by 5-10 each session.";
+  }
+
+  if ((normalized.includes('strength') || normalized.includes('good')) && preparedStrengths.length > 0) {
+    return `One thing worth keeping is this: ${preparedStrengths[0]}. Keep that intact while you tighten the weaker spots one passage at a time.`;
+  }
+
+  if (summaryCards?.overall_assessment?.summary) {
+    return `${summaryCards.overall_assessment.summary} ${preparedFocus[0] ? `The next practical step is ${preparedFocus[0]}.` : 'Ask me for a shorter drill if you want a more focused practice step.'}`;
   }
 
   if (analysisData?.analysis_overview) {
-    return `From the MIDI analysis, I’m seeing ${dynamicRange} dynamic-range points and an average note length of ${avgDuration}s. ${recommendations[0] || 'Try practicing in short sections with a metronome and listen for even tone and timing.'}`;
+    return `From the MIDI analysis, I'm seeing ${dynamicRange} dynamic-range points and an average note length of ${avgDuration}s. ${recommendations[0] || 'Try practicing in short sections with a metronome and listen for even tone and timing.'}`;
   }
 
   return "Great question. Try practicing the passage at 50-70% speed with a metronome, and break it into small sections before bringing the hands back together.";

@@ -11,3 +11,10 @@ dependencies:
   - pydantic
   - pytorch-lightning
   - numpy=1.26
+  - fastapi
+  - uvicorn
+  - pytest
+  - pip
+  - pip:
+      - python-multipart
+      - openai>=1.0.0

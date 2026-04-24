@@ -19,6 +19,7 @@ data:
     dataset_dirs: [dataset/maestro-v3.0.0] # dataset/maestro-v3.0.0, dataset/asap-dataset
     dataset_sequence_types: [performance-sequence] # performance-sequence, score-sequence
     cache_dir_name: cache
+    include_pedal_events: false
 
     features:  mel # cqt # log-stft, cqt, mel
     amplitude_to_db: true #true
@@ -57,4 +58,3 @@ training:
   debug_log_offline: false
   losses:
     loss_decoder: [decoder_outputs, decoder_targets, loss.CrossEntropyLoss]
-

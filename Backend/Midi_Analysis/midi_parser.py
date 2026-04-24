@@ -16,23 +16,26 @@ class MIDIParser:
             # Extract notes ONCE
             notes = self._extract_notes()
 
-            # Compute duration from actual max note end time (fallback to get_end_time)
-            if notes:
-                total_duration = max(n['end'] for n in notes)
-            else:
-                total_duration = self.midi_data.get_end_time() if self.midi_data else 0
+            # Include control changes in the piece duration so pedal-only tails are preserved.
+            midi_end_time = self.midi_data.get_end_time() if self.midi_data else 0
+            note_end_time = max((n['end'] for n in notes), default=0.0)
+            total_duration = max(float(note_end_time), float(midi_end_time))
+
+            pedaling = self._extract_pedaling(total_duration)
 
             metadata = self._extract_metadata_from_notes(notes, total_duration)
 
-            return {
+            self.parsed_data = {
                 'notes': notes,
                 'total_duration': total_duration,          # add top-level
                 'metadata': metadata,                      # metadata also has total_duration
                 'timing': self._extract_timing_info(),
-                'harmony': self._extract_harmonic_content(),
-                'structure': self._extract_musical_structure(),
-                'performance_data': self._extract_performance_patterns()
+                'harmony': self._extract_harmonic_content(notes),
+                'structure': self._extract_musical_structure(notes),
+                'performance_data': self._extract_performance_patterns(notes),
+                'pedaling': pedaling,
             }
+            return self.parsed_data
             
         except Exception as e:
             print(f"Error parsing MIDI file: {e}")
@@ -69,7 +72,10 @@ class MIDIParser:
                     'name': inst.name,
                     'program': int(inst.program),
                     'is_drum': bool(inst.is_drum),
-                    'note_count': int(len(inst.notes))
+                    'note_count': int(len(inst.notes)),
+                    'sustain_pedal_event_count': int(
+                        sum(1 for cc in getattr(inst, 'control_changes', []) if int(getattr(cc, 'number', -1)) == 64)
+                    ),
                 } for inst in self.midi_data.instruments
             ],
             'key_signature_changes': [
@@ -83,6 +89,10 @@ class MIDIParser:
         # Get beats and downbeats for rhythmic analysis
         beats = self.midi_data.get_beats()
         downbeats = self.midi_data.get_downbeats()
+        try:
+            average_tempo = float(self.midi_data.estimate_tempo())
+        except Exception:
+            average_tempo = 0.0
         
         return {
             # 'tempo_changes': [
@@ -99,15 +109,15 @@ class MIDIParser:
                     'time': ts.time
                 } for ts in self.midi_data.time_signature_changes
             ],
-            'average_tempo': self.midi_data.estimate_tempo(),
+            'average_tempo': average_tempo,
             'beats': beats.tolist() if beats is not None else [],
             'downbeats': downbeats.tolist() if downbeats is not None else [],
             'ticks_per_beat': getattr(self.midi_data, 'ticks_per_beat', None)
         }
     
-    def _extract_harmonic_content(self) -> Dict:
+    def _extract_harmonic_content(self, notes: Optional[List[Dict]] = None) -> Dict:
         """Extract chords and harmonic analysis."""
-        notes = self._extract_notes()
+        notes = notes if notes is not None else self._extract_notes()
         
         # Simple chord detection (you can enhance this)
         chords = self._detect_chords(notes)
@@ -121,9 +131,9 @@ class MIDIParser:
             }
         }
     
-    def _extract_musical_structure(self) -> Dict:
+    def _extract_musical_structure(self, notes: Optional[List[Dict]] = None) -> Dict:
         """Extract phrases and musical sections."""
-        notes = self._extract_notes()
+        notes = notes if notes is not None else self._extract_notes()
         
         return {
             'phrases': self._detect_phrases(notes),
@@ -131,9 +141,9 @@ class MIDIParser:
             'note_density': self._calculate_note_density(notes)
         }
     
-    def _extract_performance_patterns(self) -> Dict:
+    def _extract_performance_patterns(self, notes: Optional[List[Dict]] = None) -> Dict:
         """Extract patterns useful for performance analysis."""
-        notes = self._extract_notes()
+        notes = notes if notes is not None else self._extract_notes()
         
         return {
             'velocity_profile': {
@@ -146,6 +156,222 @@ class MIDIParser:
             },
             'timing_consistency': self._analyze_timing_consistency(notes),
             'articulation_patterns': self._analyze_articulation(notes)
+        }
+
+    def _extract_pedaling(self, total_duration: float, threshold: int = 64) -> Dict[str, Any]:
+        """Extract raw CC64 events plus normalized pedal transitions and sustain spans."""
+        if self.midi_data is None:
+            return {
+                'available': False,
+                'cc_number': 64,
+                'threshold': int(threshold),
+                'raw_events': [],
+                'events': [],
+                'segments': [],
+                'tracks': [],
+                'summary': {
+                    'raw_event_count': 0,
+                    'event_count': 0,
+                    'segment_count': 0,
+                    'pedal_down_count': 0,
+                    'pedal_up_count': 0,
+                    'total_pedal_time': 0.0,
+                    'pedal_coverage_ratio': 0.0,
+                    'average_hold_duration': 0.0,
+                    'longest_hold_duration': 0.0,
+                    'tracks_with_pedal': 0,
+                },
+            }
+
+        raw_events: List[Dict[str, Any]] = []
+        transition_events: List[Dict[str, Any]] = []
+        segments: List[Dict[str, Any]] = []
+        track_payloads: List[Dict[str, Any]] = []
+
+        for track_id, instrument in enumerate(self.midi_data.instruments):
+            instrument_name = instrument.name or pretty_midi.program_to_instrument_name(int(instrument.program))
+            track_raw_events = []
+
+            for cc in sorted(getattr(instrument, 'control_changes', []), key=lambda x: float(getattr(x, 'time', 0.0))):
+                if int(getattr(cc, 'number', -1)) != 64:
+                    continue
+                track_raw_events.append({
+                    'time': round(float(cc.time), 6),
+                    'value': int(cc.value),
+                    'cc_number': 64,
+                    'track_id': int(track_id),
+                    'instrument': int(instrument.program),
+                    'instrument_name': instrument_name,
+                    'is_drum': bool(instrument.is_drum),
+                })
+
+            track_events, track_segments = self._normalize_pedal_track(
+                track_raw_events,
+                total_duration=total_duration,
+                threshold=threshold,
+            )
+
+            raw_events.extend(track_raw_events)
+            transition_events.extend(track_events)
+            segments.extend(track_segments)
+            track_payloads.append(
+                {
+                    'track_id': int(track_id),
+                    'instrument': int(instrument.program),
+                    'instrument_name': instrument_name,
+                    'is_drum': bool(instrument.is_drum),
+                    'raw_events': track_raw_events,
+                    'events': track_events,
+                    'segments': track_segments,
+                    'summary': self._summarize_pedal_segments(track_raw_events, track_events, track_segments, total_duration),
+                }
+            )
+
+        raw_events.sort(key=lambda x: (float(x.get('time', 0.0)), int(x.get('track_id', 0))))
+        transition_events.sort(key=lambda x: (float(x.get('time', 0.0)), int(x.get('track_id', 0))))
+        segments.sort(key=lambda x: (float(x.get('start', 0.0)), int(x.get('track_id', 0))))
+
+        return {
+            'available': bool(raw_events),
+            'cc_number': 64,
+            'threshold': int(threshold),
+            'raw_events': raw_events,
+            'events': transition_events,
+            'segments': segments,
+            'tracks': track_payloads,
+            'summary': self._summarize_pedal_segments(raw_events, transition_events, segments, total_duration),
+        }
+
+    def _normalize_pedal_track(
+        self,
+        raw_events: List[Dict[str, Any]],
+        total_duration: float,
+        threshold: int,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Convert raw CC64 events into down/up transitions and sustain spans."""
+        if not raw_events:
+            return [], []
+
+        transition_events: List[Dict[str, Any]] = []
+        segments: List[Dict[str, Any]] = []
+
+        pedal_down = False
+        segment_start: Optional[float] = None
+        segment_max_value = 0
+        segment_event_count = 0
+        segment_start_value = 0
+
+        for event in raw_events:
+            value = int(event.get('value', 0))
+            time = float(event.get('time', 0.0))
+            is_down_value = value >= int(threshold)
+
+            if is_down_value and not pedal_down:
+                pedal_down = True
+                segment_start = time
+                segment_max_value = value
+                segment_event_count = 1
+                segment_start_value = value
+                transition_events.append(
+                    {
+                        **event,
+                        'event_type': 'down',
+                        'is_down': True,
+                    }
+                )
+                continue
+
+            if is_down_value and pedal_down:
+                segment_max_value = max(segment_max_value, value)
+                segment_event_count += 1
+                continue
+
+            if (not is_down_value) and pedal_down:
+                pedal_down = False
+                segment_event_count += 1
+                transition_events.append(
+                    {
+                        **event,
+                        'event_type': 'up',
+                        'is_down': False,
+                    }
+                )
+                segment_end = max(time, segment_start if segment_start is not None else time)
+                segments.append(
+                    {
+                        'start': round(float(segment_start if segment_start is not None else time), 6),
+                        'end': round(float(segment_end), 6),
+                        'duration': round(float(max(0.0, segment_end - (segment_start if segment_start is not None else time))), 6),
+                        'max_value': int(segment_max_value),
+                        'start_value': int(segment_start_value),
+                        'end_value': int(value),
+                        'event_count': int(segment_event_count),
+                        'track_id': int(event.get('track_id', 0)),
+                        'instrument': int(event.get('instrument', 0)),
+                        'instrument_name': event.get('instrument_name', ''),
+                        'is_drum': bool(event.get('is_drum', False)),
+                    }
+                )
+                segment_start = None
+                segment_max_value = 0
+                segment_event_count = 0
+                segment_start_value = 0
+
+        if pedal_down:
+            tail_end = max(float(total_duration), float(segment_start if segment_start is not None else total_duration))
+            last_event = raw_events[-1]
+            transition_events.append(
+                {
+                    **last_event,
+                    'time': round(float(tail_end), 6),
+                    'value': 0,
+                    'event_type': 'up_inferred',
+                    'is_down': False,
+                    'inferred': True,
+                }
+            )
+            segments.append(
+                {
+                    'start': round(float(segment_start if segment_start is not None else tail_end), 6),
+                    'end': round(float(tail_end), 6),
+                    'duration': round(float(max(0.0, tail_end - (segment_start if segment_start is not None else tail_end))), 6),
+                    'max_value': int(segment_max_value),
+                    'start_value': int(segment_start_value),
+                    'end_value': 0,
+                    'event_count': int(max(1, segment_event_count)),
+                    'track_id': int(last_event.get('track_id', 0)),
+                    'instrument': int(last_event.get('instrument', 0)),
+                    'instrument_name': last_event.get('instrument_name', ''),
+                    'is_drum': bool(last_event.get('is_drum', False)),
+                    'release_inferred': True,
+                }
+            )
+
+        return transition_events, segments
+
+    def _summarize_pedal_segments(
+        self,
+        raw_events: List[Dict[str, Any]],
+        transition_events: List[Dict[str, Any]],
+        segments: List[Dict[str, Any]],
+        total_duration: float,
+    ) -> Dict[str, Any]:
+        durations = [float(seg.get('duration', 0.0)) for seg in segments]
+        pedal_time = sum(durations)
+        pedal_down_count = sum(1 for ev in transition_events if ev.get('event_type') == 'down')
+        pedal_up_count = sum(1 for ev in transition_events if str(ev.get('event_type', '')).startswith('up'))
+
+        return {
+            'raw_event_count': int(len(raw_events)),
+            'event_count': int(len(transition_events)),
+            'segment_count': int(len(segments)),
+            'pedal_down_count': int(pedal_down_count),
+            'pedal_up_count': int(pedal_up_count),
+            'total_pedal_time': round(float(pedal_time), 6),
+            'pedal_coverage_ratio': round(float(pedal_time / total_duration), 4) if total_duration > 1e-9 else 0.0,
+            'average_hold_duration': round(float(statistics.mean(durations)), 6) if durations else 0.0,
+            'longest_hold_duration': round(float(max(durations)), 6) if durations else 0.0,
+            'tracks_with_pedal': int(len({seg.get('track_id', 0) for seg in segments})),
         }
     
     # Helper methods would go here...
