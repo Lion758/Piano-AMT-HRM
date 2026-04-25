@@ -54,6 +54,18 @@ def _get_gpt_tutor_cls():
     return _import_local("gpt_tutor", "GPTTutor")
 
 
+def _get_simple_phrase_segmenter_cls():
+    return _import_local("simple_phrase_segmentation", "SimplePhraseSegmenter")
+
+
+def _get_solo_performance_analysis_cls():
+    return _import_local("solo_performance_analysis", "SoloPerformanceAnalysis")
+
+
+def _get_solo_json_summarization_cls():
+    return _import_local("solo_json_summarization", "SoloJSONSummarization")
+
+
 class MIDIAnalyzer:
     """
     Main orchestrator for the MIDI analysis pipeline.
@@ -76,7 +88,6 @@ class MIDIAnalyzer:
             raise ValueError(f"Failed to parse performance MIDI: {performance_path}")
 
         notes = performance_data.get("notes", [])
-
         total_duration = (
             performance_data.get("total_duration")
             or performance_data.get("metadata", {}).get("total_duration")
@@ -85,17 +96,28 @@ class MIDIAnalyzer:
         )
 
         metrics = self._calculate_basic_metrics(notes, float(total_duration))
-        pedal_analysis = _get_error_analysis_cls()(
+
+        phrase_data = _get_simple_phrase_segmenter_cls()(performance_data).segment()
+
+        solo_analysis = _get_solo_performance_analysis_cls()(
+            performance_data=performance_data,
+            phrase_data=phrase_data,
+        ).analyze()
+
+        gpt_summary = _get_solo_json_summarization_cls()(
             {
-                "reference": {},
-                "performance": performance_data,
-                "alignment": [],
+                "performance_data": performance_data,
+                "metrics": metrics,
+                "musical_structure": phrase_data,
+                "solo_analysis": solo_analysis,
             }
-        ).analyze_pedaling()
-        metrics["pedaling"] = pedal_analysis.get("metrics", {}).get("pedaling", {})
+        ).create_summary()
+
         recommendations = self._dedupe_text_list(
-            self._generate_solo_recommendations(metrics)
-            + pedal_analysis.get("practice_recommendations", [])
+            [
+                self._format_solo_recommendation_text(recommendation)
+                for recommendation in solo_analysis.get("practice_recommendations", [])
+            ]
         )
 
         self.analysis_results = {
@@ -103,7 +125,9 @@ class MIDIAnalyzer:
             "performance_file": performance_path,
             "parsed_data": performance_data,
             "metrics": metrics,
-            "performance_analysis": pedal_analysis,
+            "musical_structure": phrase_data,
+            "performance_analysis": solo_analysis,
+            "gpt_ready_summary": gpt_summary,
             "practice_recommendations": recommendations,
         }
         return self.analysis_results
@@ -405,6 +429,25 @@ class MIDIAnalyzer:
 
         return recommendations
 
+    def _format_solo_recommendation_text(self, recommendation: Dict[str, Any]) -> str:
+        if not isinstance(recommendation, dict):
+            return str(recommendation or "").strip()
+
+        focus = str(recommendation.get("focus", "")).strip()
+        why = str(recommendation.get("why", "")).strip()
+        exercise = str(recommendation.get("exercise", "")).strip()
+        location = recommendation.get("location", {}) or {}
+        start_time = location.get("start_time")
+        end_time = location.get("end_time")
+        location_text = ""
+        if isinstance(start_time, (int, float)) and isinstance(end_time, (int, float)):
+            location_text = f" ({float(start_time):.1f}s-{float(end_time):.1f}s)"
+
+        parts = [part for part in [focus, why, exercise] if part]
+        if not parts:
+            return ""
+        return f"{': '.join([parts[0], ' '.join(parts[1:])])}{location_text}".strip()
+
     def _dedupe_text_list(self, values: List[str]) -> List[str]:
         deduped: List[str] = []
         seen = set()
@@ -464,23 +507,22 @@ class MIDIAnalyzer:
 
     def _print_solo_summary(self) -> None:
         metrics = self.analysis_results.get("metrics", {})
+        musical_structure = self.analysis_results.get("musical_structure", {})
+        performance_analysis = self.analysis_results.get("performance_analysis", {})
         performance_file = self.analysis_results.get("performance_file", "Unknown")
 
         print(f"Performance File: {performance_file}")
         print(f"Total Notes: {metrics.get('note_count', 0)}")
         print(f"Duration: {metrics.get('total_duration', 0.0):.2f} seconds")
         print(f"Note Density: {metrics.get('notes_per_second', 0.0):.2f} notes/sec")
-        pedaling = metrics.get("pedaling", {})
-        if pedaling.get("pedal_analysis_available", False):
-            print(
-                f"Pedal Segments: {pedaling.get('pedal_segment_count', 0)}"
-                f" | Avg Hold: {pedaling.get('average_hold_duration', 0.0):.2f}s"
-            )
+        print(f"Phrase Count: {musical_structure.get('phrase_count', 0)}")
+        print(f"Observations: {len(performance_analysis.get('observations', []))}")
+        print("Score / Grade: Not available in solo mode")
 
-        print("\nPRACTICE RECOMMENDATIONS:")
+        print("\nTOP RECOMMENDATIONS:")
         recommendations = self.analysis_results.get("practice_recommendations", [])
         if recommendations:
-            for i, rec in enumerate(recommendations, 1):
+            for i, rec in enumerate(recommendations[:3], 1):
                 print(f"  {i}. {rec}")
         else:
             print("  No specific recommendations available.")

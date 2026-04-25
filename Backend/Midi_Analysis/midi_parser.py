@@ -34,6 +34,8 @@ class MIDIParser:
                 'structure': self._extract_musical_structure(notes),
                 'performance_data': self._extract_performance_patterns(notes),
                 'pedaling': pedaling,
+                'pedals': self._build_pedal_alias_events(pedaling),
+                'pedal_segments': self._build_pedal_alias_segments(pedaling),
             }
             return self.parsed_data
             
@@ -373,6 +375,43 @@ class MIDIParser:
             'longest_hold_duration': round(float(max(durations)), 6) if durations else 0.0,
             'tracks_with_pedal': int(len({seg.get('track_id', 0) for seg in segments})),
         }
+
+    def _build_pedal_alias_events(self, pedaling: Dict[str, Any]) -> List[Dict[str, Any]]:
+        alias_events: List[Dict[str, Any]] = []
+        for event in pedaling.get('events', []) or []:
+            event_type = str(event.get('event_type', ''))
+            alias_events.append(
+                {
+                    'type': 'sustain',
+                    'time': round(float(event.get('time', 0.0)), 6),
+                    'value': int(event.get('value', 0)),
+                    'state': 'down' if event_type.startswith('down') else 'up',
+                    'track_id': int(event.get('track_id', 0)),
+                    'instrument': int(event.get('instrument', 0)),
+                    'instrument_name': event.get('instrument_name', ''),
+                    'is_drum': bool(event.get('is_drum', False)),
+                    'inferred': bool(event.get('inferred', False)),
+                }
+            )
+        return alias_events
+
+    def _build_pedal_alias_segments(self, pedaling: Dict[str, Any]) -> List[Dict[str, Any]]:
+        alias_segments: List[Dict[str, Any]] = []
+        for segment in pedaling.get('segments', []) or []:
+            alias_segments.append(
+                {
+                    'start_time': round(float(segment.get('start', 0.0)), 6),
+                    'end_time': round(float(segment.get('end', 0.0)), 6),
+                    'duration': round(float(segment.get('duration', 0.0)), 6),
+                    'max_value': int(segment.get('max_value', 0)),
+                    'track_id': int(segment.get('track_id', 0)),
+                    'instrument': int(segment.get('instrument', 0)),
+                    'instrument_name': segment.get('instrument_name', ''),
+                    'is_drum': bool(segment.get('is_drum', False)),
+                    'release_inferred': bool(segment.get('release_inferred', False)),
+                }
+            )
+        return alias_segments
     
     # Helper methods would go here...
     def _get_beat_position(self, time: float) -> float:
