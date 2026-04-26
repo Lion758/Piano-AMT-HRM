@@ -36,6 +36,7 @@ import os
 from sklearn.metrics import accuracy_score
 import matplotlib.pyplot as plt
 from data.mel import MelSpectrogram
+from data.spec_augment import SpecAugment
 # from nnAudio.features import CQT, STFT
 # import nnAudio.utils
 from PIL import Image
@@ -222,6 +223,18 @@ class MT3Trainer(pl.LightningModule):
             self.features_extracter = cqt_extracter
         elif config.data.features == "log-stft":
             self.features_extracter = log_stft_extracter
+
+        aug_cfg = config.data.get("augmentation", None)
+        sa_cfg = aug_cfg.get("spec_augment", None) if aug_cfg is not None else None
+        if aug_cfg is not None and aug_cfg.get("enabled", False) and sa_cfg is not None and sa_cfg.get("enabled", False):
+            self.spec_augment = SpecAugment(
+                freq_mask_param=sa_cfg.get("freq_mask_param", 13),
+                n_freq_masks=sa_cfg.get("n_freq_masks", 2),
+                time_mask_param=sa_cfg.get("time_mask_param", 40),
+                n_time_masks=sa_cfg.get("n_time_masks", 2),
+            )
+        else:
+            self.spec_augment = None
     
 
     def forward(self, encoder_input_tokens, decoder_target_tokens, decode, decoder_input_tokens = None, decoder_positions=None, decoder_targets_frame_index=None, encoder_decoder_mask=None):
@@ -272,6 +285,8 @@ class MT3Trainer(pl.LightningModule):
                 # assert self.config.data.features != "mel"
                 # if self.config.data.features != "mel":
                 inputs = torchaudio.transforms.AmplitudeToDB(top_db=80.0)(inputs)
+            if self.spec_augment is not None and self.training:
+                inputs = self.spec_augment(inputs)
         decoder_inputs = None
 
         targets_dict["input_features"] = inputs

@@ -18,3 +18,21 @@
   hop_length: 320 # 160 # 320
   max_token_length: 512 #1024
   use_truth_offsets: false
+  augmentation:
+    enabled: true
+    waveform:
+      pitch_shift:
+        enabled: true
+        p: 0.8
+        min_semitones: -0.1
+        max_semitones: 0.1
+      reverb:
+        enabled: true
+        p: 0.5
+        ir_dir: assets/impulse_responses
+    spec_augment:
+      enabled: true
+      freq_mask_param: 13
+      n_freq_masks: 2
+      time_mask_param: 40
+      n_time_masks: 2

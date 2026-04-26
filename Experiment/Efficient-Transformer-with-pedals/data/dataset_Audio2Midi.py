@@ -36,6 +36,60 @@ import data.symbolic_music_tokenizer as Tokenizer
 from collections import defaultdict
 
 
+def _build_waveform_augmenter(config):
+    """Construct an audiomentations.Compose from config.data.augmentation.waveform.
+
+    Returns None if augmentation is disabled, audiomentations is unavailable, or
+    no enabled stages produce a valid transform (e.g. reverb requested but no
+    IRs present on disk). Safe to call from any subset; callers gate on subset.
+    """
+    aug_cfg = config.data.get("augmentation", None)
+    if aug_cfg is None or not aug_cfg.get("enabled", False):
+        return None
+
+    wave_cfg = aug_cfg.get("waveform", None)
+    if wave_cfg is None:
+        return None
+
+    try:
+        import audiomentations
+    except ImportError:
+        print("[augmentation] audiomentations not installed; skipping waveform augmentations.")
+        return None
+
+    transforms = []
+
+    ps = wave_cfg.get("pitch_shift", None)
+    if ps is not None and ps.get("enabled", False):
+        transforms.append(audiomentations.PitchShift(
+            min_semitones=float(ps.get("min_semitones", -0.1)),
+            max_semitones=float(ps.get("max_semitones", 0.1)),
+            p=float(ps.get("p", 0.8)),
+        ))
+
+    rv = wave_cfg.get("reverb", None)
+    if rv is not None and rv.get("enabled", False):
+        ir_dir = rv.get("ir_dir", None)
+        if ir_dir is not None:
+            ir_path = ir_dir
+            if not os.path.isabs(ir_path):
+                ir_path = os.path.join(work_dir, ir_path)
+            ir_files = []
+            if os.path.isdir(ir_path):
+                ir_files = sorted(glob(os.path.join(ir_path, "*.wav")))
+            if len(ir_files) > 0:
+                transforms.append(audiomentations.ApplyImpulseResponse(
+                    ir_path=ir_path,
+                    p=float(rv.get("p", 0.5)),
+                ))
+            else:
+                print(f"[augmentation] reverb enabled but no .wav IRs found in {ir_path}; skipping.")
+
+    if len(transforms) == 0:
+        return None
+    return audiomentations.Compose(transforms)
+
+
 
 # Hash string to int 0~9.
 def stable_hash_to_digit(s: str) -> int:
@@ -44,7 +98,7 @@ def stable_hash_to_digit(s: str) -> int:
 
 
 class SingleWavDataset(Dataset):
-    def __init__(self,config, dataset_dir:str, dataset_index:int, audio_idx, midi_path, audio_h5_path, random_clip = True) -> None:
+    def __init__(self,config, dataset_dir:str, dataset_index:int, audio_idx, midi_path, audio_h5_path, random_clip = True, augmenter=None) -> None:
         self.config = config
         self.dataset_dir = dataset_dir
         self.dataset_index = dataset_index
@@ -108,6 +162,7 @@ class SingleWavDataset(Dataset):
 
         self.random_clip = random_clip
         self.random = np.random.RandomState() #Don't use constand seed here!!! (Overfitting problems).
+        self.augmenter = augmenter
 
     def __len__(self):
         # if self.random_clip == True:
@@ -166,7 +221,19 @@ class SingleWavDataset(Dataset):
 
         # audio = torch.tensor(self.data_dict["wav"][audio_begin:audio_end])
         audio = torch.tensor(self.audio_h5[self.audio_idx]["audio"][audio_begin:audio_end])
-        
+
+        # Apply waveform augmentations (training only — gated by Audio2Midi_Dataset).
+        # Augmentations here are label-preserving for note-onset prediction:
+        # ±10-cent pitch shift does not cross a semitone boundary, and convolution
+        # reverb does not move onset times beyond the mir_eval 50ms tolerance.
+        if self.augmenter is not None and len(audio) > 0:
+            audio_np = audio.numpy().astype(np.float32, copy=False)
+            audio_np = self.augmenter(samples=audio_np, sample_rate=DEFAULT_SAMPLE_RATE)
+            peak = float(np.max(np.abs(audio_np))) if audio_np.size > 0 else 0.0
+            if peak > 1.0:
+                audio_np = audio_np / peak
+            audio = torch.from_numpy(audio_np)
+
         # convert time resolution from frame to OUTPUT_TIME_STEP_PER_SECOND
         second_per_frame = self.config.data.hop_length/DEFAULT_SAMPLE_RATE 
         begin_sec = begin * second_per_frame # * OUTPUT_TIME_STEP_PER_SECOND
@@ -354,7 +421,11 @@ class Audio2Midi_Dataset(Dataset):
                 
         
 
-        self.dataset_list = [ SingleWavDataset(config, dataset_dir, dataset_index, i, path, audio_h5_path, random_clip=random_clip) 
+        augmenter = _build_waveform_augmenter(config) if subset == "train" else None
+        if augmenter is not None:
+            print(f"[augmentation] waveform augmenter active for subset={subset} with {len(augmenter.transforms)} transform(s).")
+
+        self.dataset_list = [ SingleWavDataset(config, dataset_dir, dataset_index, i, path, audio_h5_path, random_clip=random_clip, augmenter=augmenter)
             for i, path in tqdm(zip(idx_list, mid_paths), total=len(mid_paths))
         ]
         self.datasets = ConcatDataset(self.dataset_list)
