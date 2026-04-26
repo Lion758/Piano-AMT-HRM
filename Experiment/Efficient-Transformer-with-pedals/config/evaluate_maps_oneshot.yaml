@@ -5,11 +5,12 @@ defaults:
 data:
   dataset_dirs: [/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/MAPS]
   dataset_sequence_types: [performance-sequence]
-  include_pedal_events: false
-  use_note_extensions: false
+  use_truth_offsets: true
+  emit_pedal_tokens: false
 
 evaluation:
   report_pedal_metrics: false
+  report_pedal_extended: false
 
 training:
   mode: test

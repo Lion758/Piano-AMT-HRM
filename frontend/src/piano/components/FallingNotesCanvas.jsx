@@ -1,7 +1,6 @@
 import { useRef, useEffect, useCallback } from 'react';
 import { COLORS, DEFAULT_PPS, TOTAL_WHITE_KEYS } from '../utils/constants.js';
 import { getNotePosition, midiToShortName, findFirstNoteIndex, isBlackKey } from '../utils/noteHelpers.js';
-import { isSustainActiveAtTime } from '../utils/pedalHelpers.js';
 
 function drawRoundedRect(ctx, x, y, w, h, r = 4) {
   const rr = Math.min(r, w / 2, h / 2);
@@ -19,24 +18,61 @@ function drawRoundedRect(ctx, x, y, w, h, r = 4) {
 }
 
 function drawNoteLabel(ctx, label, x, y, w, h) {
-  const fontSize = Math.max(8, Math.min(12, Math.floor(Math.min(h * 0.42, w * 0.55))));
-  const padX = Math.min(6, w * 0.12);
-  const badgeH = Math.max(12, fontSize + 4);
-  const badgeW = Math.max(16, Math.min(w - 2, label.length * (fontSize * 0.62) + padX * 2));
-  const badgeX = x + (w - badgeW) / 2;
-  const badgeY = h >= badgeH + 6 ? y + 3 : y + Math.max(1, (h - badgeH) / 2);
-
   ctx.save();
+  let fontSize = Math.max(6, Math.min(12, Math.floor(Math.min(w / (label.length * 0.58), h >= 14 ? h * 0.38 : 8))));
+  ctx.font = `bold ${fontSize}px "Avenir Next", "Segoe UI", sans-serif`;
+  while (fontSize > 5 && ctx.measureText(label).width > w - 1) {
+    fontSize -= 1;
+    ctx.font = `bold ${fontSize}px "Avenir Next", "Segoe UI", sans-serif`;
+  }
+
+  const textW = ctx.measureText(label).width;
+  const padX = Math.min(6, Math.max(2, w * 0.12));
+  const badgeH = fontSize + (h >= 14 ? 5 : 3);
+  const badgeW = Math.min(w - 2, Math.max(12, textW + padX * 2));
+  const canDrawBadge = badgeW >= textW + 2;
+  const badgeX = x + (w - badgeW) / 2;
+  const centerY = h >= badgeH + 4
+    ? y + h - Math.min(8, Math.max(1, h * 0.08)) - badgeH / 2
+    : y + h * 0.64;
+  const badgeY = centerY - badgeH / 2;
+
   ctx.globalAlpha = 0.92;
-  ctx.fillStyle = COLORS.noteLabelBg;
-  drawRoundedRect(ctx, badgeX, badgeY, badgeW, Math.min(badgeH, h - 1), 4);
-  ctx.fill();
+  if (canDrawBadge) {
+    ctx.fillStyle = COLORS.noteLabelBg;
+    drawRoundedRect(ctx, badgeX, badgeY, badgeW, badgeH, 4);
+    ctx.fill();
+  }
 
   ctx.fillStyle = '#ffffff';
-  ctx.font = `bold ${fontSize}px "Avenir Next", "Segoe UI", sans-serif`;
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
+  ctx.shadowBlur = canDrawBadge ? 0 : 3;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(label, x + w / 2, badgeY + Math.min(badgeH, h - 1) / 2);
+  ctx.fillText(label, x + w / 2, centerY);
+  ctx.restore();
+}
+
+function drawSustainSpan(ctx, x, y, w, h) {
+  const inset = 10;
+  const rx = x + inset;
+  const rw = Math.max(0, w - inset * 2);
+
+  if (rw <= 0 || h <= 2) return;
+
+  ctx.save();
+  ctx.globalAlpha = 0.72;
+  ctx.fillStyle = COLORS.sustainRegionFill;
+  drawRoundedRect(ctx, rx, y, rw, h, 6);
+  ctx.fill();
+
+  ctx.strokeStyle = COLORS.sustainRegionStroke;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([2, 6]);
+  ctx.lineDashOffset = -y * 0.25;
+  ctx.lineCap = 'round';
+  drawRoundedRect(ctx, rx, y, rw, h, 6);
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -46,7 +82,7 @@ export default function FallingNotesCanvas({
   containerWidth = 1200,
   containerHeight = 500,
   pixelsPerSecond = DEFAULT_PPS,
-  sustainEvents = [],
+  sustainSpans = [],
 }) {
   const canvasRef = useRef(null);
   const animRef = useRef(null);
@@ -99,30 +135,22 @@ export default function FallingNotesCanvas({
       ctx.fillRect(pos.x * w, 0, pos.width * w, h);
     }
 
-    const sustainActive = isSustainActiveAtTime(time, sustainEvents);
+    for (const span of sustainSpans) {
+      const onset = Number(span?.onset);
+      const offset = Number(span?.offset);
+      if (!Number.isFinite(onset) || !Number.isFinite(offset) || offset <= time || onset > time + (h / pixelsPerSecond)) {
+        continue;
+      }
 
-    if (sustainActive) {
-      const bandH = 20;
-      const grad = ctx.createLinearGradient(0, h - bandH, 0, h);
-      grad.addColorStop(0, 'rgba(223, 194, 140, 0)');
-      grad.addColorStop(1, COLORS.sustainGlow);
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, h - bandH, w, bandH);
+      const top = h - (offset - time) * pixelsPerSecond;
+      const bottom = h - (onset - time) * pixelsPerSecond;
+      const rectTop = Math.max(0, top);
+      const rectBottom = Math.min(h, bottom);
+      const rectHeight = rectBottom - rectTop;
 
-      ctx.strokeStyle = 'rgba(223, 194, 140, 0.55)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(0, h - 1);
-      ctx.lineTo(w, h - 1);
-      ctx.stroke();
-
-      ctx.save();
-      ctx.fillStyle = 'rgba(246, 230, 198, 0.92)';
-      ctx.font = 'bold 10px "Avenir Next", "Segoe UI", sans-serif';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText('SUS', 6, h - 3);
-      ctx.restore();
+      if (rectHeight > 2) {
+        drawSustainSpan(ctx, 0, rectTop, w, rectHeight);
+      }
     }
 
     const lookAheadSec = h / pixelsPerSecond;
@@ -174,18 +202,8 @@ export default function FallingNotesCanvas({
       // Render labels much more often than before.
       const label = midiToShortName(note.midi);
 
-      if (rh >= 11 && rw >= 10) {
+      if (rw >= 8) {
         drawNoteLabel(ctx, label, rx, ry, rw, rh);
-      } else if (isActive && rw >= 8) {
-        // Fallback: tiny active note gets a micro label above center.
-        ctx.save();
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 8px "Avenir Next", "Segoe UI", sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.globalAlpha = 0.95;
-        ctx.fillText(label, rx + rw / 2, ry + rh / 2);
-        ctx.restore();
       }
     }
 
@@ -195,7 +213,7 @@ export default function FallingNotesCanvas({
     ctx.moveTo(0, h);
     ctx.lineTo(w, h);
     ctx.stroke();
-  }, [notes, pixelsPerSecond, sustainEvents]);
+  }, [notes, pixelsPerSecond, sustainSpans]);
 
   useEffect(() => {
     let running = true;

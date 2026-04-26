@@ -664,13 +664,36 @@ class MT3Trainer(pl.LightningModule):
                 note_lists=[output_note_data_list, target_note_data_list],
                 pedal_event_lists=[output_pedal_event_list, target_pedal_event_list],
             )
-            pedal_metrics, output_pedal_spans, _ = transcription_metrics.cal_pedal_metrics(
-                output_pedal_event_list,
-                target_pedal_event_list,
-                piece_end_time=piece_end_time,
-            )
-            for metric_name, metric_value in pedal_metrics.items():
-                metric_dict[metric_name].append(metric_value)
+            if len(target_pedal_event_list) > 0 and self.config.get("evaluation", {}).get("report_pedal_metrics", True):
+                metric_dict["pedal_metrics_status"].append("available")
+                pedal_metrics, output_pedal_spans, _ = transcription_metrics.cal_pedal_metrics(
+                    output_pedal_event_list,
+                    target_pedal_event_list,
+                    piece_end_time=piece_end_time,
+                )
+                for metric_name, metric_value in pedal_metrics.items():
+                    metric_dict[metric_name].append(metric_value)
+            else:
+                metric_dict["pedal_metrics_status"].append("not_available_no_reference_pedals")
+                output_pedal_spans = transcription_metrics.pedal_events_to_spans(
+                    output_pedal_event_list,
+                    piece_end_time=piece_end_time,
+                )
+                for metric_name in (
+                    "pedal_precision",
+                    "pedal_recall",
+                    "pedal_f1",
+                    "pedal+offset_precision",
+                    "pedal+offset_recall",
+                    "pedal+offset_f1",
+                    "pedal_on_precision",
+                    "pedal_on_recall",
+                    "pedal_on_f1",
+                    "pedal_off_precision",
+                    "pedal_off_recall",
+                    "pedal_off_f1",
+                ):
+                    metric_dict[metric_name].append(np.nan)
             
             # Onset only Metrics
             output_interval = np.array([(note["onset"], note["offset"]) for note in output_note_data_list])

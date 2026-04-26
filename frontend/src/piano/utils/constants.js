@@ -17,8 +17,8 @@ export const WHITE_KEYS_PER_OCTAVE = 7;
 // Total white keys on 88-key piano (A0 to C8)
 export const TOTAL_WHITE_KEYS = 52;
 
-// Black key width ratio relative to white key
-export const BLACK_KEY_WIDTH_RATIO = 0.6;
+// Black key width ratio relative to white key. Matches Midiano's keyboard geometry.
+export const BLACK_KEY_WIDTH_RATIO = 0.5829787234;
 export const BLACK_KEY_HEIGHT_RATIO = 0.62;
 
 // Colors
@@ -37,6 +37,8 @@ export const COLORS = {
   canvasBlackLane: 'rgba(16, 12, 9, 0.2)',
   canvasGuide: 'rgba(214, 178, 123, 0.64)',
   sustainGlow: 'rgba(223, 194, 140, 0.24)',
+  sustainRegionFill: 'rgba(223, 194, 140, 0.075)',
+  sustainRegionStroke: 'rgba(246, 222, 176, 0.42)',
   noteStroke: 'rgba(255, 246, 231, 0.16)',
   noteLabelBg: 'rgba(28, 20, 14, 0.6)',
 };
@@ -69,16 +71,16 @@ function buildWhiteKeyMap() {
 
 export const KEY_MAP = buildWhiteKeyMap();
 
-// Black key offsets relative to the left edge of their neighboring white key
-// These are fractional positions within the white key width
+// Black key center offsets relative to the left edge of the preceding white key.
+// Midiano centers each black key over the following white-key seam.
 const BLACK_KEY_OFFSETS = {
-  1: 0.6,   // C# — right side of C
-  3: 0.8,   // D# — right side of D
-  6: 0.6,   // F# — right side of F
-  8: 0.7,   // G# — right side of G
-  10: 0.8,  // A# — right side of A
+  1: 1,   // C# between C and D
+  3: 1,   // D# between D and E
+  6: 1,   // F# between F and G
+  8: 1,   // G# between G and A
+  10: 1,  // A# between A and B
 };
 
 export function getBlackKeyOffset(noteInOctave) {
-  return BLACK_KEY_OFFSETS[noteInOctave] || 0.65;
+  return BLACK_KEY_OFFSETS[noteInOctave] || 1;
 }

@@ -27,6 +27,7 @@ function getPreparationSteps(includeComparison) {
 export default function PianoPage({ midiUrl }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const mainRef = useRef(null);
   const [dimensions, setDimensions] = useState({ width: 1200, height: 500 });
   const [activeMidiUrl, setActiveMidiUrl] = useState(midiUrl || null);
@@ -40,6 +41,14 @@ export default function PianoPage({ midiUrl }) {
   const [uploadError, setUploadError] = useState('');
   const [uploadStatus, setUploadStatus] = useState('Add your performance audio to open the tutor workspace.');
   const [preparedTutor, setPreparedTutor] = useState(null);
+  const [midiLibraryItems, setMidiLibraryItems] = useState([]);
+  const [selectedLibraryMidiId, setSelectedLibraryMidiId] = useState('');
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState('');
+  const [libraryStatus, setLibraryStatus] = useState('');
+  const [libraryUploadTitle, setLibraryUploadTitle] = useState('');
+  const [libraryUploadProject, setLibraryUploadProject] = useState('General');
+  const [isSavingLibraryMidi, setIsSavingLibraryMidi] = useState(false);
 
   // Load MIDI
   const {
@@ -48,7 +57,6 @@ export default function PianoPage({ midiUrl }) {
     tempo,
     isLoading,
     error,
-    sustainEvents,
     sustainSpans,
     playbackDuration,
   } = useMidi(activeMidiUrl);
@@ -69,6 +77,28 @@ export default function PianoPage({ midiUrl }) {
   useEffect(() => {
     setActiveMidiUrl(midiUrl || null);
   }, [midiUrl]);
+
+  const loadMidiLibrary = useCallback(async () => {
+    setLibraryLoading(true);
+    setLibraryError('');
+    try {
+      const response = await fetch(`${API_BASE}/library/midis`);
+      if (!response.ok) {
+        throw new Error('Failed to load MIDI library.');
+      }
+
+      const data = await response.json();
+      setMidiLibraryItems(Array.isArray(data.items) ? data.items : []);
+    } catch (err) {
+      setLibraryError(err.message || 'Could not load the MIDI library.');
+    } finally {
+      setLibraryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadMidiLibrary();
+  }, [loadMidiLibrary]);
 
   useEffect(() => {
     let cancelled = false;
@@ -135,6 +165,13 @@ export default function PianoPage({ midiUrl }) {
     return notes.filter(n => t >= n.time && t < n.time + n.duration);
   }, [notes, visualTime]);
 
+  const selectedLibraryMidi = useMemo(
+    () => midiLibraryItems.find(item => item.id === selectedLibraryMidiId) || null,
+    [midiLibraryItems, selectedLibraryMidiId],
+  );
+
+  const referenceReady = !compareToOriginal || Boolean(referenceMidiFile || selectedLibraryMidiId);
+
   // Keyboard shortcuts
   useEffect(() => {
     function handleKey(e) {
@@ -155,12 +192,19 @@ export default function PianoPage({ midiUrl }) {
         case 'Escape':
           setMenuOpen(false);
           setChatOpen(false);
+          setLibraryOpen(false);
           break;
       }
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
   }, [player, timelineDuration]);
+
+  const handleLibraryOpen = useCallback(() => {
+    setLibraryOpen(true);
+    setMenuOpen(false);
+    loadMidiLibrary();
+  }, [loadMidiLibrary]);
 
   const handleAudioSelection = useCallback((event) => {
     const file = event.target.files?.[0] || null;
@@ -177,6 +221,9 @@ export default function PianoPage({ midiUrl }) {
   const handleReferenceSelection = useCallback((event) => {
     const file = event.target.files?.[0] || null;
     setReferenceMidiFile(file);
+    if (file) {
+      setSelectedLibraryMidiId('');
+    }
     setUploadError('');
     setPreparedTutor(null);
     if (file) {
@@ -193,6 +240,7 @@ export default function PianoPage({ midiUrl }) {
     setPreparedTutor(null);
     if (!checked) {
       setReferenceMidiFile(null);
+      setSelectedLibraryMidiId('');
       setUploadStatus(
         selectedAudioFile
           ? `Performance ready: ${selectedAudioFile.name}`
@@ -202,15 +250,94 @@ export default function PianoPage({ midiUrl }) {
     }
 
     setUploadStatus('Comparison mode enabled. Add the original MIDI to compare against.');
-  }, [selectedAudioFile]);
+    loadMidiLibrary();
+  }, [loadMidiLibrary, selectedAudioFile]);
+
+  const handleLibraryReferenceSelection = useCallback((event) => {
+    const libraryMidiId = event.target.value;
+    setSelectedLibraryMidiId(libraryMidiId);
+    setReferenceMidiFile(null);
+    setUploadError('');
+    setPreparedTutor(null);
+
+    const item = midiLibraryItems.find(entry => entry.id === libraryMidiId);
+    if (item) {
+      setUploadStatus(`Reference ready from library: ${item.title || item.original_filename}`);
+    } else if (compareToOriginal) {
+      setUploadStatus('Choose a saved MIDI or upload a reference MIDI.');
+    }
+  }, [compareToOriginal, midiLibraryItems]);
+
+  const handleUseLibraryMidiAsReference = useCallback((item) => {
+    if (!item?.id) return;
+    setCompareToOriginal(true);
+    setSelectedLibraryMidiId(item.id);
+    setReferenceMidiFile(null);
+    setUploadError('');
+    setPreparedTutor(null);
+    setUploadStatus(`Reference ready from library: ${item.title || item.original_filename}`);
+    setLibraryOpen(false);
+  }, []);
+
+  const handleLibraryMidiUpload = useCallback(async (event) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0] || null;
+    if (!file) return;
+
+    setIsSavingLibraryMidi(true);
+    setLibraryError('');
+    setLibraryStatus(`Saving ${file.name} to the MIDI library...`);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('title', libraryUploadTitle || file.name.replace(/\.[^.]+$/, ''));
+      formData.append('project', libraryUploadProject || 'General');
+
+      const response = await fetch(`${API_BASE}/library/midis`, {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) {
+        let message = 'Failed to save MIDI to library.';
+        try {
+          const payload = await response.json();
+          if (payload?.detail) message = payload.detail;
+        } catch {
+          // Keep the default message for malformed error payloads.
+        }
+        throw new Error(message);
+      }
+
+      const data = await response.json();
+      const item = data.item;
+      if (!item?.id) {
+        throw new Error('The library did not return a saved MIDI item.');
+      }
+
+      setMidiLibraryItems(prev => [item, ...prev.filter(existing => existing.id !== item.id)]);
+      setSelectedLibraryMidiId(item.id);
+      setReferenceMidiFile(null);
+      setCompareToOriginal(true);
+      setLibraryUploadTitle('');
+      setLibraryStatus(`Saved to ${item.project || 'General'}: ${item.title || item.original_filename}`);
+      setUploadStatus(`Reference ready from library: ${item.title || item.original_filename}`);
+    } catch (err) {
+      setLibraryError(err.message || 'Could not save this MIDI.');
+      setLibraryStatus('');
+    } finally {
+      input.value = '';
+      setIsSavingLibraryMidi(false);
+    }
+  }, [libraryUploadProject, libraryUploadTitle]);
 
   const handlePrepareTutor = useCallback(async () => {
     if (!selectedAudioFile) {
       setUploadError('Choose your performance audio first.');
       return;
     }
-    if (compareToOriginal && !referenceMidiFile) {
-      setUploadError('Choose the original MIDI before starting comparison mode.');
+    if (compareToOriginal && !referenceReady) {
+      setUploadError('Choose a saved MIDI or upload the original MIDI before starting comparison mode.');
       return;
     }
 
@@ -236,6 +363,8 @@ export default function PianoPage({ midiUrl }) {
       formData.append('performance_audio', selectedAudioFile);
       if (compareToOriginal && referenceMidiFile) {
         formData.append('reference_midi', referenceMidiFile);
+      } else if (compareToOriginal && selectedLibraryMidiId) {
+        formData.append('reference_midi_library_id', selectedLibraryMidiId);
       }
       const response = await fetch(`${API_BASE}/tutor/prepare`, {
         method: 'POST',
@@ -257,6 +386,7 @@ export default function PianoPage({ midiUrl }) {
       setUploadStatus('Tutor ready. Opening your practice workspace...');
       setSelectedAudioFile(null);
       setReferenceMidiFile(null);
+      setSelectedLibraryMidiId('');
       setCompareToOriginal(false);
       setUploadError('');
       setPreparedTutor({
@@ -277,13 +407,18 @@ export default function PianoPage({ midiUrl }) {
       if (phaseTimer) window.clearInterval(phaseTimer);
       setIsPreparingTutor(false);
     }
-  }, [compareToOriginal, referenceMidiFile, selectedAudioFile]);
+  }, [compareToOriginal, referenceMidiFile, referenceReady, selectedAudioFile, selectedLibraryMidiId]);
 
   const preparationSteps = getPreparationSteps(compareToOriginal);
 
   return (
     <div className="piano-page">
-      <LeftMenu isOpen={menuOpen} onToggle={() => setMenuOpen(v => !v)} />
+      <LeftMenu
+        isOpen={menuOpen}
+        onToggle={() => setMenuOpen(v => !v)}
+        onLibraryOpen={handleLibraryOpen}
+        libraryCount={midiLibraryItems.length}
+      />
 
       <ChatPanel
         isOpen={chatOpen}
@@ -294,6 +429,92 @@ export default function PianoPage({ midiUrl }) {
         analysisLoading={isAnalyzingMidi}
         preparedTutor={preparedTutor}
       />
+
+      <aside className={`midi-library-drawer${libraryOpen ? ' open' : ''}`}>
+        <div className="midi-library-drawer-content">
+          <div className="midi-library-drawer-header">
+            <div>
+              <span>MIDI Library</span>
+              <strong>Saved reference files and generated transcriptions</strong>
+            </div>
+            <button
+              className="panel-close-btn"
+              onClick={() => setLibraryOpen(false)}
+              title="Close library"
+              type="button"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+              </svg>
+            </button>
+          </div>
+
+          <div className="midi-library-drawer-actions">
+            <button type="button" onClick={loadMidiLibrary} disabled={libraryLoading}>
+              {libraryLoading ? 'Refreshing...' : 'Refresh library'}
+            </button>
+          </div>
+
+          <div className="midi-library-drawer-list">
+            {libraryLoading && <p className="midi-library-empty">Loading saved MIDIs...</p>}
+            {!libraryLoading && midiLibraryItems.length === 0 && (
+              <p className="midi-library-empty">No saved MIDIs yet. Add an original MIDI to start a project library.</p>
+            )}
+            {!libraryLoading && midiLibraryItems.map(item => (
+              <div className="midi-library-item" key={item.id}>
+                <div>
+                  <strong>{item.title || item.original_filename}</strong>
+                  <span>{item.project || 'General'}</span>
+                </div>
+                <div className="midi-library-item-actions">
+                  <button type="button" onClick={() => handleUseLibraryMidiAsReference(item)}>
+                    Use as reference
+                  </button>
+                  <a href={resolveApiUrl(item.download_url)}>Download</a>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="midi-library-drawer-upload">
+            <span>Add MIDI to a project</span>
+            <div className="pp-midi-library-fields">
+              <label>
+                <span>Title</span>
+                <input
+                  type="text"
+                  value={libraryUploadTitle}
+                  onChange={(event) => setLibraryUploadTitle(event.target.value)}
+                  placeholder="Reference title"
+                />
+              </label>
+              <label>
+                <span>Project</span>
+                <input
+                  type="text"
+                  value={libraryUploadProject}
+                  onChange={(event) => setLibraryUploadProject(event.target.value)}
+                  placeholder="Project name"
+                />
+              </label>
+            </div>
+            <label className="pp-midi-library-file">
+              <span>{isSavingLibraryMidi ? 'Saving MIDI...' : 'Choose MIDI file'}</span>
+              <input
+                type="file"
+                accept=".mid,.midi,audio/midi,audio/x-midi"
+                onChange={handleLibraryMidiUpload}
+                disabled={isSavingLibraryMidi}
+              />
+            </label>
+            {(libraryStatus || libraryError) && (
+              <p className={`pp-midi-library-status${libraryError ? ' error' : ''}`}>
+                {libraryError || libraryStatus}
+              </p>
+            )}
+          </div>
+        </div>
+      </aside>
 
       <div className="pp-top">
         <TopControls
@@ -364,10 +585,92 @@ export default function PianoPage({ midiUrl }) {
                 <span>Compare this performance to the original MIDI</span>
               </label>
               {compareToOriginal && (
-                <label className="pp-upload-picker pp-upload-picker-secondary">
-                  <span>Original / reference MIDI</span>
-                  <input type="file" accept=".mid,.midi,audio/midi,audio/x-midi" onChange={handleReferenceSelection} />
-                </label>
+                <>
+                  <div className="pp-midi-library">
+                    <div className="pp-midi-library-head">
+                      <div>
+                        <span className="pp-midi-library-kicker">Reference MIDI Library</span>
+                        <p>Save original MIDIs by project, choose one for comparison, or download it for later.</p>
+                      </div>
+                      <button type="button" onClick={loadMidiLibrary} disabled={libraryLoading}>
+                        {libraryLoading ? 'Loading' : 'Refresh'}
+                      </button>
+                    </div>
+
+                    <label className="pp-midi-library-select">
+                      <span>Choose saved reference</span>
+                      <select
+                        value={selectedLibraryMidiId}
+                        onChange={handleLibraryReferenceSelection}
+                        disabled={libraryLoading || midiLibraryItems.length === 0}
+                      >
+                        <option value="">
+                          {midiLibraryItems.length === 0 ? 'No saved MIDIs yet' : 'No library MIDI selected'}
+                        </option>
+                        {midiLibraryItems.map(item => (
+                          <option key={item.id} value={item.id}>
+                            [{item.project || 'General'}] {item.title || item.original_filename}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    {selectedLibraryMidi && (
+                      <div className="pp-midi-library-selected">
+                        <div>
+                          <strong>{selectedLibraryMidi.title || selectedLibraryMidi.original_filename}</strong>
+                          <span>{selectedLibraryMidi.project || 'General'}</span>
+                        </div>
+                        <a href={resolveApiUrl(selectedLibraryMidi.download_url)}>
+                          Download
+                        </a>
+                      </div>
+                    )}
+
+                    <div className="pp-midi-library-add">
+                      <div className="pp-midi-library-fields">
+                        <label>
+                          <span>Title</span>
+                          <input
+                            type="text"
+                            value={libraryUploadTitle}
+                            onChange={(event) => setLibraryUploadTitle(event.target.value)}
+                            placeholder="Moonlight Sonata reference"
+                          />
+                        </label>
+                        <label>
+                          <span>Project</span>
+                          <input
+                            type="text"
+                            value={libraryUploadProject}
+                            onChange={(event) => setLibraryUploadProject(event.target.value)}
+                            placeholder="Beginner recital"
+                          />
+                        </label>
+                      </div>
+                      <label className="pp-midi-library-file">
+                        <span>{isSavingLibraryMidi ? 'Saving MIDI...' : 'Add MIDI to library'}</span>
+                        <input
+                          type="file"
+                          accept=".mid,.midi,audio/midi,audio/x-midi"
+                          onChange={handleLibraryMidiUpload}
+                          disabled={isSavingLibraryMidi}
+                        />
+                      </label>
+                    </div>
+
+                    {(libraryStatus || libraryError) && (
+                      <p className={`pp-midi-library-status${libraryError ? ' error' : ''}`}>
+                        {libraryError || libraryStatus}
+                      </p>
+                    )}
+                  </div>
+
+                  <label className="pp-upload-picker pp-upload-picker-secondary">
+                    <span>Or upload a one-time reference MIDI</span>
+                    <input type="file" accept=".mid,.midi,audio/midi,audio/x-midi" onChange={handleReferenceSelection} />
+                  </label>
+                </>
               )}
               <div className="pp-upload-steps">
                 {preparationSteps.map((step) => (
@@ -379,13 +682,14 @@ export default function PianoPage({ midiUrl }) {
               <button
                 className="pp-upload-action"
                 onClick={handlePrepareTutor}
-                disabled={!selectedAudioFile || (compareToOriginal && !referenceMidiFile)}
+                disabled={!selectedAudioFile || !referenceReady}
               >
                 {compareToOriginal ? 'Prepare comparison tutor' : 'Open solo tutor'}
               </button>
               <p className="pp-upload-status">{uploadStatus}</p>
               {selectedAudioFile && <p className="pp-upload-file">Performance: {selectedAudioFile.name}</p>}
               {compareToOriginal && referenceMidiFile && <p className="pp-upload-file">Reference: {referenceMidiFile.name}</p>}
+              {compareToOriginal && selectedLibraryMidi && <p className="pp-upload-file">Library reference: {selectedLibraryMidi.title || selectedLibraryMidi.original_filename}</p>}
               {uploadError && <p className="pp-upload-error">{uploadError}</p>}
             </div>
           </div>
@@ -441,7 +745,7 @@ export default function PianoPage({ midiUrl }) {
             currentTime={visualTime}
             containerWidth={dimensions.width}
             containerHeight={dimensions.height}
-            sustainEvents={sustainEvents}
+            sustainSpans={sustainSpans}
           />
         )}
       </div>

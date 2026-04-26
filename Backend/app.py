@@ -3,12 +3,14 @@ import os
 import re
 import shutil
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -41,11 +43,14 @@ UPLOAD_DIR = Path("uploads")
 SEPARATED_DIR = Path("separated")
 TRANSCRIPTIONS_DIR = Path("transcriptions")
 TUTOR_SESSIONS_DIR = Path("tutor_sessions")
+MIDI_LIBRARY_DIR = Path("midi_library")
+MIDI_LIBRARY_INDEX_PATH = MIDI_LIBRARY_DIR / "index.json"
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 SEPARATED_DIR.mkdir(exist_ok=True)
 TRANSCRIPTIONS_DIR.mkdir(exist_ok=True)
 TUTOR_SESSIONS_DIR.mkdir(exist_ok=True)
+MIDI_LIBRARY_DIR.mkdir(exist_ok=True)
 
 app.mount("/separated", StaticFiles(directory="separated"), name="separated")
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
@@ -77,6 +82,124 @@ def _save_upload(file: UploadFile) -> Path:
         shutil.copyfileobj(file.file, buffer)
 
     return save_path
+
+
+def _validate_midi_filename(filename: str | None, label: str = "MIDI file") -> None:
+    suffix = Path(filename or "").suffix.lower()
+    if suffix not in {".mid", ".midi"}:
+        raise ValueError(f"{label} must be a MIDI file (.mid or .midi).")
+
+
+def _sanitize_filename_part(value: str | None, fallback: str = "midi") -> str:
+    base = Path(value or fallback).stem or fallback
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._-")
+    return cleaned[:80] or fallback
+
+
+def _read_midi_library_index() -> list[dict[str, Any]]:
+    if not MIDI_LIBRARY_INDEX_PATH.is_file():
+        return []
+
+    try:
+        with open(MIDI_LIBRARY_INDEX_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    items = payload.get("items", payload) if isinstance(payload, dict) else payload
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _write_midi_library_index(items: list[dict[str, Any]]) -> None:
+    MIDI_LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
+    with open(MIDI_LIBRARY_INDEX_PATH, "w", encoding="utf-8") as handle:
+        json.dump({"items": items}, handle, indent=2, ensure_ascii=False, default=str)
+
+
+def _format_midi_library_item(item: dict[str, Any]) -> dict[str, Any]:
+    item_id = str(item.get("id", ""))
+    return {
+        "id": item_id,
+        "title": item.get("title") or item.get("original_filename") or "Untitled MIDI",
+        "project": item.get("project") or "General",
+        "original_filename": item.get("original_filename") or item.get("stored_filename") or "midi.mid",
+        "created_at": item.get("created_at"),
+        "size_bytes": item.get("size_bytes", 0),
+        "download_url": f"/library/midis/{item_id}/download",
+    }
+
+
+def _add_midi_path_to_library(
+    source_path: str | Path,
+    *,
+    original_filename: str | None = None,
+    title: str | None = None,
+    project: str | None = None,
+) -> dict[str, Any]:
+    source = Path(source_path).resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"MIDI file not found: {source}")
+
+    display_filename = Path(original_filename or source.name).name
+    _validate_midi_filename(display_filename)
+
+    item_id = uuid.uuid4().hex
+    suffix = Path(display_filename).suffix.lower() or source.suffix.lower() or ".mid"
+    safe_name = _sanitize_filename_part(display_filename)
+    stored_filename = f"{item_id}_{safe_name}{suffix}"
+    destination = (MIDI_LIBRARY_DIR / stored_filename).resolve()
+    library_root = MIDI_LIBRARY_DIR.resolve()
+
+    try:
+        destination.relative_to(library_root)
+    except ValueError as exc:
+        raise ValueError("MIDI library destination is outside the library directory.") from exc
+
+    MIDI_LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+
+    item = {
+        "id": item_id,
+        "stored_filename": stored_filename,
+        "original_filename": display_filename,
+        "title": str(title or Path(display_filename).stem).strip() or Path(display_filename).stem,
+        "project": str(project or "General").strip() or "General",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "size_bytes": destination.stat().st_size,
+    }
+    items = _read_midi_library_index()
+    items.insert(0, item)
+    _write_midi_library_index(items)
+    return _format_midi_library_item(item)
+
+
+def _get_midi_library_item(item_id: str) -> dict[str, Any]:
+    normalized = (item_id or "").strip()
+    if not re.fullmatch(r"[A-Fa-f0-9]{32}", normalized):
+        raise ValueError("Invalid MIDI library item id.")
+
+    for item in _read_midi_library_index():
+        if item.get("id") == normalized:
+            return item
+
+    raise FileNotFoundError(f"MIDI library item not found: {normalized}")
+
+
+def _resolve_midi_library_path(item_id: str) -> tuple[Path, dict[str, Any]]:
+    item = _get_midi_library_item(item_id)
+    stored_filename = Path(str(item.get("stored_filename", ""))).name
+    resolved = (MIDI_LIBRARY_DIR / stored_filename).resolve()
+    library_root = MIDI_LIBRARY_DIR.resolve()
+
+    try:
+        resolved.relative_to(library_root)
+    except ValueError as exc:
+        raise ValueError("Resolved MIDI library path is outside the library directory.") from exc
+
+    if not resolved.is_file():
+        raise FileNotFoundError(f"MIDI library file not found: {item.get('original_filename', item_id)}")
+
+    return resolved, item
 
 
 def _resolve_midi_path(midi_url: str | None = None, midi_path: str | None = None) -> Path:
@@ -231,9 +354,7 @@ def _validate_reference_midi(file: UploadFile | None) -> None:
     if file is None:
         return
 
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".mid", ".midi"}:
-        raise ValueError("Reference file must be a MIDI file (.mid or .midi).")
+    _validate_midi_filename(file.filename, "Reference file")
 
 
 def _extract_compare_focus(gpt_summary: dict[str, Any]) -> list[str]:
@@ -631,20 +752,45 @@ def _build_tutor_prepare_response(
 def _prepare_tutor_session(
     performance_audio: UploadFile,
     reference_midi: UploadFile | None = None,
+    reference_midi_library_id: str | None = None,
     config_path: str | None = None,
     config_name: str | None = "main_config",
 ) -> dict[str, Any]:
     _validate_reference_midi(reference_midi)
+    library_reference_path: Path | None = None
+    library_reference_item: dict[str, Any] | None = None
+    normalized_library_id = (reference_midi_library_id or "").strip()
+    if reference_midi is not None and normalized_library_id:
+        raise ValueError("Choose either an uploaded reference MIDI or a library MIDI, not both.")
+
+    if normalized_library_id:
+        library_reference_path, library_reference_item = _resolve_midi_library_path(normalized_library_id)
 
     session_id, session_root = _create_tutor_session_dir()
     saved_audio = _save_upload(performance_audio)
     saved_reference = _save_upload(reference_midi) if reference_midi is not None else None
+    reference_source_path = saved_reference or library_reference_path
 
     audio_suffix = saved_audio.suffix or Path(performance_audio.filename or "").suffix or ".bin"
     shutil.copy2(saved_audio, session_root / f"performance_input{audio_suffix}")
+    if reference_source_path is not None:
+        reference_suffix = (
+            reference_source_path.suffix
+            or Path(reference_midi.filename if reference_midi is not None else "").suffix
+            or ".mid"
+        )
+        shutil.copy2(reference_source_path, session_root / f"reference_original{reference_suffix}")
+
+    reference_library_item = None
     if saved_reference is not None:
-        reference_suffix = saved_reference.suffix or Path(reference_midi.filename or "").suffix or ".mid"
-        shutil.copy2(saved_reference, session_root / f"reference_original{reference_suffix}")
+        reference_library_item = _add_midi_path_to_library(
+            saved_reference,
+            original_filename=reference_midi.filename,
+            title=Path(reference_midi.filename or "Reference MIDI").stem,
+            project="Reference uploads",
+        )
+    elif library_reference_item is not None:
+        reference_library_item = _format_midi_library_item(library_reference_item)
 
     transcription = run_transcription(
         audio_path=str(saved_audio),
@@ -656,15 +802,21 @@ def _prepare_tutor_session(
     performance_midi_path = Path(transcription["midi_path"]).resolve()
     session_midi_path = session_root / "transcribed_performance.mid"
     shutil.copy2(performance_midi_path, session_midi_path)
+    performance_library_item = _add_midi_path_to_library(
+        performance_midi_path,
+        original_filename=f"{Path(performance_audio.filename or 'performance').stem}_transcription.mid",
+        title=f"{Path(performance_audio.filename or 'Performance').stem} transcription",
+        project="Transcribed performances",
+    )
 
-    mode = "compare" if saved_reference is not None else "solo"
+    mode = "compare" if reference_source_path is not None else "solo"
     summary_path: Path | None = None
     analysis_path: Path | None = None
 
     if mode == "compare":
         compare_performance = _load_compare_performance()
         compare_performance(
-            reference_path=str(saved_reference),
+            reference_path=str(reference_source_path),
             performance_path=str(performance_midi_path),
             output_dir=str(session_root),
         )
@@ -695,7 +847,9 @@ def _prepare_tutor_session(
         "performance_audio_path": str(saved_audio),
         "performance_midi_path": str(performance_midi_path),
         "performance_midi_url": transcription["midi_url"],
-        "reference_midi_path": str(saved_reference) if saved_reference is not None else None,
+        "performance_library_item": performance_library_item,
+        "reference_midi_path": str(reference_source_path) if reference_source_path is not None else None,
+        "reference_library_item": reference_library_item,
         "summary_path": str(summary_path) if summary_path is not None else None,
         "analysis_path": str(analysis_path) if analysis_path is not None else None,
         "summary_cards": summary_cards,
@@ -798,6 +952,52 @@ async def ping():
     }
 
 
+@app.get("/library/midis")
+async def list_midi_library():
+    items = [
+        _format_midi_library_item(item)
+        for item in _read_midi_library_index()
+    ]
+    return {"items": items}
+
+
+@app.post("/library/midis")
+async def upload_midi_to_library(
+    file: UploadFile = File(...),
+    title: str | None = Form(None),
+    project: str | None = Form("General"),
+):
+    try:
+        _validate_midi_filename(file.filename)
+        saved_path = _save_upload(file)
+        item = _add_midi_path_to_library(
+            saved_path,
+            original_filename=file.filename,
+            title=title,
+            project=project,
+        )
+        return {"item": item}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save MIDI to library: {str(exc)}") from exc
+
+
+@app.get("/library/midis/{item_id}/download")
+async def download_midi_from_library(item_id: str):
+    try:
+        midi_path, item = _resolve_midi_library_path(item_id)
+        return FileResponse(
+            midi_path,
+            media_type="audio/midi",
+            filename=str(item.get("original_filename") or midi_path.name),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/separate")
 async def separate(file: UploadFile = File(...)):
     save_path = _save_upload(file)
@@ -844,6 +1044,17 @@ async def transcribe_upload(
             "saved_path": str(save_path),
         }
     )
+    midi_path = result.get("midi_path")
+    if midi_path:
+        try:
+            result["library_item"] = _add_midi_path_to_library(
+                midi_path,
+                original_filename=f"{Path(file.filename or 'performance').stem}_transcription.mid",
+                title=f"{Path(file.filename or 'Performance').stem} transcription",
+                project="Transcribed performances",
+            )
+        except Exception:
+            result["library_item"] = None
     return result
 
 
@@ -868,6 +1079,7 @@ async def transcribe(request: TranscriptionRequest):
 async def tutor_prepare(
     performance_audio: UploadFile = File(...),
     reference_midi: UploadFile | None = File(None),
+    reference_midi_library_id: str | None = Form(None),
     config_path: str | None = Form(None),
     config_name: str | None = Form("main_config"),
 ):
@@ -875,6 +1087,7 @@ async def tutor_prepare(
         return _prepare_tutor_session(
             performance_audio=performance_audio,
             reference_midi=reference_midi,
+            reference_midi_library_id=reference_midi_library_id,
             config_path=config_path,
             config_name=config_name,
         )

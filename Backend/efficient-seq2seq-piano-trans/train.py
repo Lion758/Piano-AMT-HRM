@@ -736,9 +736,22 @@ class MT3Trainer(pl.LightningModule):
             metric_dict["note+offset+velocity_recall"].append(recall)
             metric_dict["note+offset+velocity_f1"].append(f1)
 
-            pedal_metrics = transcription_metrics.cal_pedal_event_metrics(output_pedal_data_list, target_pedal_data_list)
-            for metric_name, metric_value in pedal_metrics.items():
-                metric_dict[metric_name].append(metric_value)
+            if len(target_pedal_data_list) > 0 and self.config.get("evaluation", {}).get("report_pedal_metrics", True):
+                metric_dict["pedal_metrics_status"].append("available")
+                pedal_metrics = transcription_metrics.cal_pedal_event_metrics(output_pedal_data_list, target_pedal_data_list)
+                for metric_name, metric_value in pedal_metrics.items():
+                    metric_dict[metric_name].append(metric_value)
+            else:
+                metric_dict["pedal_metrics_status"].append("not_available_no_reference_pedals")
+                for metric_name in (
+                    "pedal_on_precision",
+                    "pedal_on_recall",
+                    "pedal_on_f1",
+                    "pedal_off_precision",
+                    "pedal_off_recall",
+                    "pedal_off_f1",
+                ):
+                    metric_dict[metric_name].append(np.nan)
             
             target_len = max(len(concat_target_tokens), 1) # Avoid division by zero.
             

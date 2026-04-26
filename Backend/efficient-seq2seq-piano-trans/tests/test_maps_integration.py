@@ -113,6 +113,16 @@ def _write_test_wav(path: Path):
     wavfile.write(path, 16000, np.zeros(16000, dtype=np.float32))
 
 
+def _write_test_maps_tsv(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# onset,offset,note,velocity\n"
+        "0.100000\t0.400000\t60.000000\t80.000000\n"
+        "0.500000\t0.800000\t64.000000\t72.000000\n",
+        encoding="utf-8",
+    )
+
+
 def _write_test_midi(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     midi = pretty_midi.PrettyMIDI()
@@ -161,6 +171,40 @@ def test_prepare_maps_writes_expected_oneshot_artifacts(tmp_path):
         assert h5["0"]["sample_rate"][()] == 16000
 
 
+def test_prepare_maps_writes_flattened_note_only_artifacts(tmp_path):
+    _install_torchaudio_stub()
+    from data.prepare_maps import prepare_maps_dataset
+
+    maps_root = tmp_path / "maps"
+    audio_path = maps_root / "flac" / "MAPS_MUS-test_ENSTDkAm.flac"
+    tsv_path = maps_root / "tsv" / "matched" / "MAPS_MUS-test_ENSTDkAm.tsv"
+    _write_test_wav(audio_path)
+    _write_test_maps_tsv(tsv_path)
+
+    items = prepare_maps_dataset(maps_root=maps_root, settings=("ENSTDkAm",), category="MUS", jobs=1)
+
+    assert len(items) == 1
+    assert items[0].source_format == "flattened-tsv"
+    assert (maps_root / "subset_test.tsv").read_text(encoding="utf-8").strip() == (
+        "0\tflac/MAPS_MUS-test_ENSTDkAm.flac"
+    )
+
+    cache_midi = maps_root / "cache" / "flac>MAPS_MUS-test_ENSTDkAm.mid"
+    notes_tsv = maps_root / "cache" / "flac>MAPS_MUS-test_ENSTDkAm.midi-notes.tsv"
+    assert cache_midi.exists()
+    assert notes_tsv.exists()
+
+    notes_df = pd.read_csv(notes_tsv, sep="\t")
+    assert set(notes_df["type"]) == {"note"}
+    assert notes_df.iloc[0]["offset_sec_truth"] == pytest.approx(0.40)
+    assert notes_df.iloc[0]["offset_sec_pedal_extended"] == pytest.approx(0.40)
+
+    midi = pretty_midi.PrettyMIDI(str(cache_midi))
+    assert len(midi.instruments) == 1
+    assert len(midi.instruments[0].notes) == 2
+    assert midi.instruments[0].control_changes == []
+
+
 def test_maps_fixture_loads_through_audio2midi_dataset(tmp_path):
     _install_torchaudio_stub()
     _install_lightweight_dataset_import_stubs()
@@ -181,6 +225,39 @@ def test_maps_fixture_loads_through_audio2midi_dataset(tmp_path):
             hop_length=320,
             cache_dir_name="cache",
             include_pedal_events=True,
+            use_note_extensions=False,
+        ),
+        model=SimpleNamespace(),
+    )
+    dataset = Audio2Midi_Dataset(config, str(maps_root), dataset_index=0, subset="test", random_clip=False)
+
+    row = dataset[0]
+
+    assert row["inputs"].shape[0] == 3200
+    assert row["decoder_targets_len"].item() > 0
+
+
+def test_flattened_maps_fixture_loads_through_audio2midi_dataset(tmp_path):
+    _install_torchaudio_stub()
+    _install_lightweight_dataset_import_stubs()
+    from data.prepare_maps import prepare_maps_dataset
+    from data.dataset_Audio2Midi import Audio2Midi_Dataset
+
+    maps_root = tmp_path / "maps"
+    audio_path = maps_root / "flac" / "MAPS_MUS-test_ENSTDkAm.flac"
+    tsv_path = maps_root / "tsv" / "matched" / "MAPS_MUS-test_ENSTDkAm.tsv"
+    _write_test_wav(audio_path)
+    _write_test_maps_tsv(tsv_path)
+    prepare_maps_dataset(maps_root=maps_root, settings=("ENSTDkAm",), category="MUS", jobs=1)
+
+    config = SimpleNamespace(
+        data=SimpleNamespace(
+            dataset_sequence_types=["performance-sequence"],
+            n_frames=10,
+            max_token_length=128,
+            hop_length=320,
+            cache_dir_name="cache",
+            include_pedal_events=False,
             use_note_extensions=False,
         ),
         model=SimpleNamespace(),
