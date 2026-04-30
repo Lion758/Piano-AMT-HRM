@@ -7,7 +7,6 @@ import LeftMenu from './components/LeftMenu.jsx';
 import ChatPanel from './components/ChatPanel.jsx';
 import { useMidi } from './hooks/useMidi.js';
 import { usePianoPlayer } from './hooks/usePianoPlayer.js';
-import { useRecorder } from './hooks/useRecorder.js';
 import { API_BASE, resolveApiUrl } from '../lib/api.js';
 import grandPianoTheater from '../assets/grand-piano-indoors-theater-place-generative-ai.jpg';
 
@@ -15,16 +14,69 @@ const PREPARATION_STEP_LABELS = {
   uploading: 'Uploading',
   transcribing: 'Transcribing',
   comparing: 'Comparing',
-  ready: 'Tutor ready',
+  ready: 'Ready',
 };
 
-function getPreparationSteps(includeComparison) {
-  return includeComparison
-    ? ['uploading', 'transcribing', 'comparing', 'ready']
-    : ['uploading', 'transcribing', 'ready'];
+function getPreparationSteps(includeComparison, skipTranscription = false) {
+  const steps = ['uploading'];
+  if (!skipTranscription) steps.push('transcribing');
+  if (includeComparison) steps.push('comparing');
+  steps.push('ready');
+  return steps;
 }
 
-export default function PianoPage({ midiUrl }) {
+function isMidiFile(file) {
+  if (!file) return false;
+  const name = file.name || '';
+  const type = file.type || '';
+  return /\.(mid|midi)$/i.test(name) || type === 'audio/midi' || type === 'audio/x-midi';
+}
+
+function titleFromFilename(filename, fallback = 'Untitled Song') {
+  const stem = String(filename || '').replace(/\.[^.]+$/, '').trim();
+  return stem.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim() || fallback;
+}
+
+function getProjectFromPrepareResponse(data) {
+  const project = data?.project || {};
+  const referenceLibraryItem = project.reference_library_item || data?.reference_library_item || null;
+  const performanceLibraryItem = project.performance_library_item || data?.performance_library_item || null;
+  const name = project.name || referenceLibraryItem?.project || performanceLibraryItem?.project || null;
+
+  if (!name && !referenceLibraryItem && !performanceLibraryItem) {
+    return null;
+  }
+
+  return {
+    name,
+    referenceLibraryItem,
+    performanceLibraryItem,
+  };
+}
+
+function getLibraryRoleLabel(role) {
+  if (role === 'reference') return 'Reference';
+  if (role === 'performance') return 'Performance';
+  return 'MIDI';
+}
+
+function buildPianoHash(midiUrl, project = null) {
+  const params = new URLSearchParams({ midi: midiUrl });
+  const referenceItem = project?.referenceLibraryItem;
+  if (referenceItem?.id) params.set('reference', referenceItem.id);
+  if (project?.name || referenceItem?.project) params.set('project', project?.name || referenceItem.project);
+  if (referenceItem?.title) params.set('referenceTitle', referenceItem.title);
+  return `#/piano?${params.toString()}`;
+}
+
+function mergeLibraryItems(existingItems, ...itemsToMerge) {
+  const cleanItems = itemsToMerge.filter(item => item?.id);
+  if (cleanItems.length === 0) return existingItems;
+  const incomingIds = new Set(cleanItems.map(item => item.id));
+  return [...cleanItems, ...existingItems.filter(item => !incomingIds.has(item.id))];
+}
+
+export default function PianoPage({ midiUrl, projectName = null, referenceLibraryId = null, referenceTitle = null }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
@@ -34,21 +86,39 @@ export default function PianoPage({ midiUrl }) {
   const [midiAnalysis, setMidiAnalysis] = useState(null);
   const [isAnalyzingMidi, setIsAnalyzingMidi] = useState(false);
   const [selectedAudioFile, setSelectedAudioFile] = useState(null);
-  const [referenceMidiFile, setReferenceMidiFile] = useState(null);
-  const [compareToOriginal, setCompareToOriginal] = useState(false);
   const [isPreparingTutor, setIsPreparingTutor] = useState(false);
   const [preparePhase, setPreparePhase] = useState('idle');
   const [uploadError, setUploadError] = useState('');
-  const [uploadStatus, setUploadStatus] = useState('Add your performance audio to open the tutor workspace.');
+  const [uploadStatus, setUploadStatus] = useState('Add a song audio file or MIDI to open the player.');
   const [preparedTutor, setPreparedTutor] = useState(null);
+  const [comparisonPanelOpen, setComparisonPanelOpen] = useState(false);
+  const [comparisonPerformanceFile, setComparisonPerformanceFile] = useState(null);
+  const [comparisonReferenceFile, setComparisonReferenceFile] = useState(null);
+  const [comparisonStatus, setComparisonStatus] = useState('Choose your performance file and the original MIDI.');
+  const [comparisonError, setComparisonError] = useState('');
   const [midiLibraryItems, setMidiLibraryItems] = useState([]);
-  const [selectedLibraryMidiId, setSelectedLibraryMidiId] = useState('');
   const [libraryLoading, setLibraryLoading] = useState(false);
   const [libraryError, setLibraryError] = useState('');
   const [libraryStatus, setLibraryStatus] = useState('');
   const [libraryUploadTitle, setLibraryUploadTitle] = useState('');
   const [libraryUploadProject, setLibraryUploadProject] = useState('General');
   const [isSavingLibraryMidi, setIsSavingLibraryMidi] = useState(false);
+  const [currentProject, setCurrentProject] = useState(() => {
+    if (!referenceLibraryId && !projectName) return null;
+    const referenceLibraryItem = referenceLibraryId
+      ? {
+          id: referenceLibraryId,
+          title: referenceTitle || projectName || 'Current reference',
+          project: projectName || 'Current Project',
+          role: 'reference',
+        }
+      : null;
+    return {
+      name: projectName || referenceLibraryItem?.project || null,
+      referenceLibraryItem,
+      performanceLibraryItem: null,
+    };
+  });
 
   // Load MIDI
   const {
@@ -64,19 +134,64 @@ export default function PianoPage({ midiUrl }) {
   // Player
   const player = usePianoPlayer(notes, duration, tempo, sustainSpans, playbackDuration);
 
-  // Recorder
-  const recorder = useRecorder();
   const hasMidi = Boolean(activeMidiUrl);
   const hasNotes = notes.length > 0 && duration > 0;
   const controlsReady = player.isLoaded && hasNotes;
+  const shouldShowMidiStage = hasMidi || isLoading || Boolean(error);
   const timelineDuration = player.duration || playbackDuration || duration;
+  const performanceIsMidi = useMemo(() => isMidiFile(selectedAudioFile), [selectedAudioFile]);
+  const comparisonPerformanceIsMidi = useMemo(
+    () => isMidiFile(comparisonPerformanceFile),
+    [comparisonPerformanceFile],
+  );
+  const projectReferenceItem = currentProject?.referenceLibraryItem || null;
+  const midiLibraryProjects = useMemo(() => {
+    const groups = new Map();
+    midiLibraryItems.forEach((item) => {
+      const name = item.project || 'General';
+      if (!groups.has(name)) groups.set(name, []);
+      groups.get(name).push(item);
+    });
+    return Array.from(groups, ([name, items]) => ({ name, items }));
+  }, [midiLibraryItems]);
 
   // Speed-synced visual time
   const visualTime = player.currentTime;
 
   useEffect(() => {
     setActiveMidiUrl(midiUrl || null);
-  }, [midiUrl]);
+    if (referenceLibraryId || projectName) {
+      const referenceLibraryItem = referenceLibraryId
+        ? {
+            id: referenceLibraryId,
+            title: referenceTitle || projectName || 'Current reference',
+            project: projectName || 'Current Project',
+            role: 'reference',
+          }
+        : null;
+      setCurrentProject(prev => {
+        if (prev?.referenceLibraryItem?.id && prev.referenceLibraryItem.id === referenceLibraryId) {
+          return {
+            name: projectName || prev.name || referenceLibraryItem?.project || null,
+            referenceLibraryItem: {
+              ...referenceLibraryItem,
+              ...prev.referenceLibraryItem,
+              title: prev.referenceLibraryItem.title || referenceLibraryItem?.title,
+              project: prev.referenceLibraryItem.project || referenceLibraryItem?.project,
+            },
+            performanceLibraryItem: prev.performanceLibraryItem || null,
+          };
+        }
+        return {
+          name: projectName || referenceLibraryItem?.project || null,
+          referenceLibraryItem,
+          performanceLibraryItem: null,
+        };
+      });
+    } else {
+      setCurrentProject(null);
+    }
+  }, [midiUrl, projectName, referenceLibraryId, referenceTitle]);
 
   const loadMidiLibrary = useCallback(async () => {
     setLibraryLoading(true);
@@ -99,6 +214,17 @@ export default function PianoPage({ midiUrl }) {
   useEffect(() => {
     loadMidiLibrary();
   }, [loadMidiLibrary]);
+
+  useEffect(() => {
+    if (!currentProject?.referenceLibraryItem?.id || midiLibraryItems.length === 0) return;
+    const freshReference = midiLibraryItems.find(item => item.id === currentProject.referenceLibraryItem.id);
+    if (!freshReference) return;
+    setCurrentProject(prev => ({
+      name: prev?.name || freshReference.project,
+      referenceLibraryItem: freshReference,
+      performanceLibraryItem: prev?.performanceLibraryItem || null,
+    }));
+  }, [currentProject?.referenceLibraryItem?.id, midiLibraryItems]);
 
   useEffect(() => {
     let cancelled = false;
@@ -165,13 +291,6 @@ export default function PianoPage({ midiUrl }) {
     return notes.filter(n => t >= n.time && t < n.time + n.duration);
   }, [notes, visualTime]);
 
-  const selectedLibraryMidi = useMemo(
-    () => midiLibraryItems.find(item => item.id === selectedLibraryMidiId) || null,
-    [midiLibraryItems, selectedLibraryMidiId],
-  );
-
-  const referenceReady = !compareToOriginal || Boolean(referenceMidiFile || selectedLibraryMidiId);
-
   // Keyboard shortcuts
   useEffect(() => {
     function handleKey(e) {
@@ -193,6 +312,7 @@ export default function PianoPage({ midiUrl }) {
           setMenuOpen(false);
           setChatOpen(false);
           setLibraryOpen(false);
+          setComparisonPanelOpen(false);
           break;
       }
     }
@@ -206,77 +326,31 @@ export default function PianoPage({ midiUrl }) {
     loadMidiLibrary();
   }, [loadMidiLibrary]);
 
+  const handleUseLibraryReference = useCallback((item) => {
+    if (!item?.id || !item?.download_url) return;
+    const nextMidiUrl = resolveApiUrl(item.download_url);
+    const nextProject = {
+      name: item.project || item.title || 'Library Project',
+      referenceLibraryItem: item,
+      performanceLibraryItem: null,
+    };
+    setCurrentProject(nextProject);
+    setPreparedTutor(null);
+    setActiveMidiUrl(nextMidiUrl);
+    setLibraryOpen(false);
+    window.location.hash = buildPianoHash(nextMidiUrl, nextProject);
+  }, []);
+
   const handleAudioSelection = useCallback((event) => {
     const file = event.target.files?.[0] || null;
     setSelectedAudioFile(file);
     setUploadError('');
     setPreparedTutor(null);
     if (file) {
-      setUploadStatus(`Performance ready: ${file.name}`);
+      setUploadStatus(`Song ready: ${file.name}`);
     } else {
-      setUploadStatus('Add your performance audio to open the tutor workspace.');
+      setUploadStatus('Add a song audio file or MIDI to open the player.');
     }
-  }, []);
-
-  const handleReferenceSelection = useCallback((event) => {
-    const file = event.target.files?.[0] || null;
-    setReferenceMidiFile(file);
-    if (file) {
-      setSelectedLibraryMidiId('');
-    }
-    setUploadError('');
-    setPreparedTutor(null);
-    if (file) {
-      setUploadStatus(`Reference ready: ${file.name}`);
-    } else if (compareToOriginal) {
-      setUploadStatus('Add the original MIDI to prepare a comparison tutor.');
-    }
-  }, [compareToOriginal]);
-
-  const handleCompareToggle = useCallback((event) => {
-    const checked = event.target.checked;
-    setCompareToOriginal(checked);
-    setUploadError('');
-    setPreparedTutor(null);
-    if (!checked) {
-      setReferenceMidiFile(null);
-      setSelectedLibraryMidiId('');
-      setUploadStatus(
-        selectedAudioFile
-          ? `Performance ready: ${selectedAudioFile.name}`
-          : 'Add your performance audio to open the tutor workspace.',
-      );
-      return;
-    }
-
-    setUploadStatus('Comparison mode enabled. Add the original MIDI to compare against.');
-    loadMidiLibrary();
-  }, [loadMidiLibrary, selectedAudioFile]);
-
-  const handleLibraryReferenceSelection = useCallback((event) => {
-    const libraryMidiId = event.target.value;
-    setSelectedLibraryMidiId(libraryMidiId);
-    setReferenceMidiFile(null);
-    setUploadError('');
-    setPreparedTutor(null);
-
-    const item = midiLibraryItems.find(entry => entry.id === libraryMidiId);
-    if (item) {
-      setUploadStatus(`Reference ready from library: ${item.title || item.original_filename}`);
-    } else if (compareToOriginal) {
-      setUploadStatus('Choose a saved MIDI or upload a reference MIDI.');
-    }
-  }, [compareToOriginal, midiLibraryItems]);
-
-  const handleUseLibraryMidiAsReference = useCallback((item) => {
-    if (!item?.id) return;
-    setCompareToOriginal(true);
-    setSelectedLibraryMidiId(item.id);
-    setReferenceMidiFile(null);
-    setUploadError('');
-    setPreparedTutor(null);
-    setUploadStatus(`Reference ready from library: ${item.title || item.original_filename}`);
-    setLibraryOpen(false);
   }, []);
 
   const handleLibraryMidiUpload = useCallback(async (event) => {
@@ -316,12 +390,8 @@ export default function PianoPage({ midiUrl }) {
       }
 
       setMidiLibraryItems(prev => [item, ...prev.filter(existing => existing.id !== item.id)]);
-      setSelectedLibraryMidiId(item.id);
-      setReferenceMidiFile(null);
-      setCompareToOriginal(true);
       setLibraryUploadTitle('');
       setLibraryStatus(`Saved to ${item.project || 'General'}: ${item.title || item.original_filename}`);
-      setUploadStatus(`Reference ready from library: ${item.title || item.original_filename}`);
     } catch (err) {
       setLibraryError(err.message || 'Could not save this MIDI.');
       setLibraryStatus('');
@@ -333,15 +403,11 @@ export default function PianoPage({ midiUrl }) {
 
   const handlePrepareTutor = useCallback(async () => {
     if (!selectedAudioFile) {
-      setUploadError('Choose your performance audio first.');
-      return;
-    }
-    if (compareToOriginal && !referenceReady) {
-      setUploadError('Choose a saved MIDI or upload the original MIDI before starting comparison mode.');
+      setUploadError('Choose a song audio file or MIDI first.');
       return;
     }
 
-    const phaseSteps = getPreparationSteps(compareToOriginal);
+    const phaseSteps = getPreparationSteps(false, performanceIsMidi);
     let phaseIndex = 0;
     let phaseTimer = null;
 
@@ -349,9 +415,7 @@ export default function PianoPage({ midiUrl }) {
     setPreparedTutor(null);
     setIsPreparingTutor(true);
     setPreparePhase(phaseSteps[0]);
-    setUploadStatus(compareToOriginal
-      ? 'Uploading your files and preparing the comparison tutor...'
-      : 'Uploading your performance and preparing the tutor...');
+    setUploadStatus('Uploading your song and preparing the player...');
 
     phaseTimer = window.setInterval(() => {
       phaseIndex = Math.min(phaseIndex + 1, phaseSteps.length - 2);
@@ -360,12 +424,7 @@ export default function PianoPage({ midiUrl }) {
 
     try {
       const formData = new FormData();
-      formData.append('performance_audio', selectedAudioFile);
-      if (compareToOriginal && referenceMidiFile) {
-        formData.append('reference_midi', referenceMidiFile);
-      } else if (compareToOriginal && selectedLibraryMidiId) {
-        formData.append('reference_midi_library_id', selectedLibraryMidiId);
-      }
+      formData.append(performanceIsMidi ? 'performance_midi' : 'performance_audio', selectedAudioFile);
       const response = await fetch(`${API_BASE}/tutor/prepare`, {
         method: 'POST',
         body: formData,
@@ -382,23 +441,33 @@ export default function PianoPage({ midiUrl }) {
       }
       const data = await response.json();
       const nextMidiUrl = resolveApiUrl(data.performance_midi_url);
+      const nextProject = getProjectFromPrepareResponse(data) || {
+        name: titleFromFilename(selectedAudioFile.name),
+        referenceLibraryItem: null,
+        performanceLibraryItem: null,
+      };
       setPreparePhase('ready');
-      setUploadStatus('Tutor ready. Opening your practice workspace...');
+      setUploadStatus('Player ready. Opening your practice workspace...');
       setSelectedAudioFile(null);
-      setReferenceMidiFile(null);
-      setSelectedLibraryMidiId('');
-      setCompareToOriginal(false);
       setUploadError('');
+      setCurrentProject(nextProject);
+      setMidiLibraryItems(prev => mergeLibraryItems(
+        prev,
+        nextProject?.referenceLibraryItem,
+        nextProject?.performanceLibraryItem,
+      ));
       setPreparedTutor({
         mode: data.mode || 'solo',
+        performanceSourceKind: data.performance_source_kind || null,
+        projectName: nextProject?.name || null,
         summaryCards: data.summary_cards || null,
         suggestedQuestions: Array.isArray(data.suggested_questions) ? data.suggested_questions : [],
         sessionId: data.tutor?.session_id || null,
         openingMessage: data.tutor?.opening_message || '',
       });
       setActiveMidiUrl(nextMidiUrl);
-      setChatOpen(true);
-      window.location.hash = `#/piano?midi=${encodeURIComponent(nextMidiUrl)}`;
+      setChatOpen(false);
+      window.location.hash = buildPianoHash(nextMidiUrl, nextProject);
     } catch (err) {
       setUploadError(err.message || 'Something went wrong.');
       setPreparePhase('idle');
@@ -407,9 +476,151 @@ export default function PianoPage({ midiUrl }) {
       if (phaseTimer) window.clearInterval(phaseTimer);
       setIsPreparingTutor(false);
     }
-  }, [compareToOriginal, referenceMidiFile, referenceReady, selectedAudioFile, selectedLibraryMidiId]);
+  }, [performanceIsMidi, selectedAudioFile]);
 
-  const preparationSteps = getPreparationSteps(compareToOriginal);
+  const handleOpenComparisonPanel = useCallback(() => {
+    setComparisonPanelOpen(true);
+    setComparisonError('');
+    setComparisonReferenceFile(null);
+    setComparisonStatus(
+      projectReferenceItem?.id
+        ? `Reference ready from ${projectReferenceItem.project || currentProject?.name || 'this project'}: ${projectReferenceItem.title || 'saved MIDI'}`
+        : 'Choose your performance file and the original MIDI.',
+    );
+    setMenuOpen(false);
+    setLibraryOpen(false);
+    setChatOpen(false);
+  }, [currentProject?.name, projectReferenceItem]);
+
+  const handleCloseComparisonPanel = useCallback(() => {
+    if (isPreparingTutor) return;
+    setComparisonPanelOpen(false);
+    setComparisonError('');
+  }, [isPreparingTutor]);
+
+  const handleComparisonPerformanceSelection = useCallback((event) => {
+    const file = event.target.files?.[0] || null;
+    setComparisonPerformanceFile(file);
+    setComparisonError('');
+    if (!file) {
+      setComparisonStatus(
+        projectReferenceItem?.id
+          ? `Reference ready from ${projectReferenceItem.project || currentProject?.name || 'this project'}: ${projectReferenceItem.title || 'saved MIDI'}`
+          : 'Choose your performance file and the original MIDI.',
+      );
+      return;
+    }
+    setComparisonStatus(
+      projectReferenceItem?.id
+        ? `Performance ready: ${file.name}. Using saved project reference automatically.`
+        : `Performance ready: ${file.name}`,
+    );
+  }, [currentProject?.name, projectReferenceItem]);
+
+  const handleComparisonReferenceSelection = useCallback((event) => {
+    const file = event.target.files?.[0] || null;
+    setComparisonReferenceFile(file);
+    setComparisonError('');
+    setComparisonStatus(file ? `Reference ready: ${file.name}` : 'Choose the original MIDI reference.');
+  }, []);
+
+  const handlePrepareComparison = useCallback(async () => {
+    if (!comparisonPerformanceFile) {
+      setComparisonError('Choose the performance audio or MIDI first.');
+      return;
+    }
+    if (!projectReferenceItem?.id && !comparisonReferenceFile) {
+      setComparisonError('Choose the original reference MIDI.');
+      return;
+    }
+
+    const comparisonIsMidi = isMidiFile(comparisonPerformanceFile);
+    const phaseSteps = getPreparationSteps(true, comparisonIsMidi);
+    let phaseIndex = 0;
+    let phaseTimer = null;
+
+    setComparisonError('');
+    setPreparedTutor(null);
+    setIsPreparingTutor(true);
+    setPreparePhase(phaseSteps[0]);
+    const referenceStatus = projectReferenceItem?.id
+      ? 'using the saved project reference'
+      : 'using the selected reference MIDI';
+    const nextStatus = comparisonIsMidi
+      ? `Uploading performance MIDI and ${referenceStatus}...`
+      : `Uploading performance audio and ${referenceStatus}...`;
+    setComparisonStatus(nextStatus);
+    setUploadStatus(nextStatus);
+
+    phaseTimer = window.setInterval(() => {
+      phaseIndex = Math.min(phaseIndex + 1, phaseSteps.length - 2);
+      setPreparePhase(phaseSteps[phaseIndex]);
+    }, 1800);
+
+    try {
+      const formData = new FormData();
+      formData.append(comparisonIsMidi ? 'performance_midi' : 'performance_audio', comparisonPerformanceFile);
+      if (projectReferenceItem?.id) {
+        formData.append('reference_midi_library_id', projectReferenceItem.id);
+      } else {
+        formData.append('reference_midi', comparisonReferenceFile);
+      }
+
+      const response = await fetch(`${API_BASE}/tutor/prepare`, {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) {
+        let message = 'Failed to prepare the comparison.';
+        try {
+          const payload = await response.json();
+          if (payload?.detail) message = payload.detail;
+        } catch {
+          // Keep the default message for malformed error payloads.
+        }
+        throw new Error(message);
+      }
+
+      const data = await response.json();
+      const nextMidiUrl = resolveApiUrl(data.performance_midi_url);
+      const nextProject = getProjectFromPrepareResponse(data) || currentProject;
+      setPreparePhase('ready');
+      setComparisonStatus('Comparison ready. Opening the tutor feedback...');
+      setComparisonPanelOpen(false);
+      setComparisonPerformanceFile(null);
+      setComparisonReferenceFile(null);
+      setUploadStatus('Comparison tutor ready.');
+      setUploadError('');
+      setCurrentProject(nextProject);
+      setMidiLibraryItems(prev => mergeLibraryItems(
+        prev,
+        nextProject?.performanceLibraryItem,
+        nextProject?.referenceLibraryItem,
+      ));
+      setPreparedTutor({
+        mode: data.mode || 'compare',
+        performanceSourceKind: data.performance_source_kind || null,
+        projectName: nextProject?.name || null,
+        summaryCards: data.summary_cards || null,
+        suggestedQuestions: Array.isArray(data.suggested_questions) ? data.suggested_questions : [],
+        sessionId: data.tutor?.session_id || null,
+        openingMessage: data.tutor?.opening_message || '',
+      });
+      setActiveMidiUrl(nextMidiUrl);
+      setChatOpen(true);
+      window.location.hash = buildPianoHash(nextMidiUrl, nextProject);
+    } catch (err) {
+      setComparisonError(err.message || 'Something went wrong.');
+      setPreparePhase('idle');
+      setComparisonStatus('Check the files and try again.');
+    } finally {
+      if (phaseTimer) window.clearInterval(phaseTimer);
+      setIsPreparingTutor(false);
+    }
+  }, [comparisonPerformanceFile, comparisonReferenceFile, currentProject, projectReferenceItem]);
+
+  const preparationSteps = getPreparationSteps(false, performanceIsMidi);
+  const comparisonPreparationSteps = getPreparationSteps(true, comparisonPerformanceIsMidi);
 
   return (
     <div className="piano-page">
@@ -428,6 +639,7 @@ export default function PianoPage({ midiUrl }) {
         analysisData={midiAnalysis}
         analysisLoading={isAnalyzingMidi}
         preparedTutor={preparedTutor}
+        projectName={currentProject?.name || preparedTutor?.projectName || null}
       />
 
       <aside className={`midi-library-drawer${libraryOpen ? ' open' : ''}`}>
@@ -460,19 +672,36 @@ export default function PianoPage({ midiUrl }) {
             {!libraryLoading && midiLibraryItems.length === 0 && (
               <p className="midi-library-empty">No saved MIDIs yet. Add an original MIDI to start a project library.</p>
             )}
-            {!libraryLoading && midiLibraryItems.map(item => (
-              <div className="midi-library-item" key={item.id}>
-                <div>
-                  <strong>{item.title || item.original_filename}</strong>
-                  <span>{item.project || 'General'}</span>
+            {!libraryLoading && midiLibraryProjects.map(project => (
+              <section className="midi-library-project" key={project.name}>
+                <div className="midi-library-project-header">
+                  <strong>{project.name}</strong>
+                  <span>{project.items.length} MIDI{project.items.length === 1 ? '' : 's'}</span>
                 </div>
-                <div className="midi-library-item-actions">
-                  <button type="button" onClick={() => handleUseLibraryMidiAsReference(item)}>
-                    Use as reference
-                  </button>
-                  <a href={resolveApiUrl(item.download_url)}>Download</a>
-                </div>
-              </div>
+                {project.items.map(item => (
+                  <div className="midi-library-item" key={item.id}>
+                    <div className="midi-library-item-main">
+                      <span className={`midi-library-role ${item.role || 'midi'}`}>
+                        {getLibraryRoleLabel(item.role)}
+                      </span>
+                      <strong>{item.title || item.original_filename}</strong>
+                      <span>
+                        {item.tutor_session_id
+                          ? `${item.tutor_mode === 'compare' ? 'Comparison' : 'Solo'} tutor saved`
+                          : item.original_filename}
+                      </span>
+                    </div>
+                    <div className="midi-library-item-actions">
+                      {(item.role === 'reference' || !item.role || item.role === 'midi') && (
+                        <button type="button" onClick={() => handleUseLibraryReference(item)}>
+                          Use reference
+                        </button>
+                      )}
+                      <a href={resolveApiUrl(item.download_url)}>Download</a>
+                    </div>
+                  </div>
+                ))}
+              </section>
             ))}
           </div>
 
@@ -516,39 +745,157 @@ export default function PianoPage({ midiUrl }) {
         </div>
       </aside>
 
-      <div className="pp-top">
-        <TopControls
-          isPlaying={player.isPlaying}
-          currentTime={visualTime}
-          duration={timelineDuration}
-          speed={player.speed}
-          volume={player.volume}
-          isLoaded={controlsReady}
-          isMenuOpen={menuOpen}
-          isTutorOpen={chatOpen}
-          recordProps={{
-            isRecording: recorder.isRecording,
-            onStart: recorder.startRecording,
-            onStop: recorder.stopRecording,
-            audioURL: recorder.audioURL,
-            error: recorder.error,
+      {comparisonPanelOpen && (
+        <div
+          className="pp-compare-panel-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) handleCloseComparisonPanel();
           }}
-          onPlay={player.play}
-          onPause={player.pause}
-          onStop={player.stop}
-          onSeek={player.seek}
-          onSpeedChange={player.setSpeed}
-          onVolumeChange={player.setVolume}
-          onMenuToggle={() => setMenuOpen(v => !v)}
-          onTutorToggle={() => setChatOpen(v => !v)}
-        />
-      </div>
+        >
+          <section
+            className="pp-compare-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pp-compare-title"
+          >
+            <div className="pp-compare-panel-header">
+              <div>
+                <span>Performance Comparison</span>
+                <strong id="pp-compare-title">Compare with project reference</strong>
+              </div>
+              <button
+                className="panel-close-btn"
+                onClick={handleCloseComparisonPanel}
+                disabled={isPreparingTutor}
+                title="Close comparison"
+                type="button"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+                </svg>
+              </button>
+            </div>
 
-      <div className="pp-main" ref={mainRef}>
-        <div className={`pp-scene-badge${hasMidi ? ' active' : ''}`}>
-          <span className="pp-scene-dot" />
-          {hasMidi ? 'Tutor stage active' : 'Awaiting transcription'}
+            <p className="pp-compare-panel-copy">
+              {projectReferenceItem?.id
+                ? 'Add the student performance. The original MIDI from this project is used as the reference automatically.'
+                : 'Add the student performance and choose the original MIDI once for this comparison.'}
+            </p>
+
+            {projectReferenceItem?.id && (
+              <div className="pp-compare-reference-card">
+                <span>Reference MIDI</span>
+                <strong>{projectReferenceItem.title || 'Saved project reference'}</strong>
+                <p>{projectReferenceItem.project || currentProject?.name || 'Current project'}</p>
+              </div>
+            )}
+
+            <div className={`pp-compare-file-grid${projectReferenceItem?.id ? ' single' : ''}`}>
+              <label className="pp-compare-file-picker">
+                <span>Performance audio or MIDI</span>
+                <input
+                  type="file"
+                  accept="audio/*,.mid,.midi,audio/midi,audio/x-midi"
+                  onChange={handleComparisonPerformanceSelection}
+                  disabled={isPreparingTutor}
+                />
+              </label>
+              {!projectReferenceItem?.id && (
+                <label className="pp-compare-file-picker">
+                  <span>Original reference MIDI</span>
+                  <input
+                    type="file"
+                    accept=".mid,.midi,audio/midi,audio/x-midi"
+                    onChange={handleComparisonReferenceSelection}
+                    disabled={isPreparingTutor}
+                  />
+                </label>
+              )}
+            </div>
+
+            {(comparisonPerformanceFile || comparisonReferenceFile || projectReferenceItem?.id) && (
+              <div className="pp-compare-file-list">
+                {comparisonPerformanceFile && (
+                  <p>Performance {comparisonPerformanceIsMidi ? 'MIDI' : 'audio'}: {comparisonPerformanceFile.name}</p>
+                )}
+                {projectReferenceItem?.id
+                  ? <p>Reference MIDI: {projectReferenceItem.title || 'saved project reference'}</p>
+                  : comparisonReferenceFile && <p>Reference MIDI: {comparisonReferenceFile.name}</p>}
+              </div>
+            )}
+
+            <div className="pp-upload-steps pp-compare-steps">
+              {comparisonPreparationSteps.map((step) => {
+                const stepIndex = comparisonPreparationSteps.indexOf(step);
+                const activeIndex = comparisonPreparationSteps.indexOf(preparePhase);
+                const state = isPreparingTutor
+                  ? activeIndex > stepIndex ? 'done' : activeIndex === stepIndex ? 'active' : 'pending'
+                  : 'pending';
+                return (
+                  <div key={step} className={`pp-upload-step ${state}`}>
+                    <span>{PREPARATION_STEP_LABELS[step]}</span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="pp-compare-panel-actions">
+              <button
+                className="pp-compare-secondary-action"
+                onClick={handleCloseComparisonPanel}
+                disabled={isPreparingTutor}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="pp-upload-action pp-compare-submit"
+                onClick={handlePrepareComparison}
+                disabled={isPreparingTutor || !comparisonPerformanceFile || (!projectReferenceItem?.id && !comparisonReferenceFile)}
+                type="button"
+              >
+                {comparisonPerformanceIsMidi ? 'Compare MIDI files' : 'Compare performance'}
+              </button>
+            </div>
+
+            <p className="pp-compare-status">{comparisonStatus}</p>
+            {comparisonError && <p className="pp-upload-error">{comparisonError}</p>}
+          </section>
         </div>
+      )}
+
+      {shouldShowMidiStage && (
+        <div className="pp-top">
+          <TopControls
+            isPlaying={player.isPlaying}
+            currentTime={visualTime}
+            duration={timelineDuration}
+            speed={player.speed}
+            volume={player.volume}
+            isLoaded={controlsReady}
+            isMenuOpen={menuOpen}
+            isTutorOpen={chatOpen}
+            isCompareOpen={comparisonPanelOpen}
+            onPlay={player.play}
+            onPause={player.pause}
+            onStop={player.stop}
+            onSeek={player.seek}
+            onSpeedChange={player.setSpeed}
+            onVolumeChange={player.setVolume}
+            onMenuToggle={() => setMenuOpen(v => !v)}
+            onTutorToggle={() => setChatOpen(v => !v)}
+            onCompareOpen={handleOpenComparisonPanel}
+          />
+        </div>
+      )}
+
+      <div className={`pp-main${shouldShowMidiStage ? '' : ' pp-main-setup'}`} ref={mainRef}>
+        {shouldShowMidiStage && (
+          <div className={`pp-scene-badge${hasMidi ? ' active' : ''}`}>
+            <span className="pp-scene-dot" />
+            {hasMidi ? 'Tutor stage active' : 'Awaiting transcription'}
+          </div>
+        )}
 
         {!hasMidi && !isPreparingTutor && (
           <div className="pp-overlay">
@@ -561,117 +908,25 @@ export default function PianoPage({ midiUrl }) {
                 />
                 <div className="pp-upload-photo-overlay">
                   <span>Stage Reference</span>
-                  <strong>Performance audio in, guided coaching out, with an optional original MIDI for comparison.</strong>
+                  <strong>Song audio or MIDI in, falling-note practice and piano guidance out.</strong>
                 </div>
               </div>
-              <div className="pp-upload-kicker">Comparison Tutor</div>
-              <h2>Bring your performance into the tutor studio</h2>
-              <p>Upload your performance audio, optionally add the original MIDI, and open straight into a coach-ready practice session.</p>
+              <div className="pp-upload-kicker">Learning Player</div>
+              <h2>Open a song in the piano player</h2>
+              <p>Upload MP3/WAV audio for transcription, or open a MIDI file directly. Compare performances later from the player toolbar.</p>
               <div className="pp-upload-highlights">
-                <span>Performance audio</span>
-                <span>Optional reference MIDI</span>
-                <span>Guided coaching</span>
+                <span>Falling notes</span>
+                <span>Piano keys</span>
+                <span>Tutor optional</span>
               </div>
               <label className="pp-upload-picker">
-                <span>Your performance audio</span>
-                <input type="file" accept="audio/*" onChange={handleAudioSelection} />
-              </label>
-              <label className="pp-compare-toggle">
+                <span>Song audio or MIDI</span>
                 <input
-                  type="checkbox"
-                  checked={compareToOriginal}
-                  onChange={handleCompareToggle}
+                  type="file"
+                  accept="audio/*,.mid,.midi,audio/midi,audio/x-midi"
+                  onChange={handleAudioSelection}
                 />
-                <span>Compare this performance to the original MIDI</span>
               </label>
-              {compareToOriginal && (
-                <>
-                  <div className="pp-midi-library">
-                    <div className="pp-midi-library-head">
-                      <div>
-                        <span className="pp-midi-library-kicker">Reference MIDI Library</span>
-                        <p>Save original MIDIs by project, choose one for comparison, or download it for later.</p>
-                      </div>
-                      <button type="button" onClick={loadMidiLibrary} disabled={libraryLoading}>
-                        {libraryLoading ? 'Loading' : 'Refresh'}
-                      </button>
-                    </div>
-
-                    <label className="pp-midi-library-select">
-                      <span>Choose saved reference</span>
-                      <select
-                        value={selectedLibraryMidiId}
-                        onChange={handleLibraryReferenceSelection}
-                        disabled={libraryLoading || midiLibraryItems.length === 0}
-                      >
-                        <option value="">
-                          {midiLibraryItems.length === 0 ? 'No saved MIDIs yet' : 'No library MIDI selected'}
-                        </option>
-                        {midiLibraryItems.map(item => (
-                          <option key={item.id} value={item.id}>
-                            [{item.project || 'General'}] {item.title || item.original_filename}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    {selectedLibraryMidi && (
-                      <div className="pp-midi-library-selected">
-                        <div>
-                          <strong>{selectedLibraryMidi.title || selectedLibraryMidi.original_filename}</strong>
-                          <span>{selectedLibraryMidi.project || 'General'}</span>
-                        </div>
-                        <a href={resolveApiUrl(selectedLibraryMidi.download_url)}>
-                          Download
-                        </a>
-                      </div>
-                    )}
-
-                    <div className="pp-midi-library-add">
-                      <div className="pp-midi-library-fields">
-                        <label>
-                          <span>Title</span>
-                          <input
-                            type="text"
-                            value={libraryUploadTitle}
-                            onChange={(event) => setLibraryUploadTitle(event.target.value)}
-                            placeholder="Moonlight Sonata reference"
-                          />
-                        </label>
-                        <label>
-                          <span>Project</span>
-                          <input
-                            type="text"
-                            value={libraryUploadProject}
-                            onChange={(event) => setLibraryUploadProject(event.target.value)}
-                            placeholder="Beginner recital"
-                          />
-                        </label>
-                      </div>
-                      <label className="pp-midi-library-file">
-                        <span>{isSavingLibraryMidi ? 'Saving MIDI...' : 'Add MIDI to library'}</span>
-                        <input
-                          type="file"
-                          accept=".mid,.midi,audio/midi,audio/x-midi"
-                          onChange={handleLibraryMidiUpload}
-                          disabled={isSavingLibraryMidi}
-                        />
-                      </label>
-                    </div>
-
-                    {(libraryStatus || libraryError) && (
-                      <p className={`pp-midi-library-status${libraryError ? ' error' : ''}`}>
-                        {libraryError || libraryStatus}
-                      </p>
-                    )}
-                  </div>
-
-                  <label className="pp-upload-picker pp-upload-picker-secondary">
-                    <span>Or upload a one-time reference MIDI</span>
-                    <input type="file" accept=".mid,.midi,audio/midi,audio/x-midi" onChange={handleReferenceSelection} />
-                  </label>
-                </>
-              )}
               <div className="pp-upload-steps">
                 {preparationSteps.map((step) => (
                   <div key={step} className="pp-upload-step pending">
@@ -682,14 +937,12 @@ export default function PianoPage({ midiUrl }) {
               <button
                 className="pp-upload-action"
                 onClick={handlePrepareTutor}
-                disabled={!selectedAudioFile || !referenceReady}
+                disabled={!selectedAudioFile}
               >
-                {compareToOriginal ? 'Prepare comparison tutor' : 'Open solo tutor'}
+                Open player
               </button>
               <p className="pp-upload-status">{uploadStatus}</p>
-              {selectedAudioFile && <p className="pp-upload-file">Performance: {selectedAudioFile.name}</p>}
-              {compareToOriginal && referenceMidiFile && <p className="pp-upload-file">Reference: {referenceMidiFile.name}</p>}
-              {compareToOriginal && selectedLibraryMidi && <p className="pp-upload-file">Library reference: {selectedLibraryMidi.title || selectedLibraryMidi.original_filename}</p>}
+              {selectedAudioFile && <p className="pp-upload-file">Song {performanceIsMidi ? 'MIDI' : 'audio'}: {selectedAudioFile.name}</p>}
               {uploadError && <p className="pp-upload-error">{uploadError}</p>}
             </div>
           </div>
@@ -750,19 +1003,23 @@ export default function PianoPage({ midiUrl }) {
         )}
       </div>
 
-      <div className="pp-keyboard">
-        <PianoKeyboard
-          activeNotes={activeNotes}
-          containerWidth={dimensions.width}
-        />
-      </div>
+      {shouldShowMidiStage && (
+        <div className="pp-keyboard">
+          <PianoKeyboard
+            activeNotes={activeNotes}
+            containerWidth={dimensions.width}
+          />
+        </div>
+      )}
 
-      <div className="pp-progress-bar">
-        <div
-          className="pp-progress-fill"
-          style={{ width: timelineDuration ? `${Math.min((visualTime / timelineDuration) * 100, 100)}%` : '0%' }}
-        />
-      </div>
+      {shouldShowMidiStage && (
+        <div className="pp-progress-bar">
+          <div
+            className="pp-progress-fill"
+            style={{ width: timelineDuration ? `${Math.min((visualTime / timelineDuration) * 100, 100)}%` : '0%' }}
+          />
+        </div>
+      )}
     </div>
   );
 }

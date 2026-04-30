@@ -11,10 +11,13 @@ function parseHashRoute(hash) {
   return {
     path,
     midiUrl: params.get('midi'),
+    projectName: params.get('project'),
+    referenceLibraryId: params.get('reference'),
+    referenceTitle: params.get('referenceTitle'),
   };
 }
 
-function Root() {
+export function Root() {
   const [route, setRoute] = useState(window.location.hash);
 
   useEffect(() => {
@@ -23,9 +26,18 @@ function Root() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  const { path, midiUrl } = parseHashRoute(route);
+  const { path, midiUrl, projectName, referenceLibraryId, referenceTitle } = parseHashRoute(route);
 
-  if (path === '#/piano') return <PianoPage midiUrl={midiUrl} />;
+  if (path === '#/piano') {
+    return (
+      <PianoPage
+        midiUrl={midiUrl}
+        projectName={projectName}
+        referenceLibraryId={referenceLibraryId}
+        referenceTitle={referenceTitle}
+      />
+    );
+  }
   return <App />;
 }
 

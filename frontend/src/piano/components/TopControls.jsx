@@ -1,4 +1,3 @@
-import RecordButton from './RecordButton.jsx';
 import { SPEED_OPTIONS } from '../utils/constants.js';
 import { formatTime } from '../utils/noteHelpers.js';
 
@@ -11,7 +10,7 @@ export default function TopControls({
   isLoaded,
   isMenuOpen,
   isTutorOpen,
-  recordProps,
+  isCompareOpen,
   onPlay,
   onPause,
   onStop,
@@ -20,6 +19,7 @@ export default function TopControls({
   onVolumeChange,
   onMenuToggle,
   onTutorToggle,
+  onCompareOpen,
 }) {
   return (
     <div className="top-controls">
@@ -46,6 +46,16 @@ export default function TopControls({
               <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z" />
             </svg>
             <span>Tutor</span>
+          </button>
+          <button
+            className={`tc-rail-btn${isCompareOpen ? ' active' : ''}`}
+            onClick={onCompareOpen}
+            type="button"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M7 7h10l-3.2-3.2L15 2.6 20.4 8 15 13.4l-1.2-1.2L17 9H7V7zm10 10H7l3.2 3.2L9 21.4 3.6 16 9 10.6l1.2 1.2L7 15h10v2z" />
+            </svg>
+            <span>Compare</span>
           </button>
         </div>
 
@@ -114,8 +124,6 @@ export default function TopControls({
             />
           </label>
         </div>
-
-        <RecordButton {...recordProps} />
       </div>
 
       <div className="tc-row tc-row-secondary">
@@ -136,11 +144,6 @@ export default function TopControls({
         <span className="tc-time">{formatTime(duration)}</span>
       </div>
 
-      {!isLoaded && (
-        <div className="tc-row tc-row-status">
-          <span className="tc-loading">Loading piano...</span>
-        </div>
-      )}
     </div>
   );
 }

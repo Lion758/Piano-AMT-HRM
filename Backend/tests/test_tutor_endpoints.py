@@ -15,14 +15,18 @@ def _configure_temp_dirs(monkeypatch, tmp_path):
     upload_dir = tmp_path / "uploads"
     transcriptions_dir = tmp_path / "transcriptions"
     tutor_sessions_dir = tmp_path / "tutor_sessions"
+    midi_library_dir = tmp_path / "midi_library"
 
     upload_dir.mkdir()
     transcriptions_dir.mkdir()
     tutor_sessions_dir.mkdir()
+    midi_library_dir.mkdir()
 
     monkeypatch.setattr(backend_app, "UPLOAD_DIR", upload_dir)
     monkeypatch.setattr(backend_app, "TRANSCRIPTIONS_DIR", transcriptions_dir)
     monkeypatch.setattr(backend_app, "TUTOR_SESSIONS_DIR", tutor_sessions_dir)
+    monkeypatch.setattr(backend_app, "MIDI_LIBRARY_DIR", midi_library_dir)
+    monkeypatch.setattr(backend_app, "MIDI_LIBRARY_INDEX_PATH", midi_library_dir / "index.json")
 
     return upload_dir, transcriptions_dir, tutor_sessions_dir
 
@@ -96,6 +100,10 @@ def test_tutor_prepare_solo_mode(monkeypatch, tmp_path):
     assert payload["performance_midi_url"].startswith("/transcriptions/tutor_sessions/")
     assert payload["summary_cards"]["overall_assessment"]["headline"] == "Solo practice feedback is ready"
     assert payload["tutor"]["opening_message"] == "Tutor session ready."
+    assert payload["project"]["name"] == "student"
+    assert payload["reference_library_item"]["role"] == "reference"
+    assert payload["reference_library_item"]["project"] == "student"
+    assert payload["reference_library_item"]["tutor_session_id"] == payload["tutor"]["session_id"]
 
     session_root = tutor_sessions_dir / payload["tutor"]["session_id"]
     assert (session_root / "session_meta.json").is_file()
@@ -186,7 +194,12 @@ def test_tutor_prepare_compare_mode_and_fallback_message(monkeypatch, tmp_path):
     assert prepare_response.status_code == 200
     payload = prepare_response.json()
     assert payload["mode"] == "compare"
-    assert payload["summary_cards"]["overall_assessment"]["headline"] == "Comparison feedback is ready"
+    assert payload["summary_cards"]["overall_assessment"]["headline"] == "Generated MIDI comparison is ready"
+    assert payload["project"]["name"] == "reference"
+    assert payload["reference_library_item"]["role"] == "reference"
+    assert payload["performance_library_item"]["role"] == "performance"
+    assert payload["performance_library_item"]["project"] == "reference"
+    assert payload["performance_library_item"]["related_reference_id"] == payload["reference_library_item"]["id"]
     assert payload["suggested_questions"] == [
         "What should I practice first?",
         "Where am I least accurate?",

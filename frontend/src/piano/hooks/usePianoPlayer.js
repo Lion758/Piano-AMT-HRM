@@ -136,7 +136,7 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
     });
   }, []);
 
-  const buildPlaybackPart = useCallback((playbackSpeed, sessionId) => {
+  const buildPlaybackPart = useCallback((playbackSpeed, sessionId, startOffset) => {
     const part = new Tone.Part((time, event) => {
       if (event.sessionId !== sessionIdRef.current || !samplerRef.current?.loaded) {
         return;
@@ -148,17 +148,18 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
         time,
         event.velocity
       );
-    }, noteEventsRef.current.map((event) => [
-      event.time,
-      {
-        ...event,
-        playbackDuration: Math.max(event.duration / playbackSpeed, 0.01),
-        sessionId,
-      },
-    ]));
+    }, noteEventsRef.current
+      .filter((event) => event.time >= startOffset)
+      .map((event) => [
+        Math.max(0, (event.time - startOffset) / playbackSpeed),
+        {
+          ...event,
+          playbackDuration: Math.max(event.duration / playbackSpeed, 0.01),
+          sessionId,
+        },
+      ]));
 
     part.loop = false;
-    part.playbackRate = playbackSpeed;
     return part;
   }, []);
 
@@ -205,11 +206,11 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
     }
 
     const sessionId = sessionIdRef.current;
-    const part = buildPlaybackPart(playbackSpeed, sessionId);
+    const part = buildPlaybackPart(playbackSpeed, sessionId, startOffset);
     activePartRef.current = part;
     scheduledSpeedRef.current = playbackSpeed;
 
-    part.start(0, startOffset);
+    part.start(0);
 
     const startTime = Tone.now() + PLAYBACK_LOOKAHEAD_SECONDS;
     triggerHeldNotesAtOffset(startOffset, playbackSpeed, startTime, sessionId);

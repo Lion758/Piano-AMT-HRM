@@ -906,10 +906,10 @@ def my_main(config: OmegaConf):
         config.training.log_dir=log_dir
     else:
         log_dir = config.training.log_dir
-
+    
     process_note = str(config.training.notes).strip() if config.training.notes is not None else ""
     process_name = experiment_name if not process_note else f"{experiment_name}_{process_note}"
-    set_training_process_name("group 5 will end 4/19 ~ 08:00")
+    set_training_process_name("group 5 will end 4/28 ~ 09:00")
     ####################################################
     # Create model.
     model = MT3Trainer(config)

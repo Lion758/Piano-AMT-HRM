@@ -2,6 +2,9 @@ defaults:
   - experiment_T5_V4_HierarchyPool
   - _self_
 
+model:
+  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260427-023834_Efficient_Transformer_V4_Pedal_ft30k_freshopt/cpt/latest.ckpt
+
 data:
   dataset_dirs: [/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/MAPS]
   dataset_sequence_types: [performance-sequence]
@@ -10,8 +13,11 @@ data:
 
 evaluation:
   report_pedal_metrics: false
-  report_pedal_extended: false
+  report_pedal_extended: true
+  test_output_dir: evaluations/MAPS_OneShot_PedalExtended_ft30k_step30000
+
 
 training:
   mode: test
-  notes: "MAPS_OneShot_NoteOnly"
+  notes: "MAPS_OneShot_NoteOnly_ft30k_step30000"
+  batch_test: 212

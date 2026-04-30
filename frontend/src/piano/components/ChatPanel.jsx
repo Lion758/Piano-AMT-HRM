@@ -1,10 +1,39 @@
 import { useState, useRef, useEffect } from 'react';
 import { API_BASE } from '../../lib/api.js';
 
+const CHAT_PANEL_WIDTH_STORAGE_KEY = 'pianoTutorChatPanelWidth';
+const DEFAULT_CHAT_PANEL_WIDTH = 340;
+const MIN_CHAT_PANEL_WIDTH = 300;
+const MAX_CHAT_PANEL_WIDTH = 760;
+
 const WELCOME_MESSAGE = {
   role: 'tutor',
   text: "Hi! I'm your AI piano tutor. Once you load a MIDI piece, I can analyse it and help you practise. Ask me anything - fingering tips, tricky passages, theory questions, you name it.",
 };
+
+function clampChatPanelWidth(width) {
+  const viewportMax = typeof window === 'undefined'
+    ? MAX_CHAT_PANEL_WIDTH
+    : Math.max(MIN_CHAT_PANEL_WIDTH, Math.floor(window.innerWidth * 0.82));
+  return Math.min(MAX_CHAT_PANEL_WIDTH, viewportMax, Math.max(MIN_CHAT_PANEL_WIDTH, Math.round(width)));
+}
+
+function getInitialChatPanelWidth() {
+  if (typeof window === 'undefined') {
+    return DEFAULT_CHAT_PANEL_WIDTH;
+  }
+
+  const storedWidth = Number(window.localStorage.getItem(CHAT_PANEL_WIDTH_STORAGE_KEY));
+  return Number.isFinite(storedWidth)
+    ? clampChatPanelWidth(storedWidth)
+    : DEFAULT_CHAT_PANEL_WIDTH;
+}
+
+function saveChatPanelWidth(width) {
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(CHAT_PANEL_WIDTH_STORAGE_KEY, String(width));
+  }
+}
 
 export default function ChatPanel({
   isOpen,
@@ -14,10 +43,12 @@ export default function ChatPanel({
   analysisData = null,
   analysisLoading = false,
   preparedTutor = null,
+  projectName = null,
 }) {
   const [messages, setMessages] = useState([WELCOME_MESSAGE]);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(getInitialChatPanelWidth);
   const bottomRef = useRef(null);
 
   const summaryCards = preparedTutor?.summaryCards || null;
@@ -124,7 +155,62 @@ export default function ChatPanel({
     }
   };
 
-  const chatStatus = !midiUrl
+  const setAndSavePanelWidth = (width) => {
+    const nextWidth = clampChatPanelWidth(width);
+    setPanelWidth(nextWidth);
+    saveChatPanelWidth(nextWidth);
+  };
+
+  const handleResizePointerDown = (event) => {
+    if (!isOpen) {
+      return;
+    }
+
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = panelWidth;
+    let latestWidth = startWidth;
+
+    const handlePointerMove = (moveEvent) => {
+      latestWidth = clampChatPanelWidth(startWidth + startX - moveEvent.clientX);
+      setPanelWidth(latestWidth);
+    };
+
+    const endResize = () => {
+      document.body.classList.remove('chat-panel-resizing');
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', endResize);
+      window.removeEventListener('pointercancel', endResize);
+      saveChatPanelWidth(latestWidth);
+    };
+
+    document.body.classList.add('chat-panel-resizing');
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', endResize);
+    window.addEventListener('pointercancel', endResize);
+  };
+
+  const handleResizeKeyDown = (event) => {
+    if (!isOpen) {
+      return;
+    }
+
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      setAndSavePanelWidth(panelWidth + 32);
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      setAndSavePanelWidth(panelWidth - 32);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      setAndSavePanelWidth(MIN_CHAT_PANEL_WIDTH);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      setAndSavePanelWidth(MAX_CHAT_PANEL_WIDTH);
+    }
+  };
+
+  const baseChatStatus = !midiUrl
     ? 'No piece loaded'
     : preparedTutor?.mode === 'compare'
       ? 'Comparison ready'
@@ -135,9 +221,28 @@ export default function ChatPanel({
           : analysisData
             ? 'MIDI analyzed'
             : 'Piece loaded';
+  const chatStatus = projectName && midiUrl
+    ? `${baseChatStatus} · ${projectName}`
+    : baseChatStatus;
 
   return (
-    <div className={`chat-panel ${isOpen ? 'open' : ''}`}>
+    <div
+      className={`chat-panel ${isOpen ? 'open' : ''}`}
+      style={{ '--chat-panel-width': `${panelWidth}px` }}
+    >
+      <div
+        className="chat-resize-handle"
+        onPointerDown={handleResizePointerDown}
+        onKeyDown={handleResizeKeyDown}
+        role="separator"
+        aria-label="Resize tutor panel"
+        aria-orientation="vertical"
+        aria-valuemin={MIN_CHAT_PANEL_WIDTH}
+        aria-valuemax={MAX_CHAT_PANEL_WIDTH}
+        aria-valuenow={panelWidth}
+        tabIndex={isOpen ? 0 : -1}
+        title="Drag to resize tutor"
+      />
       <div className="chat-panel-content">
         <div className="chat-header">
           <div className="chat-header-info">

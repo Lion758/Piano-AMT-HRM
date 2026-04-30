@@ -45,6 +45,8 @@ TRANSCRIPTIONS_DIR = Path("transcriptions")
 TUTOR_SESSIONS_DIR = Path("tutor_sessions")
 MIDI_LIBRARY_DIR = Path("midi_library")
 MIDI_LIBRARY_INDEX_PATH = MIDI_LIBRARY_DIR / "index.json"
+TUTOR_OPENING_MAX_OUTPUT_TOKENS = 1200
+TUTOR_REPLY_MAX_OUTPUT_TOKENS = 1800
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 SEPARATED_DIR.mkdir(exist_ok=True)
@@ -74,6 +76,12 @@ class TutorMessageRequest(BaseModel):
     message: str
 
 
+def _is_midi_upload(file: UploadFile | None) -> bool:
+    if file is None:
+        return False
+    return Path(file.filename or "").suffix.lower() in {".mid", ".midi"}
+
+
 def _save_upload(file: UploadFile) -> Path:
     unique_name = f"{uuid.uuid4()}_{file.filename}"
     save_path = UPLOAD_DIR / unique_name
@@ -94,6 +102,16 @@ def _sanitize_filename_part(value: str | None, fallback: str = "midi") -> str:
     base = Path(value or fallback).stem or fallback
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._-")
     return cleaned[:80] or fallback
+
+
+def _derive_song_title(filename: str | None, fallback: str = "Untitled Song") -> str:
+    stem = Path(filename or "").stem.strip()
+    if not stem:
+        return fallback
+
+    readable = re.sub(r"[_-]+", " ", stem)
+    readable = re.sub(r"\s+", " ", readable).strip()
+    return readable[:80] or fallback
 
 
 def _read_midi_library_index() -> list[dict[str, Any]]:
@@ -122,9 +140,15 @@ def _format_midi_library_item(item: dict[str, Any]) -> dict[str, Any]:
         "id": item_id,
         "title": item.get("title") or item.get("original_filename") or "Untitled MIDI",
         "project": item.get("project") or "General",
+        "role": item.get("role") or "midi",
         "original_filename": item.get("original_filename") or item.get("stored_filename") or "midi.mid",
         "created_at": item.get("created_at"),
         "size_bytes": item.get("size_bytes", 0),
+        "source": item.get("source"),
+        "performance_source_kind": item.get("performance_source_kind"),
+        "tutor_session_id": item.get("tutor_session_id"),
+        "tutor_mode": item.get("tutor_mode"),
+        "related_reference_id": item.get("related_reference_id"),
         "download_url": f"/library/midis/{item_id}/download",
     }
 
@@ -135,6 +159,12 @@ def _add_midi_path_to_library(
     original_filename: str | None = None,
     title: str | None = None,
     project: str | None = None,
+    role: str | None = None,
+    source: str | None = None,
+    performance_source_kind: str | None = None,
+    tutor_session_id: str | None = None,
+    tutor_mode: str | None = None,
+    related_reference_id: str | None = None,
 ) -> dict[str, Any]:
     source = Path(source_path).resolve()
     if not source.is_file():
@@ -164,9 +194,18 @@ def _add_midi_path_to_library(
         "original_filename": display_filename,
         "title": str(title or Path(display_filename).stem).strip() or Path(display_filename).stem,
         "project": str(project or "General").strip() or "General",
+        "role": str(role or "midi").strip() or "midi",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "size_bytes": destination.stat().st_size,
     }
+    optional_fields = {
+        "source": source,
+        "performance_source_kind": performance_source_kind,
+        "tutor_session_id": tutor_session_id,
+        "tutor_mode": tutor_mode,
+        "related_reference_id": related_reference_id,
+    }
+    item.update({key: value for key, value in optional_fields.items() if value})
     items = _read_midi_library_index()
     items.insert(0, item)
     _write_midi_library_index(items)
@@ -438,7 +477,10 @@ def _build_solo_summary_cards(analysis: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_compare_summary_cards(result: dict[str, Any]) -> dict[str, Any]:
+def _build_compare_summary_cards(
+    result: dict[str, Any],
+    performance_source_kind: str = "transcribed_audio",
+) -> dict[str, Any]:
     gpt_summary = result.get("gpt_ready_summary", {})
     overview = gpt_summary.get("performance_overview", {})
     assessment = overview.get("overall_assessment", {})
@@ -461,11 +503,18 @@ def _build_compare_summary_cards(result: dict[str, Any]) -> dict[str, Any]:
     grade = str(assessment.get("grade", "")).strip()
     score = assessment.get("score")
     performance_level = str(assessment.get("performance_level", "")).strip()
+    is_transcribed_audio = performance_source_kind == "transcribed_audio"
     if grade or performance_level:
         headline = " ".join(part for part in [grade, performance_level] if part)
         summary_parts.append(f"Comparison complete: {headline}.")
     if isinstance(score, (int, float)):
-        summary_parts.append(f"Current overall score: {float(score):.1f}.")
+        if is_transcribed_audio:
+            summary_parts.append(
+                f"Generated-MIDI match score: {float(score):.1f}; this can include transcription drift, "
+                "so treat it as coaching guidance rather than a final playing grade."
+            )
+        else:
+            summary_parts.append(f"Current overall score: {float(score):.1f}.")
     if reliability.get("is_reliable") is False:
         reason = str(reliability.get("reason", "")).replace("_", " ").strip()
         if reason:
@@ -474,16 +523,24 @@ def _build_compare_summary_cards(result: dict[str, Any]) -> dict[str, Any]:
     if note_accuracy_summary:
         summary_parts.append(str(note_accuracy_summary))
 
+    if is_transcribed_audio:
+        immediate_focus = _clean_text_list(
+            ["Review the generated MIDI against the audio before treating differences as performance mistakes"]
+            + immediate_focus
+        )[:4]
+
     return {
         "overall_assessment": {
-            "eyebrow": "Reference comparison",
-            "headline": "Comparison feedback is ready",
+            "eyebrow": "Transcription-based comparison" if is_transcribed_audio else "Reference comparison",
+            "headline": "Generated MIDI comparison is ready" if is_transcribed_audio else "Comparison feedback is ready",
             "summary": " ".join(summary_parts).strip() or "Your performance has been compared against the original MIDI.",
             "stats": [
                 stat
                 for stat in [
+                    _build_stat("Source", "Audio -> MIDI") if is_transcribed_audio else _build_stat("Source", "MIDI"),
                     _build_stat("Grade", grade) if grade else None,
-                    _build_stat("Score", f"{float(score):.1f}") if isinstance(score, (int, float)) else None,
+                    _build_stat("MIDI match", f"{float(score):.1f}") if is_transcribed_audio and isinstance(score, (int, float)) else None,
+                    _build_stat("Score", f"{float(score):.1f}") if not is_transcribed_audio and isinstance(score, (int, float)) else None,
                     _build_stat("Accuracy", key_metrics.get("note_accuracy", "")) if key_metrics.get("note_accuracy") else None,
                     _build_stat("Timing", key_metrics.get("timing_consistency", "")) if key_metrics.get("timing_consistency") else None,
                 ]
@@ -690,6 +747,49 @@ def _persist_tutor_state(state_path: Path, payload: dict[str, Any]) -> dict[str,
     return payload
 
 
+def _copy_performance_midi_to_transcriptions(source_path: Path, session_id: str) -> dict[str, Any]:
+    relative_path = Path("tutor_sessions") / session_id / "performance.mid"
+    output_path = (TRANSCRIPTIONS_DIR / relative_path).resolve()
+    transcriptions_root = TRANSCRIPTIONS_DIR.resolve()
+    try:
+        output_path.relative_to(transcriptions_root)
+    except ValueError as exc:
+        raise ValueError("Performance MIDI destination is outside the transcriptions directory.") from exc
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, output_path)
+    return {
+        "message": "Performance MIDI prepared successfully",
+        "midi_path": str(output_path),
+        "midi_url": f"/transcriptions/{relative_path.as_posix()}",
+        "model_backend": None,
+    }
+
+
+def _annotate_gpt_summary_source(summary_path: Path | None, performance_source_kind: str) -> None:
+    if summary_path is None or not summary_path.is_file():
+        return
+
+    payload = _read_json(summary_path)
+    if performance_source_kind == "transcribed_audio":
+        payload["source_context"] = {
+            "performance_source": "transcribed_audio",
+            "score_interpretation": (
+                "The compared performance MIDI was generated from uploaded audio. "
+                "Differences may come from transcription drift as well as from the playing."
+            ),
+            "student_feedback_instruction": (
+                "Do not present the numeric score as a final student grade unless the generated MIDI has been reviewed."
+            ),
+        }
+    else:
+        payload["source_context"] = {
+            "performance_source": "uploaded_midi",
+            "score_interpretation": "The comparison used an uploaded performance MIDI directly.",
+        }
+    _write_json(summary_path, payload)
+
+
 def _start_tutor_session(
     session_root: Path,
     mode: str,
@@ -717,7 +817,7 @@ def _start_tutor_session(
         response = tutor.start_session(
             summary=str(summary_path),
             student_question="Please give a concise opening assessment, one strength, and the first thing this student should practice.",
-            max_output_tokens=700,
+            max_output_tokens=TUTOR_OPENING_MAX_OUTPUT_TOKENS,
         )
         state_payload = tutor.save_state(state_path)
         state_payload.update({"engine": "openai", "mode": mode, "analysis_path": str(analysis_path) if analysis_path else None})
@@ -736,12 +836,24 @@ def _build_tutor_prepare_response(
     suggested_questions: list[str],
     session_id: str,
     opening_message: str,
+    performance_source_kind: str,
+    project_name: str,
+    reference_library_item: dict[str, Any] | None,
+    performance_library_item: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "mode": mode,
+        "performance_source_kind": performance_source_kind,
         "performance_midi_url": performance_midi_url,
         "summary_cards": _normalize_summary_cards(summary_cards),
         "suggested_questions": suggested_questions,
+        "project": {
+            "name": project_name,
+            "reference_library_item": reference_library_item,
+            "performance_library_item": performance_library_item,
+        },
+        "reference_library_item": reference_library_item,
+        "performance_library_item": performance_library_item,
         "tutor": {
             "session_id": session_id,
             "opening_message": opening_message,
@@ -750,15 +862,25 @@ def _build_tutor_prepare_response(
 
 
 def _prepare_tutor_session(
-    performance_audio: UploadFile,
+    performance_audio: UploadFile | None = None,
+    performance_midi: UploadFile | None = None,
     reference_midi: UploadFile | None = None,
     reference_midi_library_id: str | None = None,
     config_path: str | None = None,
     config_name: str | None = "main_config",
 ) -> dict[str, Any]:
+    if performance_audio is None and performance_midi is None:
+        raise ValueError("Choose either performance audio or performance MIDI.")
+    if performance_audio is not None and performance_midi is not None:
+        raise ValueError("Choose either performance audio or performance MIDI, not both.")
+    if _is_midi_upload(performance_audio):
+        raise ValueError("Upload MIDI performances using the performance_midi field, not performance_audio.")
+    if performance_midi is not None:
+        _validate_midi_filename(performance_midi.filename, "Performance MIDI")
     _validate_reference_midi(reference_midi)
     library_reference_path: Path | None = None
     library_reference_item: dict[str, Any] | None = None
+    performance_source_kind = "uploaded_midi" if performance_midi is not None else "transcribed_audio"
     normalized_library_id = (reference_midi_library_id or "").strip()
     if reference_midi is not None and normalized_library_id:
         raise ValueError("Choose either an uploaded reference MIDI or a library MIDI, not both.")
@@ -767,12 +889,30 @@ def _prepare_tutor_session(
         library_reference_path, library_reference_item = _resolve_midi_library_path(normalized_library_id)
 
     session_id, session_root = _create_tutor_session_dir()
-    saved_audio = _save_upload(performance_audio)
+    source_filename = (
+        performance_midi.filename
+        if performance_midi is not None
+        else performance_audio.filename if performance_audio is not None else "performance"
+    )
+    source_title = _derive_song_title(source_filename, "Performance")
+    mode = "compare" if reference_midi is not None or library_reference_path is not None else "solo"
+    project_name = (
+        str(library_reference_item.get("project") or "").strip()
+        if library_reference_item is not None
+        else _derive_song_title(reference_midi.filename, source_title) if reference_midi is not None
+        else source_title
+    ) or source_title
+
+    saved_audio = _save_upload(performance_audio) if performance_audio is not None else None
+    saved_performance_midi = _save_upload(performance_midi) if performance_midi is not None else None
     saved_reference = _save_upload(reference_midi) if reference_midi is not None else None
     reference_source_path = saved_reference or library_reference_path
 
-    audio_suffix = saved_audio.suffix or Path(performance_audio.filename or "").suffix or ".bin"
-    shutil.copy2(saved_audio, session_root / f"performance_input{audio_suffix}")
+    if saved_audio is not None:
+        audio_suffix = saved_audio.suffix or Path(performance_audio.filename or "").suffix or ".bin"
+        shutil.copy2(saved_audio, session_root / f"performance_input{audio_suffix}")
+    if saved_performance_midi is not None:
+        shutil.copy2(saved_performance_midi, session_root / f"performance_input{saved_performance_midi.suffix or '.mid'}")
     if reference_source_path is not None:
         reference_suffix = (
             reference_source_path.suffix
@@ -783,33 +923,62 @@ def _prepare_tutor_session(
 
     reference_library_item = None
     if saved_reference is not None:
+        reference_title = _derive_song_title(reference_midi.filename, "Reference MIDI")
         reference_library_item = _add_midi_path_to_library(
             saved_reference,
             original_filename=reference_midi.filename,
-            title=Path(reference_midi.filename or "Reference MIDI").stem,
-            project="Reference uploads",
+            title=reference_title,
+            project=project_name,
+            role="reference",
+            source="uploaded_reference",
+            tutor_session_id=session_id,
+            tutor_mode=mode,
         )
     elif library_reference_item is not None:
         reference_library_item = _format_midi_library_item(library_reference_item)
 
-    transcription = run_transcription(
-        audio_path=str(saved_audio),
-        config_path=config_path,
-        config_name=config_name,
-        midi_output_path=f"tutor_sessions/{session_id}/performance.mid",
-    )
+    if saved_performance_midi is not None:
+        transcription = _copy_performance_midi_to_transcriptions(saved_performance_midi, session_id)
+    else:
+        transcription = run_transcription(
+            audio_path=str(saved_audio),
+            config_path=config_path,
+            config_name=config_name,
+            midi_output_path=f"tutor_sessions/{session_id}/performance.mid",
+        )
 
     performance_midi_path = Path(transcription["midi_path"]).resolve()
     session_midi_path = session_root / "transcribed_performance.mid"
     shutil.copy2(performance_midi_path, session_midi_path)
+    performance_library_role = "performance" if mode == "compare" else "reference"
+    performance_library_source = "uploaded_midi" if performance_source_kind == "uploaded_midi" else "generated_from_audio"
+    performance_library_title = (
+        source_title
+        if performance_library_role == "reference"
+        else f"{source_title} performance"
+    )
+    related_reference_id = reference_library_item.get("id") if reference_library_item else None
     performance_library_item = _add_midi_path_to_library(
         performance_midi_path,
-        original_filename=f"{Path(performance_audio.filename or 'performance').stem}_transcription.mid",
-        title=f"{Path(performance_audio.filename or 'Performance').stem} transcription",
-        project="Transcribed performances",
+        original_filename=(
+            Path(source_filename or "performance.mid").name
+            if performance_source_kind == "uploaded_midi"
+            else f"{Path(source_filename or 'performance').stem}_{performance_library_role}.mid"
+        ),
+        title=performance_library_title,
+        project=project_name,
+        role=performance_library_role,
+        source=performance_library_source,
+        performance_source_kind=performance_source_kind,
+        tutor_session_id=session_id,
+        tutor_mode=mode,
+        related_reference_id=related_reference_id,
     )
 
-    mode = "compare" if reference_source_path is not None else "solo"
+    if mode == "solo":
+        reference_source_path = performance_midi_path
+        reference_library_item = performance_library_item
+
     summary_path: Path | None = None
     analysis_path: Path | None = None
 
@@ -819,12 +988,13 @@ def _prepare_tutor_session(
             reference_path=str(reference_source_path),
             performance_path=str(performance_midi_path),
             output_dir=str(session_root),
-             alignment_backend="paper_best",
-             alignment_model="automatic_hdtw_sym",
+            alignment_backend="paper_best",
+            alignment_model="automatic_hdtw_sym",
         )
         summary_path = session_root / "gpt_summary.json"
         analysis_path = session_root / "full_analysis.json"
-        summary_cards = _build_compare_summary_cards(_read_json(analysis_path))
+        _annotate_gpt_summary_source(summary_path, performance_source_kind)
+        summary_cards = _build_compare_summary_cards(_read_json(analysis_path), performance_source_kind)
     else:
         quick_analyze = _load_quick_analyze()
         solo_analysis = quick_analyze(str(performance_midi_path))
@@ -846,7 +1016,10 @@ def _prepare_tutor_session(
         "session_id": session_id,
         "mode": mode,
         "engine": engine,
-        "performance_audio_path": str(saved_audio),
+        "project_name": project_name,
+        "performance_source_kind": performance_source_kind,
+        "performance_audio_path": str(saved_audio) if saved_audio is not None else None,
+        "performance_midi_upload_path": str(saved_performance_midi) if saved_performance_midi is not None else None,
         "performance_midi_path": str(performance_midi_path),
         "performance_midi_url": transcription["midi_url"],
         "performance_library_item": performance_library_item,
@@ -866,6 +1039,10 @@ def _prepare_tutor_session(
         suggested_questions=suggested_questions,
         session_id=session_id,
         opening_message=opening_message,
+        performance_source_kind=performance_source_kind,
+        project_name=project_name,
+        reference_library_item=reference_library_item,
+        performance_library_item=performance_library_item,
     )
 
 
@@ -895,7 +1072,7 @@ def _reply_to_tutor_message(session_id: str, message: str) -> dict[str, str]:
             GPTTutor = _load_gpt_tutor_cls()
             tutor = GPTTutor(model=state.get("model"))
             tutor.load_state(state_path)
-            result = tutor.ask(text, max_output_tokens=700)
+            result = tutor.ask(text, max_output_tokens=TUTOR_REPLY_MAX_OUTPUT_TOKENS)
             saved_state = tutor.save_state(state_path)
             saved_state.update(
                 {
@@ -977,6 +1154,8 @@ async def upload_midi_to_library(
             original_filename=file.filename,
             title=title,
             project=project,
+            role="reference",
+            source="manual_upload",
         )
         return {"item": item}
     except ValueError as exc:
@@ -1049,11 +1228,15 @@ async def transcribe_upload(
     midi_path = result.get("midi_path")
     if midi_path:
         try:
+            title = _derive_song_title(file.filename, "Performance")
             result["library_item"] = _add_midi_path_to_library(
                 midi_path,
-                original_filename=f"{Path(file.filename or 'performance').stem}_transcription.mid",
-                title=f"{Path(file.filename or 'Performance').stem} transcription",
-                project="Transcribed performances",
+                original_filename=f"{Path(file.filename or 'performance').stem}_reference.mid",
+                title=title,
+                project=title,
+                role="reference",
+                source="generated_from_audio",
+                performance_source_kind="transcribed_audio",
             )
         except Exception:
             result["library_item"] = None
@@ -1063,12 +1246,28 @@ async def transcribe_upload(
 @app.post("/transcribe")
 async def transcribe(request: TranscriptionRequest):
     try:
-        return run_transcription(
+        result = run_transcription(
             audio_path=request.audio_path,
             config_path=request.config_path,
             config_name=request.config_name,
             midi_output_path=request.midi_output_path,
         )
+        midi_path = result.get("midi_path")
+        if midi_path:
+            try:
+                title = _derive_song_title(Path(request.audio_path).name, "Performance")
+                result["library_item"] = _add_midi_path_to_library(
+                    midi_path,
+                    original_filename=f"{Path(request.audio_path or 'performance').stem}_reference.mid",
+                    title=title,
+                    project=title,
+                    role="reference",
+                    source="generated_from_audio",
+                    performance_source_kind="transcribed_audio",
+                )
+            except Exception:
+                result["library_item"] = None
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -1079,7 +1278,8 @@ async def transcribe(request: TranscriptionRequest):
 
 @app.post("/tutor/prepare")
 async def tutor_prepare(
-    performance_audio: UploadFile = File(...),
+    performance_audio: UploadFile | None = File(None),
+    performance_midi: UploadFile | None = File(None),
     reference_midi: UploadFile | None = File(None),
     reference_midi_library_id: str | None = Form(None),
     config_path: str | None = Form(None),
@@ -1088,6 +1288,7 @@ async def tutor_prepare(
     try:
         return _prepare_tutor_session(
             performance_audio=performance_audio,
+            performance_midi=performance_midi,
             reference_midi=reference_midi,
             reference_midi_library_id=reference_midi_library_id,
             config_path=config_path,

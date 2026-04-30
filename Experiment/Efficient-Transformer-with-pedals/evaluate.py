@@ -30,7 +30,12 @@ def my_main(config: OmegaConf):
         strategy=DDPStrategy(find_unused_parameters=True),
         )
 
-    model.test_output_dir =  "__" + config.model.checkpoint_path + "_test"
+    evaluation_config = config.get("evaluation", {})
+    configured_test_output_dir = evaluation_config.get("test_output_dir", None) if evaluation_config else None
+    if configured_test_output_dir:
+        model.test_output_dir = os.path.expanduser(str(configured_test_output_dir))
+    else:
+        model.test_output_dir =  "__" + config.model.checkpoint_path + "_test"
     os.makedirs(model.test_output_dir, exist_ok=True)
     trainer.test(model.eval())
     

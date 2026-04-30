@@ -14,7 +14,6 @@ const FEATURES = [
   { icon: "🎚️", title: "Stem Separation", desc: "Separate a full mix into individual tracks. We extract the piano stem so transcription is clean and accurate." },
   { icon: "🎼", title: "Automatic MIDI Generation", desc: "The isolated piano audio is converted to MIDI automatically — no manual input, no music theory required." },
   { icon: "🧑‍🏫", title: "Interactive AI Tutor", desc: "Your personal practice guide. The tutor listens, compares, and gives real-time feedback on your playing." },
-  { icon: "📈", title: "Progress Tracking", desc: "See how you improve over time. Track accuracy, timing, and consistency across sessions." },
   { icon: "🔁", title: "Loop & Slow Down", desc: "Struggling with a passage? Loop any section and slow it down without changing the pitch." },
   { icon: "📱", title: "Works in Your Browser", desc: "No installation needed. Upload, separate, transcribe, and practise in one workflow." },
 ];
@@ -27,10 +26,18 @@ const PIPELINE_STATS = [
 ];
 
 const FOOTER_COLS = [
-  { heading: "Tool", links: ["How It Works", "Features", "Try It Now"] },
+  { heading: "Tool", links: ["How It Works", "Features", "Stem Split & Transcribe"] },
   { heading: "Resources", links: ["Documentation", "API Reference", "Changelog"] },
   { heading: "Project", links: ["About", "Contact", "GitHub"] },
 ];
+
+function buildPianoHash(midiUrl, libraryItem = null) {
+  const params = new URLSearchParams({ midi: midiUrl });
+  if (libraryItem?.id) params.set("reference", libraryItem.id);
+  if (libraryItem?.project) params.set("project", libraryItem.project);
+  if (libraryItem?.title) params.set("referenceTitle", libraryItem.title);
+  return `#/piano?${params.toString()}`;
+}
 
 export default function App() {
   const [selectedFile, setSelectedFile] = useState(null);
@@ -96,7 +103,7 @@ export default function App() {
       const data = await response.json();
       const midiUrl = resolveApiUrl(data.midi_url);
       setStatus("Opening the piano tutor...");
-      window.location.hash = `#/piano?midi=${encodeURIComponent(midiUrl)}`;
+      window.location.hash = buildPianoHash(midiUrl, data.library_item);
     } catch (err) {
       setError(err.message || "Something went wrong.");
       setStatus("Transcription failed.");
@@ -124,7 +131,7 @@ export default function App() {
       const data = await response.json();
       const midiUrl = resolveApiUrl(data.midi_url);
       setStatus("Opening the piano tutor...");
-      window.location.hash = `#/piano?midi=${encodeURIComponent(midiUrl)}`;
+      window.location.hash = buildPianoHash(midiUrl, data.library_item);
     } catch (err) {
       setError(err.message || "Something went wrong.");
       setStatus("Transcription failed.");
@@ -243,7 +250,7 @@ export default function App() {
             </h2>
             <div className="cta-row">
               <button className="primary-btn" onClick={scrollToDemo}>
-                🎹 Try It Now
+                🎹 Stem Split & Transcribe
               </button>
               <a href="#/piano" className="primary-btn primary-btn-secondary">
                 🎹 Open Piano Tutor
@@ -308,7 +315,7 @@ export default function App() {
         {/* ── Demo Upload Zone ── */}
         <section className="demo-section" id="demo">
           <div className="section-head">
-            <div className="section-tag">Try It Now</div>
+            <div className="section-tag">Stem Split & Transcribe</div>
             <h3>Upload a Recording to Get Started</h3>
             <p>Drop in any piano audio — we'll figure out the right pipeline for your recording.</p>
           </div>
