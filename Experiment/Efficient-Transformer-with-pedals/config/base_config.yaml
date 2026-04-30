@@ -58,5 +58,8 @@ training:
 
   debug_log_offline: true
   losses:
-    loss_decoder: [decoder_outputs, decoder_targets, loss.CrossEntropyLoss]
+    loss_decoder:      [decoder_outputs, decoder_targets, loss.CrossEntropyLoss]
+    loss_pedal_state:  [pedal_frame_logits,  pedal_frame_target,  loss.PedalFrameBCELoss, 0.3]
+    loss_pedal_onset:  [pedal_onset_logits,  pedal_onset_target,  loss.PedalFrameBCELoss, 0.3]
+    loss_pedal_offset: [pedal_offset_logits, pedal_offset_target, loss.PedalFrameBCELoss, 0.3]
 

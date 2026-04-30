@@ -52,6 +52,12 @@ class Transformer(nn.Module):
         elif config.decoder_name == "CompoundTransformerDecoder":
             self.decoder = CompoundDecoder(config=config, sub_token_names=sub_token_names)
 
+        # Auxiliary dense pedal heads on encoder outputs (~1.5k params total).
+        # Train-time only; consumed by PedalFrameBCELoss. See plan: dense pedal head.
+        self.pedal_frame_head = nn.Linear(config.emb_dim, 1)
+        self.pedal_onset_head = nn.Linear(config.emb_dim, 1)
+        self.pedal_offset_head = nn.Linear(config.emb_dim, 1)
+
         self.pad_token = TOKEN_PAD
         self.eos_token = TOKEN_END
         
@@ -211,8 +217,13 @@ class Transformer(nn.Module):
             decoder_input_tokens = self._shift_right(decoder_target_tokens, shift_step=1)
             
         encoder_outputs = self.encode(encoder_input_tokens, encoder_segment_ids=encoder_segment_ids, enable_dropout=enable_dropout)
-        
-        decoder_output_dict = self.decode(encoder_outputs, encoder_outputs, decoder_input_tokens, decoder_target_tokens, encoder_segment_ids=encoder_segment_ids, decoder_segment_ids=decoder_segment_ids, decoder_positions=decoder_positions, enable_dropout=enable_dropout, decode=decode, 
+
+        # Auxiliary per-frame pedal logits, [B, T], aligned 1:1 with encoder time axis.
+        res_dict["pedal_frame_logits"] = self.pedal_frame_head(encoder_outputs).squeeze(-1)
+        res_dict["pedal_onset_logits"] = self.pedal_onset_head(encoder_outputs).squeeze(-1)
+        res_dict["pedal_offset_logits"] = self.pedal_offset_head(encoder_outputs).squeeze(-1)
+
+        decoder_output_dict = self.decode(encoder_outputs, encoder_outputs, decoder_input_tokens, decoder_target_tokens, encoder_segment_ids=encoder_segment_ids, decoder_segment_ids=decoder_segment_ids, decoder_positions=decoder_positions, enable_dropout=enable_dropout, decode=decode,
             decoder_targets_frame_index=decoder_targets_frame_index,
             encoder_decoder_mask=encoder_decoder_mask)
 

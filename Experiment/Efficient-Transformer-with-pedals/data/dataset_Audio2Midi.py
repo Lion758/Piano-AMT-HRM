@@ -235,10 +235,54 @@ class SingleWavDataset(Dataset):
             audio = torch.from_numpy(audio_np)
 
         # convert time resolution from frame to OUTPUT_TIME_STEP_PER_SECOND
-        second_per_frame = self.config.data.hop_length/DEFAULT_SAMPLE_RATE 
+        second_per_frame = self.config.data.hop_length/DEFAULT_SAMPLE_RATE
         begin_sec = begin * second_per_frame # * OUTPUT_TIME_STEP_PER_SECOND
         end_sec = end * second_per_frame # * OUTPUT_TIME_STEP_PER_SECOND
-        
+
+        # Auxiliary per-frame sustain-pedal targets, aligned 1:1 with the encoder time axis
+        # (length = self.n_frames). Three signals:
+        #   - pedal_frame_target: binary state (0=up, 1=down) at each frame center
+        #   - pedal_onset_target: triangular soft kernel around each PedalOn frame
+        #   - pedal_offset_target: triangular soft kernel around each PedalOff frame
+        # The encoder gets direct supervision for pedal cues; the existing decoder pedal
+        # tokens are unchanged.
+        pedal_rows = self.dataframe_midi[
+            self.dataframe_midi["type"].isin(["PedalOn", "PedalOff"])
+        ]  # already sorted by onset_sec at __load_cache
+
+        pedal_frame_target = torch.zeros(self.n_frames, dtype=torch.float32)
+        pedal_onset_target = torch.zeros(self.n_frames, dtype=torch.float32)
+        pedal_offset_target = torch.zeros(self.n_frames, dtype=torch.float32)
+
+        # Determine pedal state at clip start by replaying events before begin_sec.
+        state = 0  # 0 = up, 1 = down
+        for _, ev in pedal_rows.iterrows():
+            if ev["onset_sec"] >= begin_sec:
+                break
+            state = 1 if ev["type"] == "PedalOn" else 0
+
+        events_in_clip = pedal_rows[
+            (pedal_rows["onset_sec"] >= begin_sec) & (pedal_rows["onset_sec"] < end_sec)
+        ].to_dict("records")
+
+        # Triangular soft kernel for boundary heads: 1.0 at exact frame, 0.5 at +-1, 0.25 at +-2.
+        boundary_kernel = ((0, 1.0), (-1, 0.5), (1, 0.5), (-2, 0.25), (2, 0.25))
+
+        cursor_frame = 0
+        for ev in events_in_clip:
+            ev_frame = int(round((ev["onset_sec"] - begin_sec) / second_per_frame))
+            ev_frame = max(0, min(self.n_frames, ev_frame))
+            pedal_frame_target[cursor_frame:ev_frame] = state
+            new_state = 1 if ev["type"] == "PedalOn" else 0
+            target_arr = pedal_onset_target if new_state == 1 else pedal_offset_target
+            for offset, val in boundary_kernel:
+                f = ev_frame + offset
+                if 0 <= f < self.n_frames:
+                    if val > target_arr[f].item():
+                        target_arr[f] = val
+            state = new_state
+            cursor_frame = ev_frame
+        pedal_frame_target[cursor_frame:] = state
 
         pad_len = self.n_frames*self.hop_length - len(audio)
         if pad_len > 0:
@@ -328,21 +372,30 @@ class SingleWavDataset(Dataset):
         dataset_name = torch.tensor(dataset_name, dtype=torch.long)
         dataset_name = torch.nn.functional.pad(dataset_name, pad=[0, 32 - dataset_name.size()[0]], value=ord(" "))
         
+        pedal_target_mask = torch.ones(self.n_frames, dtype=torch.long)
+
         row.update({
             "inputs": audio,
             "decoder_targets": decoder_targets,
             "decoder_targets_mask": decoder_targets_mask,
             "decoder_targets_len": torch.tensor(seq_len, dtype=torch.long),
             "decoder_targets_frame_index": decoder_targets_frame_index,
-            
+
             "encoder_decoder_mask": encoder_decoder_mask[None],
-            
+
             "audio_ids": torch.tensor(int(self.audio_idx), dtype=torch.long),
             "audio_name": audio_name,
             "frame_offsets":torch.tensor(begin, dtype=torch.long),
             "midi_path": midi_path,
             "dataset_name": dataset_name,
             "dataset_index": torch.tensor(self.dataset_index, dtype=torch.long),
+
+            "pedal_frame_target": pedal_frame_target,
+            "pedal_frame_target_mask": pedal_target_mask,
+            "pedal_onset_target": pedal_onset_target,
+            "pedal_onset_target_mask": pedal_target_mask,
+            "pedal_offset_target": pedal_offset_target,
+            "pedal_offset_target_mask": pedal_target_mask,
         })
 
         return  row

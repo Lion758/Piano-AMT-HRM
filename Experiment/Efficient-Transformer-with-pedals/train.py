@@ -198,7 +198,15 @@ class MT3Trainer(pl.LightningModule):
         self.last_time_stamp = std_time.time()
         self.validation_step_count = 0
         self.criterion_list = []
-        for loss_name, [outputs_name, targets_name, criterion_module] in config.training.losses.items():
+        for loss_name, loss_spec in config.training.losses.items():
+            # Loss spec is [outputs_name, targets_name, criterion_module] or
+            # [outputs_name, targets_name, criterion_module, weight]. Default weight = 1.0
+            # keeps existing 3-element entries unchanged.
+            if len(loss_spec) == 4:
+                outputs_name, targets_name, criterion_module, weight = loss_spec
+            else:
+                outputs_name, targets_name, criterion_module = loss_spec
+                weight = 1.0
             criterion_class_name = criterion_module.split(".")[-1]
             criterion_class = getattr(importlib.import_module(criterion_module), criterion_class_name)
             self.criterion_list.append({
@@ -206,6 +214,7 @@ class MT3Trainer(pl.LightningModule):
                 "outputs_name": outputs_name,
                 "targets_name": targets_name,
                 "criterion": criterion_class(config),
+                "weight": float(weight),
             }
             )
 
@@ -313,6 +322,18 @@ class MT3Trainer(pl.LightningModule):
         targets_dict["decoder_targets_mask"] = targets_mask
         targets_dict["decoder_targets_len"] = targets_len
 
+        # Auxiliary per-frame pedal targets (state, onset, offset). Optional in batch:
+        # only registered if the dataset emitted them, so older datasets / inference
+        # paths that don't build these fields keep working.
+        for pedal_key in (
+            "pedal_frame_target",
+            "pedal_onset_target",
+            "pedal_offset_target",
+        ):
+            if pedal_key in batch:
+                targets_dict[pedal_key] = batch[pedal_key]
+                targets_dict[pedal_key + "_mask"] = batch[pedal_key + "_mask"]
+
         self.log_time_event("data_load_done")
         # CNN encoder still use input shape of [B, T, F].
         # => [B*T, n_token, vocab_size], [B, T, 128]
@@ -338,10 +359,10 @@ class MT3Trainer(pl.LightningModule):
                 if type(loss) is dict:
                     for k, v in loss.items():
                         loss_dict[dic["loss_name"] +  "_" + k] = v
-                        total_loss += v
+                        total_loss += dic["weight"] * v
                 else:
                     loss_dict[dic["loss_name"]] = loss
-                    total_loss += loss
+                    total_loss += dic["weight"] * loss
             loss_dict["loss"] = total_loss
         self.log_time_event("loss_cal_done")
         
