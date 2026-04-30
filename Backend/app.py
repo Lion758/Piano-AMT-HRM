@@ -819,6 +819,8 @@ def _prepare_tutor_session(
             reference_path=str(reference_source_path),
             performance_path=str(performance_midi_path),
             output_dir=str(session_root),
+             alignment_backend="paper_best",
+             alignment_model="automatic_hdtw_sym",
         )
         summary_path = session_root / "gpt_summary.json"
         analysis_path = session_root / "full_analysis.json"
