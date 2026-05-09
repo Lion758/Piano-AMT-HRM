@@ -97,6 +97,9 @@ def stable_hash_to_digit(s: str) -> int:
     return int(h, 16) % 10
 
 
+PEDAL_BOUNDARY_KERNEL = ((0, 1.0), (-1, 0.5), (1, 0.5), (-2, 0.25), (2, 0.25))
+
+
 class SingleWavDataset(Dataset):
     def __init__(self,config, dataset_dir:str, dataset_index:int, audio_idx, midi_path, audio_h5_path, random_clip = True, augmenter=None) -> None:
         self.config = config
@@ -175,23 +178,161 @@ class SingleWavDataset(Dataset):
         
         if True:
             tsv_path = os.path.splitext(self.midi_path)[0] + ".midi-notes.tsv"
-            dataframe_midi = pd.read_csv(tsv_path, sep="\t")
+            source_dataframe_midi = pd.read_csv(tsv_path, sep="\t")
             dataframe_midi = sm_tokenizer.notes_to_midi_events(
-                dataframe_midi,
+                source_dataframe_midi,
                 use_truth_offsets=self.config.data.get("use_truth_offsets", False),
                 emit_pedal_tokens=self.config.data.get("emit_pedal_tokens", True),
             )
         else:
-            dataframe_midi = sm_tokenizer.midi_to_dataframe(self.midi_path)
+            source_dataframe_midi = sm_tokenizer.midi_to_dataframe(self.midi_path)
             dataframe_midi = sm_tokenizer.notes_to_midi_events(
-                dataframe_midi,
+                source_dataframe_midi,
                 use_truth_offsets=self.config.data.get("use_truth_offsets", False),
                 emit_pedal_tokens=self.config.data.get("emit_pedal_tokens", True),
             )
 
-        self.dataframe_midi = dataframe_midi.sort_values(by="onset_sec").reset_index(drop=True)
+        self.dataframe_midi = dataframe_midi.sort_values(
+            by=["onset_sec", "type_id", "pitch"],
+            kind="mergesort",
+        ).reset_index(drop=True)
+        self.dataframe_pedal_events = self._get_pedal_rows(source_dataframe_midi)
+        self._prepare_pedal_cache()
             
         self.data_loaded = True
+
+    def _get_pedal_rows(self, pedal_source_df=None):
+        if pedal_source_df is None:
+            pedal_source_df = getattr(self, "dataframe_pedal_events", None)
+            if pedal_source_df is None:
+                pedal_source_df = self.dataframe_midi
+
+        if pedal_source_df is None or "type" not in pedal_source_df.columns:
+            return pd.DataFrame(columns=["type", "onset_sec", "pitch", "velocity"])
+
+        pedal_rows = pedal_source_df[
+            pedal_source_df["type"].isin(["PedalOn", "PedalOff"])
+        ].copy()
+        if len(pedal_rows) == 0:
+            return pedal_rows
+
+        # Same-time repedaling must close the previous span before opening the next one.
+        pedal_rows["_pedal_sort"] = np.where(pedal_rows["type"] == "PedalOff", 0, 1)
+        pedal_rows = pedal_rows.sort_values(
+            by=["onset_sec", "_pedal_sort"],
+            kind="mergesort",
+        ).drop(columns=["_pedal_sort"]).reset_index(drop=True)
+        return pedal_rows
+
+    def _prepare_pedal_cache(self):
+        pedal_rows = self._get_pedal_rows()
+        self.dataframe_pedal_events = pedal_rows
+        if len(pedal_rows) == 0:
+            self.pedal_event_times = np.empty(0, dtype=np.float64)
+            self.pedal_event_states = np.empty(0, dtype=np.int8)
+            return
+
+        self.pedal_event_times = pedal_rows["onset_sec"].to_numpy(dtype=np.float64, copy=True)
+        pedal_types = pedal_rows["type"].to_numpy()
+        self.pedal_event_states = np.where(pedal_types == "PedalOn", 1, 0).astype(np.int8, copy=False)
+
+    def _build_pedal_targets_slow(self, begin_sec, end_sec, second_per_frame):
+        pedal_rows = self._get_pedal_rows()
+
+        pedal_frame_target = torch.zeros(self.n_frames, dtype=torch.float32)
+        pedal_onset_target = torch.zeros(self.n_frames, dtype=torch.float32)
+        pedal_offset_target = torch.zeros(self.n_frames, dtype=torch.float32)
+
+        state = 0
+        for _, ev in pedal_rows.iterrows():
+            if ev["onset_sec"] >= begin_sec:
+                break
+            state = 1 if ev["type"] == "PedalOn" else 0
+
+        events_in_clip = pedal_rows[
+            (pedal_rows["onset_sec"] >= begin_sec) & (pedal_rows["onset_sec"] < end_sec)
+        ].to_dict("records")
+
+        cursor_frame = 0
+        for ev in events_in_clip:
+            ev_frame = int(round((ev["onset_sec"] - begin_sec) / second_per_frame))
+            ev_frame = max(0, min(self.n_frames, ev_frame))
+            pedal_frame_target[cursor_frame:ev_frame] = state
+            new_state = 1 if ev["type"] == "PedalOn" else 0
+            target_arr = pedal_onset_target if new_state == 1 else pedal_offset_target
+            for offset, val in PEDAL_BOUNDARY_KERNEL:
+                f = ev_frame + offset
+                if 0 <= f < self.n_frames:
+                    if val > target_arr[f].item():
+                        target_arr[f] = val
+            state = new_state
+            cursor_frame = ev_frame
+        pedal_frame_target[cursor_frame:] = state
+
+        return pedal_frame_target, pedal_onset_target, pedal_offset_target
+
+    def _build_pedal_targets_fast(self, begin_sec, end_sec, second_per_frame):
+        if not hasattr(self, "pedal_event_times") or not hasattr(self, "pedal_event_states"):
+            self._prepare_pedal_cache()
+
+        pedal_frame_target = np.zeros(self.n_frames, dtype=np.float32)
+        pedal_onset_target = np.zeros(self.n_frames, dtype=np.float32)
+        pedal_offset_target = np.zeros(self.n_frames, dtype=np.float32)
+
+        event_times = self.pedal_event_times
+        event_states = self.pedal_event_states
+        if event_times.size == 0:
+            return (
+                torch.from_numpy(pedal_frame_target),
+                torch.from_numpy(pedal_onset_target),
+                torch.from_numpy(pedal_offset_target),
+            )
+
+        state_index = np.searchsorted(event_times, begin_sec, side="left") - 1
+        state = int(event_states[state_index]) if state_index >= 0 else 0
+
+        clip_begin_index = np.searchsorted(event_times, begin_sec, side="left")
+        clip_end_index = np.searchsorted(event_times, end_sec, side="left")
+        clip_times = event_times[clip_begin_index:clip_end_index]
+        clip_states = event_states[clip_begin_index:clip_end_index]
+
+        if clip_times.size == 0:
+            pedal_frame_target[:] = state
+            return (
+                torch.from_numpy(pedal_frame_target),
+                torch.from_numpy(pedal_onset_target),
+                torch.from_numpy(pedal_offset_target),
+            )
+
+        event_frames = np.rint((clip_times - begin_sec) / second_per_frame).astype(np.int64)
+        event_frames = np.clip(event_frames, 0, self.n_frames)
+
+        cursor_frame = 0
+        for ev_frame, new_state in zip(event_frames, clip_states):
+            pedal_frame_target[cursor_frame:ev_frame] = state
+            state = int(new_state)
+            cursor_frame = int(ev_frame)
+        pedal_frame_target[cursor_frame:] = state
+
+        on_frames = event_frames[clip_states == 1]
+        off_frames = event_frames[clip_states == 0]
+        for target_arr, frames in (
+            (pedal_onset_target, on_frames),
+            (pedal_offset_target, off_frames),
+        ):
+            if frames.size == 0:
+                continue
+            for offset, val in PEDAL_BOUNDARY_KERNEL:
+                kernel_frames = frames + offset
+                valid_frames = kernel_frames[(0 <= kernel_frames) & (kernel_frames < self.n_frames)]
+                if valid_frames.size > 0:
+                    np.maximum.at(target_arr, valid_frames, val)
+
+        return (
+            torch.from_numpy(pedal_frame_target),
+            torch.from_numpy(pedal_onset_target),
+            torch.from_numpy(pedal_offset_target),
+        )
         
     def __getitem__(self, index, begin=None, end=None):
         if self.data_loaded == False:
@@ -246,43 +387,11 @@ class SingleWavDataset(Dataset):
         #   - pedal_offset_target: triangular soft kernel around each PedalOff frame
         # The encoder gets direct supervision for pedal cues; the existing decoder pedal
         # tokens are unchanged.
-        pedal_rows = self.dataframe_midi[
-            self.dataframe_midi["type"].isin(["PedalOn", "PedalOff"])
-        ]  # already sorted by onset_sec at __load_cache
-
-        pedal_frame_target = torch.zeros(self.n_frames, dtype=torch.float32)
-        pedal_onset_target = torch.zeros(self.n_frames, dtype=torch.float32)
-        pedal_offset_target = torch.zeros(self.n_frames, dtype=torch.float32)
-
-        # Determine pedal state at clip start by replaying events before begin_sec.
-        state = 0  # 0 = up, 1 = down
-        for _, ev in pedal_rows.iterrows():
-            if ev["onset_sec"] >= begin_sec:
-                break
-            state = 1 if ev["type"] == "PedalOn" else 0
-
-        events_in_clip = pedal_rows[
-            (pedal_rows["onset_sec"] >= begin_sec) & (pedal_rows["onset_sec"] < end_sec)
-        ].to_dict("records")
-
-        # Triangular soft kernel for boundary heads: 1.0 at exact frame, 0.5 at +-1, 0.25 at +-2.
-        boundary_kernel = ((0, 1.0), (-1, 0.5), (1, 0.5), (-2, 0.25), (2, 0.25))
-
-        cursor_frame = 0
-        for ev in events_in_clip:
-            ev_frame = int(round((ev["onset_sec"] - begin_sec) / second_per_frame))
-            ev_frame = max(0, min(self.n_frames, ev_frame))
-            pedal_frame_target[cursor_frame:ev_frame] = state
-            new_state = 1 if ev["type"] == "PedalOn" else 0
-            target_arr = pedal_onset_target if new_state == 1 else pedal_offset_target
-            for offset, val in boundary_kernel:
-                f = ev_frame + offset
-                if 0 <= f < self.n_frames:
-                    if val > target_arr[f].item():
-                        target_arr[f] = val
-            state = new_state
-            cursor_frame = ev_frame
-        pedal_frame_target[cursor_frame:] = state
+        pedal_frame_target, pedal_onset_target, pedal_offset_target = self._build_pedal_targets_fast(
+            begin_sec,
+            end_sec,
+            second_per_frame,
+        )
 
         pad_len = self.n_frames*self.hop_length - len(audio)
         if pad_len > 0:

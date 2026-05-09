@@ -2,8 +2,7 @@ defaults:
   - experiment_T5_V3_HybridGlobalLocalCrossAttn
 
 model:
-  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260427-023834_Efficient_Transformer_V4_Pedal_ft30k_freshopt/AMT-audio-to-midi/7afwuw8w/checkpoints/epoch=19-step=30000.ckpt
-  mlp_activations: relu
+  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260506-235013_Efficient_Transformer_V4_Pedal_3PedalHead-2-170k/AMT-audio-to-midi/4pp285qi/checkpoints/epoch=96-step=170000.ckpt
   checkpoint_ignore_layres: []
   
 
@@ -12,5 +11,8 @@ model:
   # pooling_sizes: [4, 4, 4, 4, 4, 4]
 
 training:
-  training_steps: 60000
-  notes: "Efficient_Transformer_V4_Pedal_ft60k_resume_robust_aug"
+  training_steps: 200000
+  notes: "Efficient_Transformer_V4_Pedal_3PedalHead-2-200k"
+data:
+  augmentation:
+    enabled: false

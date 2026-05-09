@@ -624,12 +624,12 @@ class SymbolicMusicTokenizer:
         
         df_note_on = df[df["type"] == "note"].copy()
         df_note_on["type"] = "NoteOn"
-        df_note_on["type_id"] = 2  # For sorting
+        df_note_on["type_id"] = 3  # For sorting
         df_note_on = df_note_on[["pitch", "onset_sec", "type", "type_id", "velocity"]]
         
         df_note_off = df[df["type"] == "note"].copy()
         df_note_off["type"] = "NoteOff"
-        df_note_off["type_id"] = 1  # For sorting
+        df_note_off["type_id"] = 2  # For sorting
         df_note_off["onset_sec"] = df_note_off[offset_column]
         df_note_off["velocity"] = 0  # NoteOff events have velocity 0
         df_note_off = df_note_off[["pitch", "onset_sec", "type", "type_id", "velocity"]]
@@ -639,9 +639,11 @@ class SymbolicMusicTokenizer:
         # Pedal events are already in the DataFrame as PedalOn/PedalOff types
         event_frames = [df_note_on, df_note_off]
 
+        # Same-time repedaling is ordered as PedalOff then PedalOn, so a release
+        # closes the previous span before the next span starts.
         df_pedal_on = df[df["type"] == "PedalOn"].copy() if emit_pedal_tokens else df.iloc[0:0].copy()
         if len(df_pedal_on) > 0:
-            df_pedal_on["type_id"] = 0  # Pedal sorts before notes
+            df_pedal_on["type_id"] = 1  # Pedal sorts before notes
             df_pedal_on = df_pedal_on[["pitch", "onset_sec", "type", "type_id", "velocity"]]
             event_frames.append(df_pedal_on)
 

@@ -1,0 +1,27 @@
+defaults:
+  - experiment_T5_V4_HierarchyPool
+  - _self_
+
+model:
+  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260508-221130_Efficient_Transformer_V4_Pedal_3PedalHead-2-200k/AMT-audio-to-midi/3q34qlm1/checkpoints/epoch=112-step=200000.ckpt
+  mlp_activations: relu
+  strict_checkpoint: false
+  checkpoint_ignore_layres: []
+
+data:
+  dataset_dir: /home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0
+  dataset_dirs: [/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0]
+  dataset_sequence_types: [performance-sequence]
+  use_truth_offsets: true
+  emit_pedal_tokens: true
+
+evaluation:
+  report_pedal_metrics: true
+  report_pedal_extended: true
+  test_output_dir: evaluations/MAESTRO_PedalHeads_200k
+
+training:
+  mode: test
+  notes: "MAESTRO_PedalHeads_200k"
+  batch_test: 100
+  num_workers: 4
