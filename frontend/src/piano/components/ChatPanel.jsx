@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { API_BASE } from '../../lib/api.js';
+import { API_BASE } from '../../shared/api.js';
 
 const CHAT_PANEL_WIDTH_STORAGE_KEY = 'pianoTutorChatPanelWidth';
 const DEFAULT_CHAT_PANEL_WIDTH = 340;

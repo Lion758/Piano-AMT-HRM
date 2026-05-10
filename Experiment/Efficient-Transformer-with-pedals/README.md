@@ -93,6 +93,17 @@ python evaluate.py \
 ```
 
 
+Evaluation writes `!test_metrics_summary.csv` plus optional per-track artifacts:
+
+- `.output.json`: generated and target token chunks, useful for debugging detokenization without rerunning the model.
+- `.output.mid`: the reconstructed prediction MIDI, including sustain-pedal CC64 events, useful for listening, inspection, and MIDI-file metric passes.
+- copied `.mid`: the reference MIDI, kept beside the prediction for side-by-side comparison.
+
+When `evaluation.report_pedal_extended` is enabled, canonical `*_pedal_extended` note metrics use reference-style sustain semantics with same-pitch note capping. The older uncapped cached-TSV extension is still reported only under `diagnostic_*_pedal_extended_uncapped` columns.
+
+These artifacts are controlled by `evaluation.save_track_json`, `evaluation.save_output_midi`, and `evaluation.copy_reference_midi`.
+
+
 ## Inference
 
 Download the checkpoint from release page to ./checkpoints.
@@ -106,8 +117,6 @@ python inference.py model.checkpoint_path="$checkpoint_path" audio_path="'audio/
 
 - rlax59us' [MT3-pytorch](https://github.com/rlax59us/MT3-pytorch)
 - Official [PyTorch Lightning](https://github.com/PyTorchLightning/pytorch-lightning)
-
-
 
 
 

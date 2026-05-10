@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import './PianoPage.css';
+import './styles/PianoPage.css';
 import TopControls from './components/TopControls.jsx';
 import FallingNotesCanvas from './components/FallingNotesCanvas.jsx';
 import PianoKeyboard from './components/PianoKeyboard.jsx';
@@ -7,7 +7,7 @@ import LeftMenu from './components/LeftMenu.jsx';
 import ChatPanel from './components/ChatPanel.jsx';
 import { useMidi } from './hooks/useMidi.js';
 import { usePianoPlayer } from './hooks/usePianoPlayer.js';
-import { API_BASE, resolveApiUrl } from '../lib/api.js';
+import { API_BASE, resolveApiUrl } from '../shared/api.js';
 import grandPianoTheater from '../assets/grand-piano-indoors-theater-place-generative-ai.jpg';
 
 const PREPARATION_STEP_LABELS = {

@@ -495,6 +495,7 @@ class SingleWavDataset(Dataset):
             "audio_ids": torch.tensor(int(self.audio_idx), dtype=torch.long),
             "audio_name": audio_name,
             "frame_offsets":torch.tensor(begin, dtype=torch.long),
+            "total_frames": torch.tensor(int(self.total_frames), dtype=torch.long),
             "midi_path": midi_path,
             "dataset_name": dataset_name,
             "dataset_index": torch.tensor(self.dataset_index, dtype=torch.long),

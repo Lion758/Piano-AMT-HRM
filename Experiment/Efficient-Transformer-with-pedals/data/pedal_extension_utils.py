@@ -128,6 +128,85 @@ def extend_notes_with_pedal_spans(notes, pedal_spans):
     return extended_notes
 
 
+def extend_notes_with_reference_pedal_spans(notes, pedal_spans):
+    """Extend note offsets using the reference pedal target semantics.
+
+    This mirrors the reference piano_transcription target extension more closely
+    than the cached-TSV helper above: a note is extended only when its raw offset
+    is strictly inside a pedal span, and repeated notes of the same pitch within
+    that span clip the previous extended note at the next onset.
+    """
+    if len(notes) == 0:
+        return []
+
+    normalized_spans = normalize_pedal_spans(pedal_spans)
+    extended_records = []
+
+    for note_index, note in enumerate(notes):
+        onset_time = float(note["onset"])
+        raw_offset = float(note.get("offset", onset_time))
+        extended_offset = raw_offset
+        matched_span_index = None
+
+        for span_index, span in enumerate(normalized_spans):
+            span_onset = float(span["onset"])
+            span_offset = float(span["offset"])
+            if span_onset < raw_offset < span_offset:
+                extended_offset = span_offset
+                matched_span_index = span_index
+                break
+
+        new_note = dict(note)
+        new_note["offset"] = max(float(extended_offset), onset_time)
+        new_note["duration"] = new_note["offset"] - onset_time
+        extended_records.append({
+            "index": note_index,
+            "note": new_note,
+            "span_index": matched_span_index,
+        })
+
+    previous_by_span_and_pitch = {}
+    for record in sorted(
+        extended_records,
+        key=lambda item: (float(item["note"]["onset"]), item["index"]),
+    ):
+        span_index = record["span_index"]
+        if span_index is None:
+            continue
+
+        pitch = record["note"].get("pitch", record["note"].get("midi_note"))
+        key = (span_index, pitch)
+        previous_record = previous_by_span_and_pitch.get(key)
+
+        if previous_record is not None:
+            previous_note = previous_record["note"]
+            cap_time = float(record["note"]["onset"])
+            if float(previous_note["offset"]) > cap_time:
+                previous_note["offset"] = max(cap_time, float(previous_note["onset"]))
+                previous_note["duration"] = previous_note["offset"] - float(previous_note["onset"])
+
+        previous_by_span_and_pitch[key] = record
+
+    return [record["note"] for record in sorted(extended_records, key=lambda item: item["index"])]
+
+
+def extend_notes_with_reference_pedal_events(notes, pedal_event_list, piece_end_time=None):
+    if len(notes) == 0:
+        return []
+
+    if piece_end_time is None:
+        piece_end_time = infer_piece_end_time(
+            note_lists=[notes],
+            pedal_event_lists=[pedal_event_list],
+        )
+
+    pedal_spans = pedal_events_to_spans(
+        pedal_event_list,
+        piece_end_time=piece_end_time,
+    )
+    return extend_notes_with_reference_pedal_spans(notes, pedal_spans)
+
+
 def extend_notes_with_pedal_events(notes, pedal_event_list, piece_end_time=None):
     if len(notes) == 0:
         return []

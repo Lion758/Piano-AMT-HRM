@@ -25,10 +25,14 @@ from data.pedal_extension_utils import (
     infer_piece_end_time as shared_infer_piece_end_time,
     pedal_events_to_spans as shared_pedal_events_to_spans,
     extend_notes_with_pedal_events,
+    extend_notes_with_reference_pedal_events,
 )
 
 PEDAL_DUMMY_MIDI = 21
 PEDAL_EVENT_TOLERANCE = 0.05
+REFERENCE_PEDAL_ONSET_TOLERANCE = 0.2
+REFERENCE_PEDAL_OFFSET_RATIO = 0.2
+REFERENCE_PEDAL_OFFSET_MIN_TOLERANCE = 0.05
 
 def pianoroll_frame_metrics(name, output_pianoroll_frame, target_pianoroll_frame):
     if (target_pianoroll_frame == 1).sum() == 0:
@@ -489,6 +493,127 @@ def _safe_interval_metrics(reference_intervals, estimated_intervals, onset_toler
     )
 
 
+def _coerce_intervals(intervals):
+    intervals = np.asarray(intervals, dtype=np.float64)
+    if intervals.size == 0:
+        return np.empty((0, 2), dtype=np.float64)
+    return intervals.reshape(-1, 2)
+
+
+def reference_pedal_events_from_dataframe(df):
+    if df is None or "type" not in df.columns or "onset_sec" not in df.columns:
+        return []
+
+    pedal_rows = df[df["type"].isin(["PedalOn", "PedalOff"])].copy()
+    if len(pedal_rows) == 0:
+        return []
+
+    pedal_rows["_pedal_sort"] = np.where(pedal_rows["type"] == "PedalOff", 0, 1)
+    pedal_rows = pedal_rows.sort_values(
+        by=["onset_sec", "_pedal_sort"],
+        kind="mergesort",
+    )
+
+    return [
+        {"time": float(row["onset_sec"]), "type": str(row["type"])}
+        for _, row in pedal_rows.iterrows()
+    ]
+
+
+def _reference_pedal_interval_metrics(
+    reference_intervals,
+    estimated_intervals,
+    onset_tolerance=REFERENCE_PEDAL_ONSET_TOLERANCE,
+    offset_ratio=REFERENCE_PEDAL_OFFSET_RATIO,
+    offset_min_tolerance=REFERENCE_PEDAL_OFFSET_MIN_TOLERANCE,
+):
+    reference_intervals = _coerce_intervals(reference_intervals)
+    estimated_intervals = _coerce_intervals(estimated_intervals)
+    if len(reference_intervals) == 0 or len(estimated_intervals) == 0:
+        return 0.0, 0.0, 0.0, 0.0
+
+    reference_pitches = np.ones(reference_intervals.shape[0])
+    estimated_pitches = np.ones(estimated_intervals.shape[0])
+    return evaluate_notes(
+        ref_intervals=reference_intervals,
+        ref_pitches=reference_pitches,
+        est_intervals=estimated_intervals,
+        est_pitches=estimated_pitches,
+        onset_tolerance=onset_tolerance,
+        offset_ratio=offset_ratio,
+        offset_min_tolerance=offset_min_tolerance,
+    )
+
+
+def cal_reference_pedal_metrics(
+    output_pedal_event_list,
+    reference_pedal_event_list,
+    piece_end_time,
+):
+    output_pedal_spans = pedal_events_to_spans(output_pedal_event_list, piece_end_time)
+    reference_pedal_spans = pedal_events_to_spans(reference_pedal_event_list, piece_end_time)
+
+    output_intervals = _pedal_spans_to_intervals(output_pedal_spans)
+    reference_intervals = _pedal_spans_to_intervals(reference_pedal_spans)
+    pedal_precision, pedal_recall, pedal_f1, _ = _reference_pedal_interval_metrics(
+        reference_intervals,
+        output_intervals,
+    )
+
+    metric_dict = {
+        "pedal_precision": pedal_precision,
+        "pedal_recall": pedal_recall,
+        "pedal_f1": pedal_f1,
+    }
+    return metric_dict, output_pedal_spans, reference_pedal_spans
+
+
+def cal_pedal_frame_metrics(pedal_frame_output, pedal_frame_target, threshold=0.5):
+    y_pred = np.asarray(pedal_frame_output, dtype=np.float32).reshape(-1) > threshold
+    y_true = np.asarray(pedal_frame_target, dtype=np.float32).reshape(-1) > 0.5
+    if y_true.size == 0:
+        return {
+            "pedal_frame_precision": np.nan,
+            "pedal_frame_recall": np.nan,
+            "pedal_frame_f1": np.nan,
+        }
+
+    precision, recall, f1, _ = metrics.precision_recall_fscore_support(
+        y_true.astype(np.int32),
+        y_pred.astype(np.int32),
+        labels=[0, 1],
+        zero_division=0,
+    )
+    return {
+        "pedal_frame_precision": float(precision[1]),
+        "pedal_frame_recall": float(recall[1]),
+        "pedal_frame_f1": float(f1[1]),
+    }
+
+
+def collect_trimmed_pedal_frame_arrays(data_list):
+    pedal_frame_outputs = []
+    pedal_frame_targets = []
+    for row in data_list:
+        row_outputs = row.get("pedal_frame_output", [])
+        row_targets = row.get("pedal_frame_target", [])
+        row_total_frames = int(row.get("total_frames", row.get("frame_offsets", 0) + len(row_targets)))
+        row_frame_offset = int(row.get("frame_offsets", 0))
+        valid_frames = max(
+            0,
+            min(len(row_outputs), len(row_targets), row_total_frames - row_frame_offset),
+        )
+        if valid_frames <= 0:
+            continue
+        pedal_frame_outputs.extend(row_outputs[:valid_frames])
+        pedal_frame_targets.extend(row_targets[:valid_frames])
+
+    return (
+        np.asarray(pedal_frame_outputs, dtype=np.float32),
+        np.asarray(pedal_frame_targets, dtype=np.float32),
+    )
+
+
 def _count_matched_event_times(reference_times, estimated_times, tolerance=PEDAL_EVENT_TOLERANCE):
     reference_times = np.sort(np.asarray(reference_times, dtype=np.float32))
     estimated_times = np.sort(np.asarray(estimated_times, dtype=np.float32))
@@ -575,45 +700,130 @@ def cal_pedal_metrics(output_pedal_event_list, target_pedal_event_list, piece_en
     return metric_dict, output_pedal_spans, target_pedal_spans
 
 
+def _note_rows_to_list(note_rows, offset_column):
+    notes = []
+    for _, row in note_rows.iterrows():
+        onset_time = float(row["onset_sec"])
+        offset_time = float(row[offset_column])
+        notes.append({
+            "onset": onset_time,
+            "offset": offset_time,
+            "duration": offset_time - onset_time,
+            "pitch": int(row["pitch"]),
+            "velocity": float(row["velocity"]),
+        })
+    return notes
+
+
+def _notes_to_interval_array(notes):
+    if len(notes) == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    return np.array([(note["onset"], note["offset"]) for note in notes], dtype=np.float32)
+
+
+def _notes_to_pitch_array(notes):
+    if len(notes) == 0:
+        return np.array([], dtype=np.float32)
+    return np.array([note["pitch"] for note in notes], dtype=np.float32)
+
+
+def _notes_to_velocity_array(notes):
+    if len(notes) == 0:
+        return np.array([], dtype=np.float32)
+    return np.array([note["velocity"] for note in notes], dtype=np.float32)
+
+
 def build_pedal_extended_note_metric_inputs(output_note_data_list, output_pedal_event_list, tsv_df, piece_end_time):
     tsv_notes = tsv_df[tsv_df["type"] == "note"] if "type" in tsv_df.columns else tsv_df
-    output_notes_ext = extend_notes_with_pedal_events(
+    output_notes_ext = extend_notes_with_reference_pedal_events(
+        output_note_data_list,
+        output_pedal_event_list,
+        piece_end_time=piece_end_time,
+    )
+    output_notes_ext_uncapped = extend_notes_with_pedal_events(
         output_note_data_list,
         output_pedal_event_list,
         piece_end_time=piece_end_time,
     )
 
-    gt_onsets = tsv_notes["onset_sec"].to_numpy(dtype=np.float32)
-    gt_offsets = tsv_notes["offset_sec"].to_numpy(dtype=np.float32)
-    gt_pitches_raw = tsv_notes["pitch"].to_numpy(dtype=np.float32)
-    gt_velocities = tsv_notes["velocity"].to_numpy(dtype=np.float32)
+    can_rebuild_reference_target = "offset_sec_truth" in tsv_notes.columns and "type" in tsv_df.columns
+    if can_rebuild_reference_target:
+        reference_notes_raw = _note_rows_to_list(tsv_notes, "offset_sec_truth")
+        reference_pedal_events = reference_pedal_events_from_dataframe(tsv_df)
+        gt_notes_ext = extend_notes_with_reference_pedal_events(
+            reference_notes_raw,
+            reference_pedal_events,
+            piece_end_time=piece_end_time,
+        )
+        pedal_extended_target_source = "offset_sec_truth+pedal_events"
+    else:
+        gt_notes_ext = _note_rows_to_list(tsv_notes, "offset_sec")
+        pedal_extended_target_source = "offset_sec"
 
-    gt_interval_ext = (
-        np.stack([gt_onsets, gt_offsets], axis=1).astype(np.float32, copy=False)
-        if len(gt_onsets)
-        else np.zeros((0, 2), dtype=np.float32)
-    )
-    out_interval_ext = (
-        np.array([(note["onset"], note["offset"]) for note in output_notes_ext], dtype=np.float32)
-        if len(output_notes_ext)
-        else np.zeros((0, 2), dtype=np.float32)
-    )
+    gt_notes_ext_uncapped = _note_rows_to_list(tsv_notes, "offset_sec")
+
+    gt_interval_ext = _notes_to_interval_array(gt_notes_ext)
+    out_interval_ext = _notes_to_interval_array(output_notes_ext)
+    diagnostic_gt_interval_ext_uncapped = _notes_to_interval_array(gt_notes_ext_uncapped)
+    diagnostic_out_interval_ext_uncapped = _notes_to_interval_array(output_notes_ext_uncapped)
 
     gt_interval_ext = _ensure_minimum_note_duration(gt_interval_ext)
     out_interval_ext = _ensure_minimum_note_duration(out_interval_ext)
+    diagnostic_gt_interval_ext_uncapped = _ensure_minimum_note_duration(diagnostic_gt_interval_ext_uncapped)
+    diagnostic_out_interval_ext_uncapped = _ensure_minimum_note_duration(diagnostic_out_interval_ext_uncapped)
+
+    gt_pitches_raw = _notes_to_pitch_array(gt_notes_ext)
+    gt_velocities = _notes_to_velocity_array(gt_notes_ext)
+    out_pitches_raw = _notes_to_pitch_array(output_notes_ext)
+    out_velocities = _notes_to_velocity_array(output_notes_ext)
+    diagnostic_gt_pitches_raw = _notes_to_pitch_array(gt_notes_ext_uncapped)
+    diagnostic_gt_velocities = _notes_to_velocity_array(gt_notes_ext_uncapped)
+    diagnostic_out_pitches_raw = _notes_to_pitch_array(output_notes_ext_uncapped)
+    diagnostic_out_velocities = _notes_to_velocity_array(output_notes_ext_uncapped)
 
     return {
         "gt_interval_ext": gt_interval_ext,
         "gt_pitches_hz": midi_to_hz(gt_pitches_raw) if len(gt_pitches_raw) else np.array([], dtype=np.float32),
         "gt_velocities": gt_velocities,
         "out_interval_ext": out_interval_ext,
-        "out_pitches_ext": midi_to_hz(np.array([note["pitch"] for note in output_notes_ext], dtype=np.float32))
-        if len(output_notes_ext)
+        "out_pitches_ext": midi_to_hz(out_pitches_raw) if len(out_pitches_raw) else np.array([], dtype=np.float32),
+        "out_vel_ext": out_velocities,
+        "diagnostic_gt_interval_ext_uncapped": diagnostic_gt_interval_ext_uncapped,
+        "diagnostic_gt_pitches_hz_uncapped": midi_to_hz(diagnostic_gt_pitches_raw)
+        if len(diagnostic_gt_pitches_raw)
         else np.array([], dtype=np.float32),
-        "out_vel_ext": np.array([note["velocity"] for note in output_notes_ext], dtype=np.float32)
-        if len(output_notes_ext)
+        "diagnostic_gt_velocities_uncapped": diagnostic_gt_velocities,
+        "diagnostic_out_interval_ext_uncapped": diagnostic_out_interval_ext_uncapped,
+        "diagnostic_out_pitches_ext_uncapped": midi_to_hz(diagnostic_out_pitches_raw)
+        if len(diagnostic_out_pitches_raw)
         else np.array([], dtype=np.float32),
+        "diagnostic_out_vel_ext_uncapped": diagnostic_out_velocities,
+        "pedal_extended_target_source": pedal_extended_target_source,
     }
+
+
+def _calculate_note_metric_values(reference_intervals, reference_pitches, reference_velocities, estimated_intervals, estimated_pitches, estimated_velocities):
+    if len(reference_intervals) == 0 or len(estimated_intervals) == 0:
+        note_precision = note_recall = note_f1 = 0.0
+        note_vel_precision = note_vel_recall = note_vel_f1 = 0.0
+    else:
+        note_precision, note_recall, note_f1, _ = evaluate_notes(
+            reference_intervals,
+            reference_pitches,
+            estimated_intervals,
+            estimated_pitches,
+        )
+        note_vel_precision, note_vel_recall, note_vel_f1, _ = evaluate_notes_with_velocity(
+            reference_intervals,
+            reference_pitches,
+            reference_velocities,
+            estimated_intervals,
+            estimated_pitches,
+            estimated_velocities,
+            velocity_tolerance=0.1,
+        )
+
+    return note_precision, note_recall, note_f1, note_vel_precision, note_vel_recall, note_vel_f1
 
 
 def cal_pedal_extended_note_metrics(output_note_data_list, output_pedal_event_list, tsv_df, piece_end_time):
@@ -624,25 +834,29 @@ def cal_pedal_extended_note_metrics(output_note_data_list, output_pedal_event_li
         piece_end_time,
     )
 
-    if len(metric_inputs["gt_interval_ext"]) == 0 or len(metric_inputs["out_interval_ext"]) == 0:
-        note_precision = note_recall = note_f1 = 0.0
-        note_vel_precision = note_vel_recall = note_vel_f1 = 0.0
-    else:
-        note_precision, note_recall, note_f1, _ = evaluate_notes(
-            metric_inputs["gt_interval_ext"],
-            metric_inputs["gt_pitches_hz"],
-            metric_inputs["out_interval_ext"],
-            metric_inputs["out_pitches_ext"],
-        )
-        note_vel_precision, note_vel_recall, note_vel_f1, _ = evaluate_notes_with_velocity(
-            metric_inputs["gt_interval_ext"],
-            metric_inputs["gt_pitches_hz"],
-            metric_inputs["gt_velocities"],
-            metric_inputs["out_interval_ext"],
-            metric_inputs["out_pitches_ext"],
-            metric_inputs["out_vel_ext"],
-            velocity_tolerance=0.1,
-        )
+    note_precision, note_recall, note_f1, note_vel_precision, note_vel_recall, note_vel_f1 = _calculate_note_metric_values(
+        metric_inputs["gt_interval_ext"],
+        metric_inputs["gt_pitches_hz"],
+        metric_inputs["gt_velocities"],
+        metric_inputs["out_interval_ext"],
+        metric_inputs["out_pitches_ext"],
+        metric_inputs["out_vel_ext"],
+    )
+    (
+        diagnostic_note_precision,
+        diagnostic_note_recall,
+        diagnostic_note_f1,
+        diagnostic_note_vel_precision,
+        diagnostic_note_vel_recall,
+        diagnostic_note_vel_f1,
+    ) = _calculate_note_metric_values(
+        metric_inputs["diagnostic_gt_interval_ext_uncapped"],
+        metric_inputs["diagnostic_gt_pitches_hz_uncapped"],
+        metric_inputs["diagnostic_gt_velocities_uncapped"],
+        metric_inputs["diagnostic_out_interval_ext_uncapped"],
+        metric_inputs["diagnostic_out_pitches_ext_uncapped"],
+        metric_inputs["diagnostic_out_vel_ext_uncapped"],
+    )
 
     metric_dict = {
         "note+offset_precision_pedal_extended": note_precision,
@@ -651,6 +865,12 @@ def cal_pedal_extended_note_metrics(output_note_data_list, output_pedal_event_li
         "note+offset+velocity_precision_pedal_extended": note_vel_precision,
         "note+offset+velocity_recall_pedal_extended": note_vel_recall,
         "note+offset+velocity_f1_pedal_extended": note_vel_f1,
+        "diagnostic_note+offset_precision_pedal_extended_uncapped": diagnostic_note_precision,
+        "diagnostic_note+offset_recall_pedal_extended_uncapped": diagnostic_note_recall,
+        "diagnostic_note+offset_f1_pedal_extended_uncapped": diagnostic_note_f1,
+        "diagnostic_note+offset+velocity_precision_pedal_extended_uncapped": diagnostic_note_vel_precision,
+        "diagnostic_note+offset+velocity_recall_pedal_extended_uncapped": diagnostic_note_vel_recall,
+        "diagnostic_note+offset+velocity_f1_pedal_extended_uncapped": diagnostic_note_vel_f1,
     }
     return metric_dict, metric_inputs
 

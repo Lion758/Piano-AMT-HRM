@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Midi } from '@tonejs/midi';
 import { assignHands } from '../utils/noteHelpers.js';
 import { extractSustainEvents, extendNotesWithSustain } from '../utils/pedalHelpers.js';
-import { resolveApiUrl } from '../../lib/api.js';
+import { resolveApiUrl } from '../../shared/api.js';
 
 const MIDI_FETCH_RETRIES = 8;
 const MIDI_FETCH_RETRY_DELAY_MS = 750;

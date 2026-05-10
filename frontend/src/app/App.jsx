@@ -1,7 +1,7 @@
 import { useState } from "react";
-import "./index.css";
-import pianoBanner from "./assets/piano-banner.png";
-import { API_BASE, resolveApiUrl } from "./lib/api.js";
+import "./App.css";
+import pianoBanner from "../assets/piano-banner.png";
+import { API_BASE, resolveApiUrl } from "../shared/api.js";
 
 const STEPS = [
   { icon: "🎵", num: 1, title: "Upload Your Audio", desc: "Upload any piano recording — solo or mixed. Our system accepts MP3, WAV, M4A and more." },

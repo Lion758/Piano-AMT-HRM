@@ -564,6 +564,13 @@ class MT3Trainer(pl.LightningModule):
                 if self.config.data.features != "mel":
                     encoder_inputs = torchaudio.transforms.AmplitudeToDB(top_db=80.0)(encoder_inputs)
 
+        pedal_frame_output = None
+        if "pedal_frame_target" in batch and hasattr(self.model, "pedal_frame_head"):
+            pedal_encoder_outputs = self.model.encode(encoder_inputs, enable_dropout=False)
+            pedal_frame_output = torch.sigmoid(
+                self.model.pedal_frame_head(pedal_encoder_outputs).squeeze(-1)
+            ).detach()
+
         # [B, n_tokens]
         target_tokens = batch["decoder_targets"] 
         n_tokens = target_tokens.size()[1]
@@ -594,7 +601,7 @@ class MT3Trainer(pl.LightningModule):
         batch_sizes = self.all_gather(batch_size)  # Gather batch sizes first
         max_batch_size = int(batch_sizes.max())
         
-        gather_data = self.all_gather({
+        gather_payload = {
             "target_tokens": pad_to_max_size(target_tokens, max_batch_size),
             "output_tokens": pad_to_max_size(decoder_output_tokens, max_batch_size),
             "target_tokens_lens": pad_to_max_size(target_sequence_lens, max_batch_size),
@@ -605,7 +612,14 @@ class MT3Trainer(pl.LightningModule):
             "midi_path": pad_to_max_size(batch["midi_path"], max_batch_size),
             "frame_offsets": pad_to_max_size(batch["frame_offsets"], max_batch_size),
             
-        })
+        }
+        if "total_frames" in batch:
+            gather_payload["total_frames"] = pad_to_max_size(batch["total_frames"], max_batch_size)
+        if pedal_frame_output is not None:
+            gather_payload["pedal_frame_output"] = pad_to_max_size(pedal_frame_output, max_batch_size)
+            gather_payload["pedal_frame_target"] = pad_to_max_size(batch["pedal_frame_target"], max_batch_size)
+
+        gather_data = self.all_gather(gather_payload)
 
         # On master rank, process or aggregate the gathered outputs as needed
         if self.global_rank == 0:
@@ -627,7 +641,7 @@ class MT3Trainer(pl.LightningModule):
                     target_tokens_i = gather_data["target_tokens"][w][b, :target_len_b].cpu().numpy()
                     output_tokens_i = gather_data["output_tokens"][w][b, :output_len_b].cpu().numpy()
                     
-                    self.test_outputs_dict[audio_id].append({
+                    output_row = {
                         "target_tokens": target_tokens_i.tolist(),
                         "output_tokens": output_tokens_i.tolist(),
                         "audio_name": audio_name,
@@ -637,7 +651,14 @@ class MT3Trainer(pl.LightningModule):
                         "target_tokens_lens": target_len_b,
                         "output_tokens_lens": output_len_b,
                         "batch_size": int(max_batch_size),
-                    })
+                    }
+                    if "total_frames" in gather_data:
+                        output_row["total_frames"] = gather_data["total_frames"][w][b].item()
+                    if "pedal_frame_output" in gather_data:
+                        output_row["pedal_frame_output"] = gather_data["pedal_frame_output"][w][b].detach().cpu().numpy().tolist()
+                        output_row["pedal_frame_target"] = gather_data["pedal_frame_target"][w][b].detach().cpu().numpy().tolist()
+
+                    self.test_outputs_dict[audio_id].append(output_row)
                     
 
         return metrics_dict
@@ -664,6 +685,37 @@ class MT3Trainer(pl.LightningModule):
         
         metric_dict = defaultdict(list)
 
+        evaluation_config = self.config.get("evaluation", {})
+        save_track_json = evaluation_config.get("save_track_json", True)
+        save_output_midi = evaluation_config.get("save_output_midi", True)
+        copy_reference_midi = evaluation_config.get("copy_reference_midi", True)
+        report_pedal_metrics = evaluation_config.get("report_pedal_metrics", True)
+        report_pedal_extended = evaluation_config.get("report_pedal_extended", False)
+        pedal_reference_metric_names = (
+            "pedal_precision",
+            "pedal_recall",
+            "pedal_f1",
+        )
+        pedal_diagnostic_metric_names = (
+            "pedal_precision",
+            "pedal_recall",
+            "pedal_f1",
+            "pedal+offset_precision",
+            "pedal+offset_recall",
+            "pedal+offset_f1",
+            "pedal_on_precision",
+            "pedal_on_recall",
+            "pedal_on_f1",
+            "pedal_off_precision",
+            "pedal_off_recall",
+            "pedal_off_f1",
+        )
+        pedal_frame_metric_names = (
+            "pedal_frame_precision",
+            "pedal_frame_recall",
+            "pedal_frame_f1",
+        )
+
         # Save test tokens to json
         if self.config.training.mode == "test":
             test_output_dir = self.test_output_dir
@@ -678,7 +730,8 @@ class MT3Trainer(pl.LightningModule):
             # audio_name = audio_name.replace(" ", "_")
             
             # copy midi file to test output dir.
-            shutil.copy(target_midi_path, test_output_dir + "/" + os.path.basename(target_midi_path))
+            if copy_reference_midi:
+                shutil.copy(target_midi_path, test_output_dir + "/" + os.path.basename(target_midi_path))
             
             metric_dict["batch_size"].append( data_list[0]["batch_size"] )
             
@@ -696,39 +749,62 @@ class MT3Trainer(pl.LightningModule):
             output_note_data_list, output_pedal_event_list = sm_tokenizer.midi_events_to_notes(output_event_data_list)
             target_note_data_list, target_pedal_event_list = sm_tokenizer.midi_events_to_notes(target_event_data_list)
 
+            tsv_path = os.path.splitext(target_midi_path)[0] + ".midi-notes.tsv"
+            if os.path.exists(tsv_path):
+                reference_df = pd.read_csv(tsv_path, sep="\t")
+            else:
+                reference_df = sm_tokenizer.midi_to_dataframe(target_midi_path)
+            reference_pedal_event_list = transcription_metrics.reference_pedal_events_from_dataframe(reference_df)
+
             piece_end_time = transcription_metrics.infer_piece_end_time(
                 note_lists=[output_note_data_list, target_note_data_list],
-                pedal_event_lists=[output_pedal_event_list, target_pedal_event_list],
-            )
-            if len(target_pedal_event_list) > 0 and self.config.get("evaluation", {}).get("report_pedal_metrics", True):
-                metric_dict["pedal_metrics_status"].append("available")
-                pedal_metrics, output_pedal_spans, _ = transcription_metrics.cal_pedal_metrics(
+                pedal_event_lists=[
                     output_pedal_event_list,
                     target_pedal_event_list,
+                    reference_pedal_event_list,
+                ],
+            )
+            if len(reference_pedal_event_list) > 0 and report_pedal_metrics:
+                metric_dict["pedal_metrics_status"].append("available")
+                pedal_metrics, output_pedal_spans, _ = transcription_metrics.cal_reference_pedal_metrics(
+                    output_pedal_event_list,
+                    reference_pedal_event_list,
                     piece_end_time=piece_end_time,
                 )
                 for metric_name, metric_value in pedal_metrics.items():
                     metric_dict[metric_name].append(metric_value)
+
+                pedal_diagnostics, _, _ = transcription_metrics.cal_pedal_metrics(
+                    output_pedal_event_list,
+                    reference_pedal_event_list,
+                    piece_end_time=piece_end_time,
+                )
+                for metric_name, metric_value in pedal_diagnostics.items():
+                    metric_dict["diagnostic_" + metric_name].append(metric_value)
             else:
-                metric_dict["pedal_metrics_status"].append("not_available_no_reference_pedals")
+                if report_pedal_metrics:
+                    metric_dict["pedal_metrics_status"].append("not_available_no_reference_pedals")
+                else:
+                    metric_dict["pedal_metrics_status"].append("disabled")
                 output_pedal_spans = transcription_metrics.pedal_events_to_spans(
                     output_pedal_event_list,
                     piece_end_time=piece_end_time,
                 )
-                for metric_name in (
-                    "pedal_precision",
-                    "pedal_recall",
-                    "pedal_f1",
-                    "pedal+offset_precision",
-                    "pedal+offset_recall",
-                    "pedal+offset_f1",
-                    "pedal_on_precision",
-                    "pedal_on_recall",
-                    "pedal_on_f1",
-                    "pedal_off_precision",
-                    "pedal_off_recall",
-                    "pedal_off_f1",
-                ):
+                for metric_name in pedal_reference_metric_names:
+                    metric_dict[metric_name].append(np.nan)
+                for metric_name in pedal_diagnostic_metric_names:
+                    metric_dict["diagnostic_" + metric_name].append(np.nan)
+
+            if len(data_list) > 0 and "pedal_frame_output" in data_list[0]:
+                pedal_frame_outputs, pedal_frame_targets = transcription_metrics.collect_trimmed_pedal_frame_arrays(data_list)
+                pedal_frame_metrics = transcription_metrics.cal_pedal_frame_metrics(
+                    pedal_frame_outputs,
+                    pedal_frame_targets,
+                )
+                for metric_name, metric_value in pedal_frame_metrics.items():
+                    metric_dict[metric_name].append(metric_value)
+            else:
+                for metric_name in pedal_frame_metric_names:
                     metric_dict[metric_name].append(np.nan)
             
             # Onset only Metrics
@@ -756,17 +832,14 @@ class MT3Trainer(pl.LightningModule):
             metric_dict["note+offset+velocity_recall"].append(recall)
             metric_dict["note+offset+velocity_f1"].append(f1)
 
-            # Pedal-extended evaluation: re-extend predicted note offsets with
-            # predicted pedals, compare against canonical pedal-extended GT
-            # offsets loaded from the TSV. Makes note+offset(+velocity) F1
-            # directly comparable to the baseline's pedal-extended metric.
-            if self.config.get("evaluation", {}).get("report_pedal_extended", False):
-                tsv_path = os.path.splitext(target_midi_path)[0] + ".midi-notes.tsv"
-                tsv_df = pd.read_csv(tsv_path, sep="\t")
+            # Pedal-extended evaluation: apply reference-style sustain semantics
+            # to raw predicted/target offsets. Uncapped cached-TSV semantics are
+            # also reported under diagnostic_*_uncapped metric names.
+            if report_pedal_extended:
                 pedal_extended_metrics, _ = transcription_metrics.cal_pedal_extended_note_metrics(
                     output_note_data_list,
                     output_pedal_event_list,
-                    tsv_df,
+                    reference_df,
                     piece_end_time=piece_end_time,
                 )
                 for metric_name, metric_value in pedal_extended_metrics.items():
@@ -778,22 +851,24 @@ class MT3Trainer(pl.LightningModule):
             target_midi_basename = os.path.basename(target_midi_path)
             metric_dict["midi_path"].append(target_midi_basename)
             
-            json_path = test_output_dir + "/" + os.path.splitext(target_midi_basename)[0] + ".output.json"
-            with open(json_path, "w") as f:
-                data_dict = {
-                    "audio_id": audio_id,
-                    "audio_name": audio_name,
-                    "midi_path": target_midi_basename,
-                    "data_list": data_list
-                }
-                json.dump(data_dict, f, ensure_ascii=False, indent=2)
+            if save_track_json:
+                json_path = test_output_dir + "/" + os.path.splitext(target_midi_basename)[0] + ".output.json"
+                with open(json_path, "w") as f:
+                    data_dict = {
+                        "audio_id": audio_id,
+                        "audio_name": audio_name,
+                        "midi_path": target_midi_basename,
+                        "data_list": data_list
+                    }
+                    json.dump(data_dict, f, ensure_ascii=False, indent=2)
                 
-            try:
-                output_midi_path = test_output_dir + "/" + os.path.splitext(target_midi_basename)[0] + ".output.mid"
-                output_pedal_events_for_midi = transcription_metrics.pedal_spans_to_event_list(output_pedal_spans)
-                sm_tokenizer.save_midi(output_note_data_list, output_midi_path, pedal_event_list=output_pedal_events_for_midi)
-            except Exception as e:
-                print("Error saving midi file:", e)
+            if save_output_midi:
+                try:
+                    output_midi_path = test_output_dir + "/" + os.path.splitext(target_midi_basename)[0] + ".output.mid"
+                    output_pedal_events_for_midi = transcription_metrics.pedal_spans_to_event_list(output_pedal_spans)
+                    sm_tokenizer.save_midi(output_note_data_list, output_midi_path, pedal_event_list=output_pedal_events_for_midi)
+                except Exception as e:
+                    print("Error saving midi file:", e)
                 
         df = pd.DataFrame(metric_dict)
         # Calculate mean and insert into the first row

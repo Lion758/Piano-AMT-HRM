@@ -43,7 +43,10 @@ model:
   ]
 
 evaluation:
-  report_pedal_extended: true # if true, additionally evaluate pedal-re-extended predictions vs TSV offset_sec
+  report_pedal_extended: true # if true, add reference-style same-pitch-capped pedal-extended note metrics plus uncapped diagnostics
+  save_track_json: true # per-track token chunks for debugging/repro without rerunning the model
+  save_output_midi: false # reconstructed prediction MIDI for listening/inspection
+  copy_reference_midi: false # copied ground-truth MIDI for side-by-side comparison
 
 training:
   notes: "T5"
@@ -62,4 +65,3 @@ training:
     loss_pedal_state:  [pedal_frame_logits,  pedal_frame_target,  loss.PedalFrameBCELoss, 0.3]
     loss_pedal_onset:  [pedal_onset_logits,  pedal_onset_target,  loss.PedalFrameBCELoss, 0.3]
     loss_pedal_offset: [pedal_offset_logits, pedal_offset_target, loss.PedalFrameBCELoss, 0.3]
-

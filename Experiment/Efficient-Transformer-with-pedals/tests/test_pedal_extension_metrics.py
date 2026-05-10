@@ -42,7 +42,10 @@ mir_eval_module.transcription = mir_eval_transcription_module
 mir_eval_module.transcription_velocity = mir_eval_transcription_velocity_module
 mir_eval_module.multipitch = mir_eval_multipitch_module
 
-from data.pedal_extension_utils import pedal_events_to_spans
+from data.pedal_extension_utils import (
+    extend_notes_with_reference_pedal_spans,
+    pedal_events_to_spans,
+)
 from data.symbolic_music_tokenizer import extend_offsets_with_pedals
 import metrics.transcription_metrics as transcription_metrics
 
@@ -73,6 +76,55 @@ def test_extend_offsets_with_pedals_keeps_same_pitch_repeats_uncapped():
 
     assert [note["offset"] for note in extended_notes] == [2.0, 2.0]
     assert [note["offset"] for note in capped_notes] == [1.0, 2.0]
+
+
+def test_reference_pedal_extension_caps_same_pitch_repeats_inside_span():
+    notes = [
+        _make_note(60, 0.0, 0.5, velocity=90),
+        _make_note(60, 1.0, 1.1, velocity=70),
+    ]
+    pedal_spans = [{"onset": 0.25, "offset": 2.0}]
+
+    extended_notes = extend_notes_with_reference_pedal_spans(notes, pedal_spans)
+
+    assert [note["offset"] for note in extended_notes] == [1.0, 2.0]
+
+
+def test_reference_pedal_extension_does_not_cap_different_pitches():
+    notes = [
+        _make_note(60, 0.0, 0.5),
+        _make_note(64, 1.0, 1.1),
+    ]
+    pedal_spans = [{"onset": 0.25, "offset": 2.0}]
+
+    extended_notes = extend_notes_with_reference_pedal_spans(notes, pedal_spans)
+
+    assert [note["offset"] for note in extended_notes] == [2.0, 2.0]
+
+
+def test_reference_pedal_extension_does_not_shorten_notes_outside_pedal_span():
+    notes = [
+        _make_note(60, 0.0, 2.5),
+        _make_note(60, 1.0, 1.1),
+    ]
+    pedal_spans = [{"onset": 0.25, "offset": 2.0}]
+
+    extended_notes = extend_notes_with_reference_pedal_spans(notes, pedal_spans)
+
+    assert [note["offset"] for note in extended_notes] == [2.5, 2.0]
+
+
+def test_reference_pedal_extension_uses_strict_pedal_boundaries():
+    notes = [
+        _make_note(60, 0.0, 0.25),
+        _make_note(61, 0.5, 1.0),
+        _make_note(62, 0.5, 0.75),
+    ]
+    pedal_spans = [{"onset": 0.25, "offset": 1.0}]
+
+    extended_notes = extend_notes_with_reference_pedal_spans(notes, pedal_spans)
+
+    assert [note["offset"] for note in extended_notes] == [0.25, 1.0, 1.0]
 
 
 def test_extend_offsets_with_pedals_closes_unmatched_final_pedal_on():
@@ -161,7 +213,93 @@ def test_cal_pedal_metrics_handles_long_time_boundary_spans(monkeypatch):
     assert output_pedal_spans == target_pedal_spans
 
 
-def test_cal_pedal_extended_note_metrics_uses_tsv_semantics_and_metric_names(monkeypatch):
+def test_cal_pedal_extended_note_metrics_uses_reference_style_and_diagnostic_names(monkeypatch):
+    output_notes = [
+        _make_note(60, 0.0, 0.5, velocity=90),
+        _make_note(60, 1.0, 1.1, velocity=70),
+    ]
+    output_pedal_events = [
+        {"time": 0.25, "type": "PedalOn"},
+        {"time": 1.5, "type": "PedalOff"},
+    ]
+    tsv_df = pd.DataFrame(
+        {
+            "type": ["note", "note", "PedalOn", "PedalOff"],
+            "onset_sec": [0.0, 1.0, 0.25, 1.5],
+            "offset_sec": [1.5, 1.5, 0.25, 1.5],
+            "offset_sec_truth": [0.5, 1.1, 0.25, 1.5],
+            "pitch": [60, 60, 0, 0],
+            "velocity": [90, 70, 0, 0],
+        }
+    )
+
+    note_calls = []
+    velocity_calls = []
+
+    def _capture_note_metrics(reference_intervals, reference_pitches, estimated_intervals, estimated_pitches, **kwargs):
+        note_calls.append({
+            "reference_intervals": np.array(reference_intervals, copy=True),
+            "estimated_intervals": np.array(estimated_intervals, copy=True),
+            "reference_pitches": np.array(reference_pitches, copy=True),
+            "estimated_pitches": np.array(estimated_pitches, copy=True),
+        })
+        return 0.11, 0.22, 0.33, 0.0
+
+    def _capture_velocity_metrics(reference_intervals, reference_pitches, reference_velocities, estimated_intervals, estimated_pitches, estimated_velocities, **kwargs):
+        velocity_calls.append({
+            "reference_intervals": np.array(reference_intervals, copy=True),
+            "estimated_intervals": np.array(estimated_intervals, copy=True),
+            "reference_velocities": np.array(reference_velocities, copy=True),
+            "estimated_velocities": np.array(estimated_velocities, copy=True),
+        })
+        return 0.44, 0.55, 0.66, 0.0
+
+    monkeypatch.setattr(transcription_metrics, "evaluate_notes", _capture_note_metrics)
+    monkeypatch.setattr(transcription_metrics, "evaluate_notes_with_velocity", _capture_velocity_metrics)
+
+    metric_dict, metric_inputs = transcription_metrics.cal_pedal_extended_note_metrics(
+        output_notes,
+        output_pedal_events,
+        tsv_df,
+        piece_end_time=1.5,
+    )
+
+    expected_reference_intervals = np.array([[0.0, 1.0], [1.0, 1.5]], dtype=np.float32)
+    expected_uncapped_intervals = np.array([[0.0, 1.5], [1.0, 1.5]], dtype=np.float32)
+    np.testing.assert_allclose(metric_inputs["gt_interval_ext"], expected_reference_intervals)
+    np.testing.assert_allclose(metric_inputs["out_interval_ext"], expected_reference_intervals)
+    np.testing.assert_allclose(metric_inputs["diagnostic_gt_interval_ext_uncapped"], expected_uncapped_intervals)
+    np.testing.assert_allclose(metric_inputs["diagnostic_out_interval_ext_uncapped"], expected_uncapped_intervals)
+    assert metric_inputs["pedal_extended_target_source"] == "offset_sec_truth+pedal_events"
+
+    assert len(note_calls) == 2
+    assert len(velocity_calls) == 2
+    np.testing.assert_allclose(note_calls[0]["reference_intervals"], expected_reference_intervals)
+    np.testing.assert_allclose(note_calls[0]["estimated_intervals"], expected_reference_intervals)
+    np.testing.assert_allclose(velocity_calls[0]["reference_intervals"], expected_reference_intervals)
+    np.testing.assert_allclose(velocity_calls[0]["estimated_intervals"], expected_reference_intervals)
+    np.testing.assert_allclose(note_calls[1]["reference_intervals"], expected_uncapped_intervals)
+    np.testing.assert_allclose(note_calls[1]["estimated_intervals"], expected_uncapped_intervals)
+    np.testing.assert_allclose(velocity_calls[1]["reference_intervals"], expected_uncapped_intervals)
+    np.testing.assert_allclose(velocity_calls[1]["estimated_intervals"], expected_uncapped_intervals)
+
+    assert metric_dict == {
+        "note+offset_precision_pedal_extended": 0.11,
+        "note+offset_recall_pedal_extended": 0.22,
+        "note+offset_f1_pedal_extended": 0.33,
+        "note+offset+velocity_precision_pedal_extended": 0.44,
+        "note+offset+velocity_recall_pedal_extended": 0.55,
+        "note+offset+velocity_f1_pedal_extended": 0.66,
+        "diagnostic_note+offset_precision_pedal_extended_uncapped": 0.11,
+        "diagnostic_note+offset_recall_pedal_extended_uncapped": 0.22,
+        "diagnostic_note+offset_f1_pedal_extended_uncapped": 0.33,
+        "diagnostic_note+offset+velocity_precision_pedal_extended_uncapped": 0.44,
+        "diagnostic_note+offset+velocity_recall_pedal_extended_uncapped": 0.55,
+        "diagnostic_note+offset+velocity_f1_pedal_extended_uncapped": 0.66,
+    }
+
+
+def test_pedal_extended_metric_inputs_fall_back_to_cached_offsets_for_older_tsv():
     output_notes = [
         _make_note(60, 0.0, 0.5, velocity=90),
         _make_note(60, 1.0, 1.1, velocity=70),
@@ -180,46 +318,99 @@ def test_cal_pedal_extended_note_metrics_uses_tsv_semantics_and_metric_names(mon
         }
     )
 
-    note_call = {}
-    velocity_call = {}
-
-    def _capture_note_metrics(reference_intervals, reference_pitches, estimated_intervals, estimated_pitches, **kwargs):
-        note_call["reference_intervals"] = np.array(reference_intervals, copy=True)
-        note_call["estimated_intervals"] = np.array(estimated_intervals, copy=True)
-        note_call["reference_pitches"] = np.array(reference_pitches, copy=True)
-        note_call["estimated_pitches"] = np.array(estimated_pitches, copy=True)
-        return 0.11, 0.22, 0.33, 0.0
-
-    def _capture_velocity_metrics(reference_intervals, reference_pitches, reference_velocities, estimated_intervals, estimated_pitches, estimated_velocities, **kwargs):
-        velocity_call["reference_intervals"] = np.array(reference_intervals, copy=True)
-        velocity_call["estimated_intervals"] = np.array(estimated_intervals, copy=True)
-        velocity_call["reference_velocities"] = np.array(reference_velocities, copy=True)
-        velocity_call["estimated_velocities"] = np.array(estimated_velocities, copy=True)
-        return 0.44, 0.55, 0.66, 0.0
-
-    monkeypatch.setattr(transcription_metrics, "evaluate_notes", _capture_note_metrics)
-    monkeypatch.setattr(transcription_metrics, "evaluate_notes_with_velocity", _capture_velocity_metrics)
-
-    metric_dict, metric_inputs = transcription_metrics.cal_pedal_extended_note_metrics(
+    metric_inputs = transcription_metrics.build_pedal_extended_note_metric_inputs(
         output_notes,
         output_pedal_events,
         tsv_df,
         piece_end_time=1.5,
     )
 
-    expected_intervals = np.array([[0.0, 1.5], [1.0, 1.5]], dtype=np.float32)
-    np.testing.assert_allclose(metric_inputs["gt_interval_ext"], expected_intervals)
-    np.testing.assert_allclose(metric_inputs["out_interval_ext"], expected_intervals)
-    np.testing.assert_allclose(note_call["reference_intervals"], expected_intervals)
-    np.testing.assert_allclose(note_call["estimated_intervals"], expected_intervals)
-    np.testing.assert_allclose(velocity_call["reference_intervals"], expected_intervals)
-    np.testing.assert_allclose(velocity_call["estimated_intervals"], expected_intervals)
+    np.testing.assert_allclose(
+        metric_inputs["gt_interval_ext"],
+        np.array([[0.0, 1.5], [1.0, 1.5]], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        metric_inputs["out_interval_ext"],
+        np.array([[0.0, 1.0], [1.0, 1.5]], dtype=np.float32),
+    )
+    assert metric_inputs["pedal_extended_target_source"] == "offset_sec"
+
+
+def test_reference_pedal_metrics_use_paper_scorer_arguments(monkeypatch):
+    calls = {}
+
+    def _capture_reference_metric(**kwargs):
+        calls.update({key: np.array(value, copy=True) if key.endswith("intervals") or key.endswith("pitches") else value for key, value in kwargs.items()})
+        return 0.12, 0.34, 0.56, 0.0
+
+    monkeypatch.setattr(transcription_metrics, "evaluate_notes", _capture_reference_metric)
+
+    pedal_events = [
+        {"time": 0.1, "type": "PedalOn"},
+        {"time": 1.2, "type": "PedalOff"},
+    ]
+    metric_dict, output_pedal_spans, reference_pedal_spans = transcription_metrics.cal_reference_pedal_metrics(
+        pedal_events,
+        pedal_events,
+        piece_end_time=2.0,
+    )
 
     assert metric_dict == {
-        "note+offset_precision_pedal_extended": 0.11,
-        "note+offset_recall_pedal_extended": 0.22,
-        "note+offset_f1_pedal_extended": 0.33,
-        "note+offset+velocity_precision_pedal_extended": 0.44,
-        "note+offset+velocity_recall_pedal_extended": 0.55,
-        "note+offset+velocity_f1_pedal_extended": 0.66,
+        "pedal_precision": 0.12,
+        "pedal_recall": 0.34,
+        "pedal_f1": 0.56,
+    }
+    assert output_pedal_spans == reference_pedal_spans
+    np.testing.assert_allclose(calls["ref_intervals"], np.array([[0.1, 1.2]], dtype=np.float64))
+    np.testing.assert_allclose(calls["est_intervals"], np.array([[0.1, 1.2]], dtype=np.float64))
+    np.testing.assert_allclose(calls["ref_pitches"], np.ones(1))
+    np.testing.assert_allclose(calls["est_pitches"], np.ones(1))
+    assert calls["onset_tolerance"] == 0.2
+    assert calls["offset_ratio"] == 0.2
+    assert calls["offset_min_tolerance"] == 0.05
+
+
+def test_reference_pedal_events_from_dataframe_preserves_exact_times_and_repedal_order():
+    tsv_df = pd.DataFrame(
+        {
+            "type": ["PedalOn", "note", "PedalOn", "PedalOff"],
+            "onset_sec": [1.0, 0.5, 2.0, 1.0],
+        }
+    )
+
+    pedal_events = transcription_metrics.reference_pedal_events_from_dataframe(tsv_df)
+
+    assert pedal_events == [
+        {"time": 1.0, "type": "PedalOff"},
+        {"time": 1.0, "type": "PedalOn"},
+        {"time": 2.0, "type": "PedalOn"},
+    ]
+
+
+def test_pedal_frame_metrics_threshold_and_trim_padded_tail():
+    data_list = [
+        {
+            "frame_offsets": 0,
+            "total_frames": 6,
+            "pedal_frame_output": [0.6, 0.5, 0.4, 0.9],
+            "pedal_frame_target": [1, 1, 0, 1],
+        },
+        {
+            "frame_offsets": 4,
+            "total_frames": 6,
+            "pedal_frame_output": [0.2, 0.8, 0.9, 0.9],
+            "pedal_frame_target": [0, 1, 1, 1],
+        },
+    ]
+
+    pedal_frame_outputs, pedal_frame_targets = transcription_metrics.collect_trimmed_pedal_frame_arrays(data_list)
+    np.testing.assert_allclose(pedal_frame_outputs, np.array([0.6, 0.5, 0.4, 0.9, 0.2, 0.8], dtype=np.float32))
+    np.testing.assert_allclose(pedal_frame_targets, np.array([1, 1, 0, 1, 0, 1], dtype=np.float32))
+
+    metric_dict = transcription_metrics.cal_pedal_frame_metrics(pedal_frame_outputs, pedal_frame_targets)
+
+    assert metric_dict == {
+        "pedal_frame_precision": 1.0,
+        "pedal_frame_recall": 0.75,
+        "pedal_frame_f1": 6 / 7,
     }
