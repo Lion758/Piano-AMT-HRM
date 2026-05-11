@@ -76,6 +76,15 @@ function mergeLibraryItems(existingItems, ...itemsToMerge) {
   return [...cleanItems, ...existingItems.filter(item => !incomingIds.has(item.id))];
 }
 
+function UploadGlyph() {
+  return (
+    <svg className="pp-file-picker-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M12 15.5V4.75m0 0 4.25 4.25M12 4.75 7.75 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 15.25v2.5A2.25 2.25 0 0 0 7.25 20h9.5A2.25 2.25 0 0 0 19 17.75v-2.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export default function PianoPage({ midiUrl, projectName = null, referenceLibraryId = null, referenceTitle = null }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
@@ -727,13 +736,21 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
                 />
               </label>
             </div>
-            <label className="pp-midi-library-file">
-              <span>{isSavingLibraryMidi ? 'Saving MIDI...' : 'Choose MIDI file'}</span>
+            <label className="pp-midi-library-file pp-file-picker-shell">
+              <span className="pp-file-picker-title">Reference MIDI file</span>
+              <span className="pp-file-picker-control">
+                <span className="pp-file-picker-button">
+                  <UploadGlyph />
+                  {isSavingLibraryMidi ? 'Saving MIDI...' : 'Choose MIDI'}
+                </span>
+                <span className="pp-file-picker-note">MID or MIDI</span>
+              </span>
               <input
                 type="file"
                 accept=".mid,.midi,audio/midi,audio/x-midi"
                 onChange={handleLibraryMidiUpload}
                 disabled={isSavingLibraryMidi}
+                aria-label="Choose reference MIDI file"
               />
             </label>
             {(libraryStatus || libraryError) && (
@@ -791,23 +808,39 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
             )}
 
             <div className={`pp-compare-file-grid${projectReferenceItem?.id ? ' single' : ''}`}>
-              <label className="pp-compare-file-picker">
-                <span>Performance audio or MIDI</span>
+              <label className="pp-compare-file-picker pp-file-picker-shell">
+                <span className="pp-file-picker-title">Performance audio or MIDI</span>
+                <span className="pp-file-picker-control">
+                  <span className="pp-file-picker-button">
+                    <UploadGlyph />
+                    Choose performance
+                  </span>
+                  <span className="pp-file-picker-note">Audio or MIDI</span>
+                </span>
                 <input
                   type="file"
                   accept="audio/*,.mid,.midi,audio/midi,audio/x-midi"
                   onChange={handleComparisonPerformanceSelection}
                   disabled={isPreparingTutor}
+                  aria-label="Choose performance audio or MIDI"
                 />
               </label>
               {!projectReferenceItem?.id && (
-                <label className="pp-compare-file-picker">
-                  <span>Original reference MIDI</span>
+                <label className="pp-compare-file-picker pp-file-picker-shell">
+                  <span className="pp-file-picker-title">Original reference MIDI</span>
+                  <span className="pp-file-picker-control">
+                    <span className="pp-file-picker-button">
+                      <UploadGlyph />
+                      Choose reference
+                    </span>
+                    <span className="pp-file-picker-note">MID or MIDI</span>
+                  </span>
                   <input
                     type="file"
                     accept=".mid,.midi,audio/midi,audio/x-midi"
                     onChange={handleComparisonReferenceSelection}
                     disabled={isPreparingTutor}
+                    aria-label="Choose original reference MIDI"
                   />
                 </label>
               )}
@@ -913,18 +946,26 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
               </div>
               <div className="pp-upload-kicker">Learning Player</div>
               <h2>Open a song in the piano player</h2>
-              <p>Upload MP3/WAV audio for transcription, or open a MIDI file directly. Compare performances later from the player toolbar.</p>
+              <p>Upload piano audio like MP3/WAV for transcription, or open a MIDI file directly. Compare performances later from the player toolbar.</p>
               <div className="pp-upload-highlights">
                 <span>Falling notes</span>
                 <span>Piano keys</span>
                 <span>Tutor optional</span>
               </div>
-              <label className="pp-upload-picker">
-                <span>Song audio or MIDI</span>
+              <label className="pp-upload-picker pp-file-picker-shell">
+                <span className="pp-file-picker-title">Song audio or MIDI</span>
+                <span className="pp-file-picker-control">
+                  <span className="pp-file-picker-button pp-file-picker-button-flat">
+                    <UploadGlyph />
+                    Upload song
+                  </span>
+                  <span className="pp-file-picker-note">MP3, WAV, MID</span>
+                </span>
                 <input
                   type="file"
                   accept="audio/*,.mid,.midi,audio/midi,audio/x-midi"
                   onChange={handleAudioSelection}
+                  aria-label="Choose song audio or MIDI"
                 />
               </label>
               <div className="pp-upload-steps">
