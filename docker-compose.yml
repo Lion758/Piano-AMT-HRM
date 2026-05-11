@@ -1,0 +1,38 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Backend/Dockerfile
+      args:
+        PYTORCH_IMAGE: ${PYTORCH_IMAGE:-pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime}
+        INSTALL_SPLEETER: "false"
+    env_file:
+      - configs/backend.env.example
+    environment:
+      BACKEND_RUNTIME_DIR: /app/Backend/runtime
+      MODEL_CHECKPOINT_DIR: /app/checkpoints
+      TRANSCRIPTION_MODEL_BACKEND: experiment_pedals
+      FRONTEND_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./Backend/runtime:/app/Backend/runtime
+      - ./checkpoints:/app/checkpoints:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ping', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE: http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "5173:80"

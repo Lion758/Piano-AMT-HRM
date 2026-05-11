@@ -1,0 +1,3 @@
+# Optional stem-separation dependency for the /separate endpoint.
+# This can significantly increase image size because Spleeter pulls TensorFlow.
+spleeter

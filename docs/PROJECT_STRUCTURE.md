@@ -12,6 +12,7 @@ This repo is arranged around the pieces that make the final project run:
 |-- models/        Model-code map for Docker packaging
 |-- checkpoints/   Local or mounted model weights, ignored by git except docs
 |-- docs/          Project maps and setup notes
+|-- docker-compose.yml
 |-- outputs/       Generated comparison/evaluation outputs, ignored by git
 |-- reference/     External papers and reference implementations, ignored by git
 `-- tmp/           Scratch notes and temporary local artifacts
@@ -69,6 +70,8 @@ Use `configs/` for deployment-level config templates. Model configs stay inside 
 Use `checkpoints/` for large model weight files during Docker deployment. The backend checks `MODEL_CHECKPOINT_DIR`, which defaults to this folder, while still supporting the legacy package-local checkpoint path.
 
 Use `models/` as the model-code map. The actual model modules stay in package-local folders so imports keep working.
+
+Use `docker-compose.yml`, `Backend/Dockerfile`, and `frontend/Dockerfile` for local container builds. See `docs/DOCKER.md` for the run commands.
 
 Use `reference/` only for third-party papers, cloned reference projects, or comparison material. Keep application code out of this folder.
 

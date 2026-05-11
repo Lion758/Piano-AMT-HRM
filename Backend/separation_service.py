@@ -1,8 +1,19 @@
+from functools import lru_cache
 from pathlib import Path
-from spleeter.separator import Separator
 
-# Use 5 stems so piano.wav can be produced
-separator = Separator("spleeter:5stems")
+
+@lru_cache(maxsize=1)
+def _get_separator():
+    try:
+        from spleeter.separator import Separator
+    except ImportError as exc:
+        raise RuntimeError(
+            "Spleeter is not installed. Install requirements/separation.txt or build the backend image "
+            "with INSTALL_SPLEETER=true to enable stem separation."
+        ) from exc
+
+    # Use 5 stems so piano.wav can be produced.
+    return Separator("spleeter:5stems")
 
 
 def run_spleeter(input_audio_path: str, output_root: str = "separated") -> dict:
@@ -10,8 +21,8 @@ def run_spleeter(input_audio_path: str, output_root: str = "separated") -> dict:
     output_dir = Path(output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Spleeter creates a subfolder named after the input file stem
-    separator.separate_to_file(str(input_path), str(output_dir))
+    # Spleeter creates a subfolder named after the input file stem.
+    _get_separator().separate_to_file(str(input_path), str(output_dir))
 
     song_folder = output_dir / input_path.stem
 

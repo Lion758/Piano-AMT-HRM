@@ -17,6 +17,8 @@ Backend/runtime/
 Backend/.pytest_cache/
 Backend/**/__pycache__/
 Backend/efficient-seq2seq-piano-trans/checkpoints/
+Backend/efficient-seq2seq-piano-trans/dataset/
+Backend/efficient-seq2seq-piano-trans/audio/
 Backend/efficient-seq2seq-piano-trans/runs/
 Backend/efficient-seq2seq-piano-trans/outputs/
 Backend/pretrained_models/
@@ -26,6 +28,8 @@ Backend/spleeter/
 Experiment/**/runs/
 Experiment/**/outputs/
 Experiment/**/evaluations/
+Experiment/**/audio/
+Experiment/**/__/
 Experiment/**/.pytest_cache/
 
 checkpoints/*

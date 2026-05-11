@@ -38,8 +38,20 @@ requirements/backend.txt        Backend + production transcription dependencies
 requirements/research.txt       Research/training dependencies
 configs/backend.env.example     Backend environment variables for deployment
 checkpoints/                    Mount or place large model weights here
+Backend/Dockerfile              Backend image
+frontend/Dockerfile             Frontend nginx image
+docker-compose.yml              Local two-service Docker runner
 .dockerignore                   Keeps runtime data and large local artifacts out of builds
 ```
+
+Docker quick start:
+
+```bash
+docker compose up --build
+```
+
+Then open `http://localhost:5173`. See [`docs/DOCKER.md`](docs/DOCKER.md)
+for checkpoint and optional Spleeter setup.
 
 The main frontend source is organized as:
 
