@@ -19,6 +19,9 @@ from transcription_service import get_active_backend_name, run_transcription
 
 app = FastAPI()
 
+BACKEND_DIR = Path(__file__).resolve().parent
+RUNTIME_DIR = Path(os.getenv("BACKEND_RUNTIME_DIR", BACKEND_DIR / "runtime")).expanduser().resolve()
+
 DEFAULT_ALLOWED_ORIGINS = {
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -39,24 +42,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = Path("uploads")
-SEPARATED_DIR = Path("separated")
-TRANSCRIPTIONS_DIR = Path("transcriptions")
-TUTOR_SESSIONS_DIR = Path("tutor_sessions")
-MIDI_LIBRARY_DIR = Path("midi_library")
+UPLOAD_DIR = RUNTIME_DIR / "uploads"
+SEPARATED_DIR = RUNTIME_DIR / "separated"
+TRANSCRIPTIONS_DIR = RUNTIME_DIR / "transcriptions"
+TUTOR_SESSIONS_DIR = RUNTIME_DIR / "tutor_sessions"
+MIDI_LIBRARY_DIR = RUNTIME_DIR / "midi_library"
 MIDI_LIBRARY_INDEX_PATH = MIDI_LIBRARY_DIR / "index.json"
 TUTOR_OPENING_MAX_OUTPUT_TOKENS = 1200
 TUTOR_REPLY_MAX_OUTPUT_TOKENS = 1800
 
-UPLOAD_DIR.mkdir(exist_ok=True)
-SEPARATED_DIR.mkdir(exist_ok=True)
-TRANSCRIPTIONS_DIR.mkdir(exist_ok=True)
-TUTOR_SESSIONS_DIR.mkdir(exist_ok=True)
-MIDI_LIBRARY_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+SEPARATED_DIR.mkdir(parents=True, exist_ok=True)
+TRANSCRIPTIONS_DIR.mkdir(parents=True, exist_ok=True)
+TUTOR_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+MIDI_LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
 
-app.mount("/separated", StaticFiles(directory="separated"), name="separated")
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-app.mount("/transcriptions", StaticFiles(directory="transcriptions"), name="transcriptions")
+app.mount("/separated", StaticFiles(directory=str(SEPARATED_DIR)), name="separated")
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+app.mount("/transcriptions", StaticFiles(directory=str(TRANSCRIPTIONS_DIR)), name="transcriptions")
 
 
 class TranscriptionRequest(BaseModel):

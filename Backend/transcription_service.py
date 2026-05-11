@@ -16,9 +16,12 @@ from omegaconf import OmegaConf
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parent
-TRANSCRIPTIONS_DIR = Path("transcriptions")
+RUNTIME_DIR = Path(os.getenv("BACKEND_RUNTIME_DIR", BASE_DIR / "runtime")).expanduser().resolve()
+TRANSCRIPTIONS_DIR = RUNTIME_DIR / "transcriptions"
+CHECKPOINTS_DIR = Path(os.getenv("MODEL_CHECKPOINT_DIR", REPO_ROOT / "checkpoints")).expanduser().resolve()
 BACKEND_ENV_VAR = "TRANSCRIPTION_MODEL_BACKEND"
 DEFAULT_BACKEND_NAME = "experiment_pedals"
+CHECKPOINT_SUFFIXES = {".ckpt", ".pt", ".pth", ".safetensors", ".bin"}
 
 
 @dataclass(frozen=True)
@@ -192,6 +195,11 @@ def _resolve_backend_file(path_value: str, backend: RuntimeBackend) -> Path:
         candidates.append(backend.root / candidate)
         candidates.append(BASE_DIR / candidate)
         candidates.append(REPO_ROOT / candidate)
+        if candidate.parts and candidate.parts[0] == CHECKPOINTS_DIR.name:
+            candidates.append(CHECKPOINTS_DIR / Path(*candidate.parts[1:]))
+
+    if candidate.suffix.lower() in CHECKPOINT_SUFFIXES:
+        candidates.append(CHECKPOINTS_DIR / candidate.name)
 
     for current in candidates:
         resolved = current.resolve()
@@ -229,7 +237,7 @@ def _resolve_output_path(audio_path: Path, midi_output_path: str | None) -> tupl
         if requested.is_absolute():
             output_path = requested.resolve()
         elif requested.parts and requested.parts[0] == TRANSCRIPTIONS_DIR.name:
-            output_path = requested.resolve()
+            output_path = (TRANSCRIPTIONS_DIR.parent / requested).resolve()
         else:
             output_path = (TRANSCRIPTIONS_DIR / requested).resolve()
     else:

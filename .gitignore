@@ -1,7 +1,9 @@
 # WandB
 /wandb/
 # checkpoints
-/checkpoints/
+/checkpoints/*
+!/checkpoints/README.md
+!/checkpoints/.gitkeep
 # cache
 /cache/
 # data
@@ -174,22 +176,32 @@ Backend/efficient-seq2seq-piano-trans/dataset
 
 .claude/
 Backend/HRM/data
+
+# Runtime/generated files. Source code lives in Backend/, frontend/, and Experiment/.
+Backend/runtime/
+uploads/
 separated/
+transcriptions/
+tutor_sessions/
+midi_library/
 audio_output/
+outputs/
+
+# Legacy runtime paths kept ignored for older local checkouts.
+Backend/separated/
+Backend/uploads/
+Backend/transcriptions/
+Backend/tutor_sessions/
+Backend/midi_library/
+
 requirementOGs.txt
 requirementsdemucs.txt
 reference/
 Backend/efficient-seq2seq-piano-trans/root_extras
 Backend/pretrained_models/5stems
-Backend/separated/
-Backend/uploads/
-outputs/
 Backend/reference
 Backend/spleeter
-Backend/transcriptions/
 Experiment/Efficient-Transformer-with-pedals/audio
-Backend/tutor_sessions/
-Backend/midi_library/
 Experiment/Efficient-Transformer-with-pedals/evaluations/
 Experiment/Efficient-Transformer-with-pedals/assets/impulse_responses
 Backend/Midi_Analysis/analysis_results_fur_elise_self/

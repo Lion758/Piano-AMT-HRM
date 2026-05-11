@@ -1,0 +1,2 @@
+# Research/training dependency set for Experiment/
+-r ../Experiment/Efficient-Transformer-with-pedals/requirements.txt

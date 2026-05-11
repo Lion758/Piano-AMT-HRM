@@ -1,0 +1,9 @@
+# FastAPI service dependencies
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+openai>=1.0.0
+
+# Production transcription model dependencies
+-r ../Backend/efficient-seq2seq-piano-trans/requirements.txt
