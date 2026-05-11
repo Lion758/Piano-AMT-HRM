@@ -35,4 +35,4 @@ Local development defaults to `http://localhost:8000`. For deployment, set:
 VITE_API_BASE=https://your-backend.example.com
 ```
 
-The backend should also allow the Netlify site in `FRONTEND_ORIGINS`.
+The backend should also allow the deployed frontend origin in `FRONTEND_ORIGINS`.

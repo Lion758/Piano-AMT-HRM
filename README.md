@@ -89,25 +89,3 @@ npm run build
 cd Backend
 uvicorn app:app --reload --host 0.0.0.0 --port 8000
 ```
-
-## Netlify
-
-This repo includes `netlify.toml`, so Netlify can build the frontend from the repo root:
-
-```text
-Base directory: frontend
-Build command: npm run build
-Publish directory: frontend/dist
-```
-
-Set `VITE_API_BASE` in Netlify environment variables to the deployed backend URL, for example:
-
-```text
-VITE_API_BASE=https://your-backend.example.com
-```
-
-On the backend host, allow the Netlify frontend origin:
-
-```text
-FRONTEND_ORIGINS=https://your-site.netlify.app
-```
