@@ -31,13 +31,19 @@ def my_main(config: OmegaConf):
         )
 
     evaluation_config = config.get("evaluation", {})
+    evaluation_subset = str(evaluation_config.get("subset", "test")) if evaluation_config else "test"
+    valid_evaluation_subsets = {"test", "validation"}
+    if evaluation_subset not in valid_evaluation_subsets:
+        raise ValueError(
+            f"evaluation.subset must be one of {sorted(valid_evaluation_subsets)}, got {evaluation_subset!r}."
+        )
     configured_test_output_dir = evaluation_config.get("test_output_dir", None) if evaluation_config else None
     if configured_test_output_dir:
         model.test_output_dir = os.path.expanduser(str(configured_test_output_dir))
     else:
         model.test_output_dir =  "__" + config.model.checkpoint_path + "_test"
     os.makedirs(model.test_output_dir, exist_ok=True)
-    trainer.test(model.eval())
+    trainer.test(model.eval(), dataloaders=model.test_dataloader(subset=evaluation_subset))
     
 if __name__ == "__main__":
     my_main()

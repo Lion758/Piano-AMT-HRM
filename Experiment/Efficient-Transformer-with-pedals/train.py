@@ -564,12 +564,24 @@ class MT3Trainer(pl.LightningModule):
                 if self.config.data.features != "mel":
                     encoder_inputs = torchaudio.transforms.AmplitudeToDB(top_db=80.0)(encoder_inputs)
 
-        pedal_frame_output = None
-        if "pedal_frame_target" in batch and hasattr(self.model, "pedal_frame_head"):
+        pedal_head_outputs = {}
+        pedal_head_specs = (
+            ("pedal_frame", "pedal_frame_head", "pedal_frame_target"),
+            ("pedal_onset", "pedal_onset_head", "pedal_onset_target"),
+            ("pedal_offset", "pedal_offset_head", "pedal_offset_target"),
+        )
+        available_pedal_head_specs = [
+            spec
+            for spec in pedal_head_specs
+            if spec[2] in batch and hasattr(self.model, spec[1])
+        ]
+        if len(available_pedal_head_specs) > 0:
             pedal_encoder_outputs = self.model.encode(encoder_inputs, enable_dropout=False)
-            pedal_frame_output = torch.sigmoid(
-                self.model.pedal_frame_head(pedal_encoder_outputs).squeeze(-1)
-            ).detach()
+            for pedal_name, pedal_head_name, _ in available_pedal_head_specs:
+                pedal_head = getattr(self.model, pedal_head_name)
+                pedal_head_outputs[f"{pedal_name}_output"] = torch.sigmoid(
+                    pedal_head(pedal_encoder_outputs).squeeze(-1)
+                ).detach()
 
         # [B, n_tokens]
         target_tokens = batch["decoder_targets"] 
@@ -615,9 +627,10 @@ class MT3Trainer(pl.LightningModule):
         }
         if "total_frames" in batch:
             gather_payload["total_frames"] = pad_to_max_size(batch["total_frames"], max_batch_size)
-        if pedal_frame_output is not None:
-            gather_payload["pedal_frame_output"] = pad_to_max_size(pedal_frame_output, max_batch_size)
-            gather_payload["pedal_frame_target"] = pad_to_max_size(batch["pedal_frame_target"], max_batch_size)
+        for pedal_output_name, pedal_output in pedal_head_outputs.items():
+            pedal_target_name = pedal_output_name.replace("_output", "_target")
+            gather_payload[pedal_output_name] = pad_to_max_size(pedal_output, max_batch_size)
+            gather_payload[pedal_target_name] = pad_to_max_size(batch[pedal_target_name], max_batch_size)
 
         gather_data = self.all_gather(gather_payload)
 
@@ -654,9 +667,15 @@ class MT3Trainer(pl.LightningModule):
                     }
                     if "total_frames" in gather_data:
                         output_row["total_frames"] = gather_data["total_frames"][w][b].item()
-                    if "pedal_frame_output" in gather_data:
-                        output_row["pedal_frame_output"] = gather_data["pedal_frame_output"][w][b].detach().cpu().numpy().tolist()
-                        output_row["pedal_frame_target"] = gather_data["pedal_frame_target"][w][b].detach().cpu().numpy().tolist()
+                    for pedal_output_name in (
+                        "pedal_frame_output",
+                        "pedal_onset_output",
+                        "pedal_offset_output",
+                    ):
+                        if pedal_output_name in gather_data:
+                            pedal_target_name = pedal_output_name.replace("_output", "_target")
+                            output_row[pedal_output_name] = gather_data[pedal_output_name][w][b].detach().cpu().numpy().tolist()
+                            output_row[pedal_target_name] = gather_data[pedal_target_name][w][b].detach().cpu().numpy().tolist()
 
                     self.test_outputs_dict[audio_id].append(output_row)
                     
@@ -691,6 +710,12 @@ class MT3Trainer(pl.LightningModule):
         copy_reference_midi = evaluation_config.get("copy_reference_midi", True)
         report_pedal_metrics = evaluation_config.get("report_pedal_metrics", True)
         report_pedal_extended = evaluation_config.get("report_pedal_extended", False)
+        pedal_event_source = str(evaluation_config.get("pedal_event_source", "decoder"))
+        midi_pedal_event_source = str(evaluation_config.get("midi_pedal_event_source", "decoder"))
+        frame_head_threshold_on = float(evaluation_config.get("frame_head_threshold_on", 0.5))
+        frame_head_threshold_off = float(evaluation_config.get("frame_head_threshold_off", 0.4))
+        frame_head_min_down_frames = int(evaluation_config.get("frame_head_min_down_frames", 3))
+        frame_head_min_up_frames = int(evaluation_config.get("frame_head_min_up_frames", 2))
         pedal_reference_metric_names = (
             "pedal_precision",
             "pedal_recall",
@@ -710,11 +735,11 @@ class MT3Trainer(pl.LightningModule):
             "pedal_off_recall",
             "pedal_off_f1",
         )
-        pedal_frame_metric_names = (
-            "pedal_frame_precision",
-            "pedal_frame_recall",
-            "pedal_frame_f1",
-        )
+        valid_pedal_event_sources = {"decoder", "frame_head"}
+        if pedal_event_source not in valid_pedal_event_sources:
+            raise ValueError(f"evaluation.pedal_event_source must be one of {sorted(valid_pedal_event_sources)}, got {pedal_event_source!r}.")
+        if midi_pedal_event_source not in valid_pedal_event_sources:
+            raise ValueError(f"evaluation.midi_pedal_event_source must be one of {sorted(valid_pedal_event_sources)}, got {midi_pedal_event_source!r}.")
 
         # Save test tokens to json
         if self.config.training.mode == "test":
@@ -746,8 +771,36 @@ class MT3Trainer(pl.LightningModule):
                 offsets_sec = row["frame_offsets"] * sec_per_frame
                 output_event_data_list += sm_tokenizer.detokenize(row["output_tokens"], offsets_sec)
                 target_event_data_list += sm_tokenizer.detokenize(row["target_tokens"], offsets_sec)
-            output_note_data_list, output_pedal_event_list = sm_tokenizer.midi_events_to_notes(output_event_data_list)
+            output_note_data_list, decoder_token_pedal_event_list = sm_tokenizer.midi_events_to_notes(output_event_data_list)
             target_note_data_list, target_pedal_event_list = sm_tokenizer.midi_events_to_notes(target_event_data_list)
+
+            frame_head_pedal_event_list = None
+            if len(data_list) > 0 and "pedal_frame_output" in data_list[0]:
+                frame_head_pedal_frame_outputs = transcription_metrics.collect_trimmed_frame_arrays(
+                    data_list,
+                    "pedal_frame_output",
+                )
+                frame_head_pedal_event_list = transcription_metrics.pedal_frame_output_to_events(
+                    frame_head_pedal_frame_outputs,
+                    sec_per_frame=sec_per_frame,
+                    threshold_on=frame_head_threshold_on,
+                    threshold_off=frame_head_threshold_off,
+                    min_pedal_down_frames=frame_head_min_down_frames,
+                    min_pedal_up_frames=frame_head_min_up_frames,
+                )
+
+            output_pedal_event_list, pedal_event_source_used = transcription_metrics.choose_pedal_event_list(
+                decoder_token_pedal_event_list,
+                frame_head_pedal_event_list,
+                pedal_event_source,
+            )
+            midi_pedal_event_list, midi_pedal_event_source_used = transcription_metrics.choose_pedal_event_list(
+                decoder_token_pedal_event_list,
+                frame_head_pedal_event_list,
+                midi_pedal_event_source,
+            )
+            metric_dict["pedal_event_source_used"].append(pedal_event_source_used)
+            metric_dict["midi_pedal_event_source_used"].append(midi_pedal_event_source_used)
 
             tsv_path = os.path.splitext(target_midi_path)[0] + ".midi-notes.tsv"
             if os.path.exists(tsv_path):
@@ -759,11 +812,19 @@ class MT3Trainer(pl.LightningModule):
             piece_end_time = transcription_metrics.infer_piece_end_time(
                 note_lists=[output_note_data_list, target_note_data_list],
                 pedal_event_lists=[
+                    decoder_token_pedal_event_list,
+                    frame_head_pedal_event_list or [],
                     output_pedal_event_list,
+                    midi_pedal_event_list,
                     target_pedal_event_list,
                     reference_pedal_event_list,
                 ],
             )
+            source_pedal_event_lists = {
+                "decoder_token": decoder_token_pedal_event_list,
+                "frame_head": frame_head_pedal_event_list,
+            }
+
             if len(reference_pedal_event_list) > 0 and report_pedal_metrics:
                 metric_dict["pedal_metrics_status"].append("available")
                 pedal_metrics, output_pedal_spans, _ = transcription_metrics.cal_reference_pedal_metrics(
@@ -781,6 +842,30 @@ class MT3Trainer(pl.LightningModule):
                 )
                 for metric_name, metric_value in pedal_diagnostics.items():
                     metric_dict["diagnostic_" + metric_name].append(metric_value)
+
+                for source_prefix, source_events in source_pedal_event_lists.items():
+                    if source_events is None:
+                        for metric_name in pedal_reference_metric_names:
+                            metric_dict[f"{source_prefix}_reference_{metric_name}"].append(np.nan)
+                        for metric_name in pedal_diagnostic_metric_names:
+                            metric_dict[f"{source_prefix}_{metric_name}"].append(np.nan)
+                        continue
+
+                    source_reference_metrics, _, _ = transcription_metrics.cal_reference_pedal_metrics(
+                        source_events,
+                        reference_pedal_event_list,
+                        piece_end_time=piece_end_time,
+                    )
+                    for metric_name, metric_value in source_reference_metrics.items():
+                        metric_dict[f"{source_prefix}_reference_{metric_name}"].append(metric_value)
+
+                    source_diagnostic_metrics, _, _ = transcription_metrics.cal_pedal_metrics(
+                        source_events,
+                        reference_pedal_event_list,
+                        piece_end_time=piece_end_time,
+                    )
+                    for metric_name, metric_value in source_diagnostic_metrics.items():
+                        metric_dict[f"{source_prefix}_{metric_name}"].append(metric_value)
             else:
                 if report_pedal_metrics:
                     metric_dict["pedal_metrics_status"].append("not_available_no_reference_pedals")
@@ -794,18 +879,35 @@ class MT3Trainer(pl.LightningModule):
                     metric_dict[metric_name].append(np.nan)
                 for metric_name in pedal_diagnostic_metric_names:
                     metric_dict["diagnostic_" + metric_name].append(np.nan)
+                for source_prefix in source_pedal_event_lists:
+                    for metric_name in pedal_reference_metric_names:
+                        metric_dict[f"{source_prefix}_reference_{metric_name}"].append(np.nan)
+                    for metric_name in pedal_diagnostic_metric_names:
+                        metric_dict[f"{source_prefix}_{metric_name}"].append(np.nan)
 
-            if len(data_list) > 0 and "pedal_frame_output" in data_list[0]:
-                pedal_frame_outputs, pedal_frame_targets = transcription_metrics.collect_trimmed_pedal_frame_arrays(data_list)
-                pedal_frame_metrics = transcription_metrics.cal_pedal_frame_metrics(
-                    pedal_frame_outputs,
-                    pedal_frame_targets,
-                )
-                for metric_name, metric_value in pedal_frame_metrics.items():
-                    metric_dict[metric_name].append(metric_value)
-            else:
-                for metric_name in pedal_frame_metric_names:
-                    metric_dict[metric_name].append(np.nan)
+            pedal_frame_metric_specs = (
+                ("pedal_frame", "pedal_frame_output", "pedal_frame_target"),
+                ("pedal_onset_frame", "pedal_onset_output", "pedal_onset_target"),
+                ("pedal_offset_frame", "pedal_offset_output", "pedal_offset_target"),
+            )
+            for metric_prefix, output_key, target_key in pedal_frame_metric_specs:
+                if len(data_list) > 0 and output_key in data_list[0]:
+                    frame_outputs, frame_targets = transcription_metrics.collect_trimmed_frame_arrays(
+                        data_list,
+                        output_key,
+                        target_key,
+                    )
+                    frame_metrics = transcription_metrics.cal_binary_frame_metrics(
+                        metric_prefix,
+                        frame_outputs,
+                        frame_targets,
+                    )
+                    for metric_name, metric_value in frame_metrics.items():
+                        metric_dict[metric_name].append(metric_value)
+                else:
+                    metric_dict[f"{metric_prefix}_precision"].append(np.nan)
+                    metric_dict[f"{metric_prefix}_recall"].append(np.nan)
+                    metric_dict[f"{metric_prefix}_f1"].append(np.nan)
             
             # Onset only Metrics
             output_interval = np.array([(note["onset"], note["offset"]) for note in output_note_data_list])
@@ -865,7 +967,11 @@ class MT3Trainer(pl.LightningModule):
             if save_output_midi:
                 try:
                     output_midi_path = test_output_dir + "/" + os.path.splitext(target_midi_basename)[0] + ".output.mid"
-                    output_pedal_events_for_midi = transcription_metrics.pedal_spans_to_event_list(output_pedal_spans)
+                    midi_output_pedal_spans = transcription_metrics.pedal_events_to_spans(
+                        midi_pedal_event_list,
+                        piece_end_time=piece_end_time,
+                    )
+                    output_pedal_events_for_midi = transcription_metrics.pedal_spans_to_event_list(midi_output_pedal_spans)
                     sm_tokenizer.save_midi(output_note_data_list, output_midi_path, pedal_event_list=output_pedal_events_for_midi)
                 except Exception as e:
                     print("Error saving midi file:", e)
@@ -951,13 +1057,15 @@ class MT3Trainer(pl.LightningModule):
         combined_loader = CombinedLoader(iterables, mode="max_size_cycle")
         return combined_loader
 
-    def test_dataloader(self):
+    def test_dataloader(self, subset="test"):
+        if subset not in {"test", "validation"}:
+            raise ValueError(f"test_dataloader subset must be 'test' or 'validation', got {subset!r}.")
         if self.config.data.dataset_name == "Audio2Midi_Dataset":
             datasets = []
             for dataset_index, dataset_dir in enumerate(self.config.data.dataset_dirs):
                 if not os.path.exists(dataset_dir):
                     raise ValueError("Dataset dir %s not exists!"%dataset_dir)
-                datasets.append( Audio2Midi_Dataset(self.config, dataset_dir, dataset_index=dataset_index, subset="test", random_clip=False) )
+                datasets.append( Audio2Midi_Dataset(self.config, dataset_dir, dataset_index=dataset_index, subset=subset, random_clip=False) )
             test_data = ConcatDataset(datasets)
             # test_data = Audio2Midi_Dataset(self.config, subset="test", random_clip=False)
         else:

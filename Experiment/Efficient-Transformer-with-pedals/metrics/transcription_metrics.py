@@ -568,14 +568,14 @@ def cal_reference_pedal_metrics(
     return metric_dict, output_pedal_spans, reference_pedal_spans
 
 
-def cal_pedal_frame_metrics(pedal_frame_output, pedal_frame_target, threshold=0.5):
-    y_pred = np.asarray(pedal_frame_output, dtype=np.float32).reshape(-1) > threshold
-    y_true = np.asarray(pedal_frame_target, dtype=np.float32).reshape(-1) > 0.5
+def cal_binary_frame_metrics(name, frame_output, frame_target, threshold=0.5, target_threshold=0.5):
+    y_pred = np.asarray(frame_output, dtype=np.float32).reshape(-1) > threshold
+    y_true = np.asarray(frame_target, dtype=np.float32).reshape(-1) > target_threshold
     if y_true.size == 0:
         return {
-            "pedal_frame_precision": np.nan,
-            "pedal_frame_recall": np.nan,
-            "pedal_frame_f1": np.nan,
+            f"{name}_precision": np.nan,
+            f"{name}_recall": np.nan,
+            f"{name}_f1": np.nan,
         }
 
     precision, recall, f1, _ = metrics.precision_recall_fscore_support(
@@ -585,32 +585,139 @@ def cal_pedal_frame_metrics(pedal_frame_output, pedal_frame_target, threshold=0.
         zero_division=0,
     )
     return {
-        "pedal_frame_precision": float(precision[1]),
-        "pedal_frame_recall": float(recall[1]),
-        "pedal_frame_f1": float(f1[1]),
+        f"{name}_precision": float(precision[1]),
+        f"{name}_recall": float(recall[1]),
+        f"{name}_f1": float(f1[1]),
     }
 
 
-def collect_trimmed_pedal_frame_arrays(data_list):
-    pedal_frame_outputs = []
-    pedal_frame_targets = []
+def cal_pedal_frame_metrics(pedal_frame_output, pedal_frame_target, threshold=0.5):
+    return cal_binary_frame_metrics(
+        "pedal_frame",
+        pedal_frame_output,
+        pedal_frame_target,
+        threshold=threshold,
+        target_threshold=0.5,
+    )
+
+
+def collect_trimmed_frame_arrays(data_list, output_key, target_key=None):
+    frame_outputs = []
+    frame_targets = []
     for row in data_list:
-        row_outputs = row.get("pedal_frame_output", [])
-        row_targets = row.get("pedal_frame_target", [])
-        row_total_frames = int(row.get("total_frames", row.get("frame_offsets", 0) + len(row_targets)))
+        row_outputs = row.get(output_key, [])
+        row_targets = row.get(target_key, []) if target_key is not None else []
+        fallback_total = row.get("frame_offsets", 0) + len(row_outputs)
+        row_total_frames = int(row.get("total_frames", fallback_total))
         row_frame_offset = int(row.get("frame_offsets", 0))
-        valid_frames = max(
-            0,
-            min(len(row_outputs), len(row_targets), row_total_frames - row_frame_offset),
-        )
+        valid_frame_candidates = [len(row_outputs), row_total_frames - row_frame_offset]
+        if target_key is not None:
+            valid_frame_candidates.append(len(row_targets))
+        valid_frames = max(0, min(valid_frame_candidates))
         if valid_frames <= 0:
             continue
-        pedal_frame_outputs.extend(row_outputs[:valid_frames])
-        pedal_frame_targets.extend(row_targets[:valid_frames])
+        frame_outputs.extend(row_outputs[:valid_frames])
+        if target_key is not None:
+            frame_targets.extend(row_targets[:valid_frames])
 
-    return (
-        np.asarray(pedal_frame_outputs, dtype=np.float32),
-        np.asarray(pedal_frame_targets, dtype=np.float32),
+    frame_outputs = np.asarray(frame_outputs, dtype=np.float32)
+    if target_key is None:
+        return frame_outputs
+    return frame_outputs, np.asarray(frame_targets, dtype=np.float32)
+
+
+def collect_trimmed_pedal_frame_arrays(data_list):
+    return collect_trimmed_frame_arrays(
+        data_list,
+        "pedal_frame_output",
+        "pedal_frame_target",
+    )
+
+
+def pedal_frame_output_to_events(
+    pedal_frame_output,
+    sec_per_frame,
+    threshold_on=0.5,
+    threshold_off=0.4,
+    min_pedal_down_frames=3,
+    min_pedal_up_frames=2,
+):
+    raw_spans = pedal_frame_output_to_raw_spans(
+        pedal_frame_output,
+        threshold_on=threshold_on,
+        threshold_off=threshold_off,
+    )
+    return pedal_frame_spans_to_events(
+        raw_spans,
+        sec_per_frame=sec_per_frame,
+        min_pedal_down_frames=min_pedal_down_frames,
+        min_pedal_up_frames=min_pedal_up_frames,
+    )
+
+
+def pedal_frame_output_to_raw_spans(
+    pedal_frame_output,
+    threshold_on=0.5,
+    threshold_off=0.4,
+):
+    probs = np.asarray(pedal_frame_output, dtype=np.float32).reshape(-1)
+    if probs.size == 0:
+        return []
+
+    state = np.zeros(probs.shape, dtype=np.bool_)
+    down = False
+    for frame_idx, prob in enumerate(probs):
+        if down:
+            if prob < threshold_off:
+                down = False
+        else:
+            if prob >= threshold_on:
+                down = True
+        state[frame_idx] = down
+
+    diff = np.diff(state.astype(np.int8), prepend=0, append=0)
+    on_frames = np.where(diff == 1)[0]
+    off_frames = np.where(diff == -1)[0]
+    return list(zip(on_frames.tolist(), off_frames.tolist()))
+
+
+def pedal_frame_spans_to_events(
+    spans,
+    sec_per_frame,
+    min_pedal_down_frames=3,
+    min_pedal_up_frames=2,
+):
+    merged_spans = []
+    min_pedal_up_frames = max(0, int(min_pedal_up_frames))
+    for on_frame, off_frame in spans:
+        if merged_spans and on_frame - merged_spans[-1][1] < min_pedal_up_frames:
+            merged_spans[-1] = (merged_spans[-1][0], off_frame)
+        else:
+            merged_spans.append((on_frame, off_frame))
+
+    min_pedal_down_frames = max(1, int(min_pedal_down_frames))
+    merged_spans = [
+        (on_frame, off_frame)
+        for on_frame, off_frame in merged_spans
+        if off_frame - on_frame >= min_pedal_down_frames
+    ]
+
+    events = []
+    for on_frame, off_frame in merged_spans:
+        events.append({"time": float(on_frame) * sec_per_frame, "type": "PedalOn"})
+        events.append({"time": float(off_frame) * sec_per_frame, "type": "PedalOff"})
+    return events
+
+
+def choose_pedal_event_list(decoder_pedal_event_list, frame_head_pedal_event_list, requested_source):
+    if requested_source == "decoder":
+        return decoder_pedal_event_list, "decoder"
+    if requested_source == "frame_head":
+        if frame_head_pedal_event_list is None:
+            return decoder_pedal_event_list, "decoder_fallback_frame_head_unavailable"
+        return frame_head_pedal_event_list, "frame_head"
+    raise ValueError(
+        f"Unknown pedal event source {requested_source!r}. Expected 'decoder' or 'frame_head'."
     )
 
 

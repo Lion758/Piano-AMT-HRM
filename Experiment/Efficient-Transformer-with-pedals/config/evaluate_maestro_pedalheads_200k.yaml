@@ -18,7 +18,10 @@ data:
 evaluation:
   report_pedal_metrics: true
   report_pedal_extended: true
-  test_output_dir: evaluations/MAESTRO_PedalHeads_200k_update
+  pedal_event_source: frame_head
+  midi_pedal_event_source: frame_head
+  save_output_midi: true
+  test_output_dir: evaluations/MAESTRO_PedalHeads_200k_frame_head_midi
 
 training:
   mode: test

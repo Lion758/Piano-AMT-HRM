@@ -414,3 +414,119 @@ def test_pedal_frame_metrics_threshold_and_trim_padded_tail():
         "pedal_frame_recall": 0.75,
         "pedal_frame_f1": 6 / 7,
     }
+
+
+def test_pedal_frame_output_to_events_hysteresis_merge_filter_and_empty():
+    probs = [0.0, 0.0, 0.6, 0.7, 0.8, 0.7, 0.3, 0.6, 0.9, 0.39, 0.1, 0.0]
+    raw_spans = transcription_metrics.pedal_frame_output_to_raw_spans(
+        probs,
+        threshold_on=0.5,
+        threshold_off=0.4,
+    )
+
+    events = transcription_metrics.pedal_frame_output_to_events(
+        probs,
+        sec_per_frame=0.02,
+        threshold_on=0.5,
+        threshold_off=0.4,
+        min_pedal_down_frames=3,
+        min_pedal_up_frames=2,
+    )
+
+    assert raw_spans == [(2, 6), (7, 9)]
+    assert events == [
+        {"time": 0.04, "type": "PedalOn"},
+        {"time": 0.18, "type": "PedalOff"},
+    ]
+    assert transcription_metrics.pedal_frame_spans_to_events(
+        raw_spans,
+        sec_per_frame=0.02,
+        min_pedal_down_frames=3,
+        min_pedal_up_frames=2,
+    ) == events
+    assert transcription_metrics.pedal_frame_output_to_events(
+        [0.0, 0.6, 0.6, 0.1],
+        sec_per_frame=0.02,
+        min_pedal_down_frames=3,
+    ) == []
+    assert transcription_metrics.pedal_frame_output_to_events([], sec_per_frame=0.02) == []
+
+
+def test_collect_trimmed_frame_arrays_is_generic_for_pedal_boundary_heads():
+    data_list = [
+        {
+            "frame_offsets": 0,
+            "total_frames": 5,
+            "pedal_onset_output": [0.9, 0.2, 0.1],
+            "pedal_onset_target": [1.0, 0.5, 0.0],
+            "pedal_offset_output": [0.1, 0.8, 0.2],
+            "pedal_offset_target": [0.0, 1.0, 0.5],
+        },
+        {
+            "frame_offsets": 3,
+            "total_frames": 5,
+            "pedal_onset_output": [0.4, 0.7, 0.9],
+            "pedal_onset_target": [0.0, 1.0, 1.0],
+            "pedal_offset_output": [0.6, 0.3, 0.2],
+            "pedal_offset_target": [1.0, 0.0, 0.0],
+        },
+    ]
+
+    onset_outputs, onset_targets = transcription_metrics.collect_trimmed_frame_arrays(
+        data_list,
+        "pedal_onset_output",
+        "pedal_onset_target",
+    )
+    offset_outputs, offset_targets = transcription_metrics.collect_trimmed_frame_arrays(
+        data_list,
+        "pedal_offset_output",
+        "pedal_offset_target",
+    )
+
+    np.testing.assert_allclose(onset_outputs, np.array([0.9, 0.2, 0.1, 0.4, 0.7], dtype=np.float32))
+    np.testing.assert_allclose(onset_targets, np.array([1.0, 0.5, 0.0, 0.0, 1.0], dtype=np.float32))
+    np.testing.assert_allclose(offset_outputs, np.array([0.1, 0.8, 0.2, 0.6, 0.3], dtype=np.float32))
+    np.testing.assert_allclose(offset_targets, np.array([0.0, 1.0, 0.5, 1.0, 0.0], dtype=np.float32))
+
+
+def test_pedal_boundary_frame_metrics_use_central_soft_target_only():
+    metric_dict = transcription_metrics.cal_binary_frame_metrics(
+        "pedal_onset_frame",
+        frame_output=[0.6, 0.6, 0.2, 0.9],
+        frame_target=[1.0, 0.5, 0.25, 0.0],
+    )
+
+    assert metric_dict == {
+        "pedal_onset_frame_precision": 1 / 3,
+        "pedal_onset_frame_recall": 1.0,
+        "pedal_onset_frame_f1": 0.5,
+    }
+
+
+def test_choose_pedal_event_list_honors_source_and_fallback():
+    decoder_events = [{"time": 0.1, "type": "PedalOn"}]
+    frame_head_events = [{"time": 0.08, "type": "PedalOn"}]
+
+    events, source_used = transcription_metrics.choose_pedal_event_list(
+        decoder_events,
+        frame_head_events,
+        "decoder",
+    )
+    assert events is decoder_events
+    assert source_used == "decoder"
+
+    events, source_used = transcription_metrics.choose_pedal_event_list(
+        decoder_events,
+        frame_head_events,
+        "frame_head",
+    )
+    assert events is frame_head_events
+    assert source_used == "frame_head"
+
+    events, source_used = transcription_metrics.choose_pedal_event_list(
+        decoder_events,
+        None,
+        "frame_head",
+    )
+    assert events is decoder_events
+    assert source_used == "decoder_fallback_frame_head_unavailable"
