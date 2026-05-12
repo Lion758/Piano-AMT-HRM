@@ -1,6 +1,6 @@
-# Piano AMT Frontend
+# Piano IQ Frontend
 
-React + Vite frontend for the piano transcription and tutor workflow.
+React + Vite frontend for Piano IQ: Intelligent Piano Learning System.
 
 ## Structure
 

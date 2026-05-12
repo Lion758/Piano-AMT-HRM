@@ -213,7 +213,7 @@ export default function App() {
     <>
       {/* Topbar */}
       <div className="topbar">
-        🎹 Upload a piano recording and let AI transcribe it — then practise with your personal tutor.
+        Piano IQ: Intelligent Piano Learning System for transcription, practice, and AI-guided feedback.
       </div>
 
       <div className="page">
@@ -221,8 +221,11 @@ export default function App() {
         {/* ── Navbar ── */}
         <header className="navbar">
           <div className="logo">
-            <span className="logo-icon">♪</span>
-            Piano Automatic Transcription
+            <img className="logo-icon" src="/piano-iq-icon.svg" alt="" aria-hidden="true" />
+            <span className="logo-copy">
+              <span className="brand-name">Piano IQ</span>
+              <span className="brand-tagline">Intelligent Piano Learning System</span>
+            </span>
           </div>
           <nav className="navlinks">
             <a href="#workflow">How it works</a>
@@ -243,7 +246,7 @@ export default function App() {
               <span className="badge-dot" />
               Stem Separation · MIDI · AI Tutor
             </div>
-            <h1>Piano Automatic<br /><em>Transcription</em></h1>
+            <h1>Piano IQ<br /><em>Intelligent Piano Learning System</em></h1>
             <h2>
               Upload a piano recording — we split the stems, generate MIDI,
               and guide you through every note with an interactive AI tutor.
@@ -407,8 +410,11 @@ export default function App() {
           <div className="footer-grid">
             <div className="footer-brand">
               <div className="logo">
-                <span className="logo-icon">♪</span>
-                Piano Automatic Transcription
+                <img className="logo-icon" src="/piano-iq-icon.svg" alt="" aria-hidden="true" />
+                <span className="logo-copy">
+                  <span className="brand-name">Piano IQ</span>
+                  <span className="brand-tagline">Intelligent Piano Learning System</span>
+                </span>
               </div>
               <p>An AI pipeline for piano learners — stem separation, MIDI generation, and interactive tutoring, all in one place.</p>
             </div>
@@ -424,7 +430,7 @@ export default function App() {
             ))}
           </div>
           <div className="footer-bottom">
-            <span>© 2026 Piano Automatic Transcription · All rights reserved</span>
+            <span>© 2026 Piano IQ · Intelligent Piano Learning System · All rights reserved</span>
             <span>Privacy Policy · Terms of Use</span>
           </div>
         </footer>

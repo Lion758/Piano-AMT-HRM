@@ -4,8 +4,11 @@ export default function LeftMenu({ isOpen, onToggle, onLibraryOpen, libraryCount
       <div className="left-menu-content">
         <div className="left-menu-header">
           <span className="left-menu-logo">
-            <span className="logo-note">&#9835;</span>
-            Piano AMT
+            <img className="left-menu-brand-icon" src="/piano-iq-icon.svg" alt="" aria-hidden="true" />
+            <span>
+              <strong>Piano IQ</strong>
+              <small>Intelligent Piano Learning System</small>
+            </span>
           </span>
 
           <button
@@ -44,7 +47,7 @@ export default function LeftMenu({ isOpen, onToggle, onLibraryOpen, libraryCount
         </nav>
 
         <div className="left-menu-footer">
-          <p className="left-menu-hint">Interactive Piano Tutor v0.1</p>
+          <p className="left-menu-hint">Piano IQ Tutor v0.1</p>
         </div>
       </div>
     </div>
