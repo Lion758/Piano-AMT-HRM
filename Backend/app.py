@@ -255,8 +255,13 @@ def _resolve_midi_path(midi_url: str | None = None, midi_path: str | None = None
     if midi_url and midi_url.strip():
         parsed = urlparse(midi_url.strip())
         route_path = unquote(parsed.path or "")
+        library_match = re.fullmatch(r"/library/midis/([A-Fa-f0-9]{32})/download", route_path)
+        if library_match:
+            resolved, _ = _resolve_midi_library_path(library_match.group(1))
+            return resolved
+
         if not route_path.startswith("/transcriptions/"):
-            raise ValueError("Only MIDI files under /transcriptions can be analyzed.")
+            raise ValueError("Only MIDI files under /transcriptions or /library/midis can be analyzed.")
 
         relative_path = route_path.removeprefix("/transcriptions/").lstrip("/")
         resolved = (TRANSCRIPTIONS_DIR / relative_path).resolve()

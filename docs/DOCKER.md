@@ -44,6 +44,19 @@ Frontend: http://localhost:5173
 Backend:  http://localhost:8000/ping
 ```
 
+On the shared host, use the host IP instead:
+
+```text
+Frontend: http://134.208.3.192:5173
+Backend:  http://134.208.3.192:8000/ping
+FastAPI docs: http://134.208.3.192:8000/docs
+```
+
+By default, the frontend calls FastAPI on port `8000` using the same hostname
+that loaded the page. For example, `http://134.208.3.192:5173` calls
+`http://134.208.3.192:8000`. To force a different backend URL, set
+`VITE_API_BASE` before rebuilding the frontend.
+
 Backend runtime files are written to:
 
 ```text

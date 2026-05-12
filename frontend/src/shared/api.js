@@ -1,5 +1,4 @@
-const FALLBACK_API_BASE = "http://134.208.3.192:8000";
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+const API_PORT = "8000";
 
 function trimTrailingSlash(value) {
   return value.replace(/\/+$/, "");
@@ -11,16 +10,12 @@ export function getApiBase() {
     return trimTrailingSlash(envBase);
   }
 
-  if (
-    typeof window !== "undefined" &&
-    window.location?.hostname &&
-    LOCAL_HOSTS.has(window.location.hostname)
-  ) {
+  if (typeof window !== "undefined" && window.location?.hostname) {
     const protocol = window.location.protocol === "https:" ? "https:" : "http:";
-    return `${protocol}//${window.location.hostname}:8000`;
+    return `${protocol}//${window.location.hostname}:${API_PORT}`;
   }
 
-  return FALLBACK_API_BASE;
+  return `http://localhost:${API_PORT}`;
 }
 
 export const API_BASE = getApiBase();

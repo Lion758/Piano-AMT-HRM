@@ -12,7 +12,7 @@ services:
       BACKEND_RUNTIME_DIR: /app/Backend/runtime
       MODEL_CHECKPOINT_DIR: /app/checkpoints
       TRANSCRIPTION_MODEL_BACKEND: experiment_pedals
-      FRONTEND_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://134.208.3.192:5173}
     ports:
       - "8000:8000"
     volumes:
@@ -30,7 +30,7 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
       args:
-        VITE_API_BASE: http://localhost:8000
+        VITE_API_BASE: ${VITE_API_BASE:-}
     depends_on:
       backend:
         condition: service_started

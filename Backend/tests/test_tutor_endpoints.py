@@ -64,6 +64,29 @@ def _fake_start_tutor_session(session_root, mode, summary_cards, summary_path=No
     return "fallback", "Tutor session ready."
 
 
+def test_resolve_midi_path_accepts_library_download_url(monkeypatch, tmp_path):
+    _configure_temp_dirs(monkeypatch, tmp_path)
+    item_id = "a" * 32
+    stored_filename = f"{item_id}_reference.mid"
+    stored_path = backend_app.MIDI_LIBRARY_DIR / stored_filename
+    stored_path.write_bytes(b"MThd")
+    backend_app._write_midi_library_index(
+        [
+            {
+                "id": item_id,
+                "stored_filename": stored_filename,
+                "original_filename": "reference.mid",
+            }
+        ]
+    )
+
+    resolved = backend_app._resolve_midi_path(
+        midi_url=f"http://testserver/library/midis/{item_id}/download"
+    )
+
+    assert resolved == stored_path.resolve()
+
+
 def test_tutor_prepare_solo_mode(monkeypatch, tmp_path):
     _, transcriptions_dir, tutor_sessions_dir = _configure_temp_dirs(monkeypatch, tmp_path)
     monkeypatch.setattr(backend_app, "run_transcription", _fake_run_transcription(transcriptions_dir))
