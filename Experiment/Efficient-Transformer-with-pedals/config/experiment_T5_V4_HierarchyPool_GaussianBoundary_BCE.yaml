@@ -1,0 +1,10 @@
+defaults:
+  - experiment_T5_V4_HierarchyPool
+
+data:
+  pedal_boundary_kernel_type: gaussian
+  pedal_boundary_kernel_radius: 5
+  pedal_boundary_kernel_sigma_frames: 3.0
+
+training:
+  notes: "Efficient_Transformer_V4_Pedal_TemporalConvHeads-gaussian-boundary-bce"

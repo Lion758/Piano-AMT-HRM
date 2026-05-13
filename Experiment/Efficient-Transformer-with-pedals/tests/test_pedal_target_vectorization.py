@@ -46,7 +46,7 @@ pianoroll_parser_module.get_notes_with_pedal = lambda midi_path: (None, None)
 sys.modules["utils"] = utils_module
 sys.modules["utils.pianoroll_parser"] = pianoroll_parser_module
 
-from data.dataset_Audio2Midi import SingleWavDataset
+from data.dataset_Audio2Midi import SingleWavDataset, build_pedal_boundary_kernel
 from data.constants import sm_tokenizer
 
 
@@ -65,6 +65,49 @@ def _make_dataset(events, n_frames=8):
     dataset.dataframe_midi = pd.DataFrame(rows, columns=["type", "onset_sec", "pitch", "velocity"])
     dataset._prepare_pedal_cache()
     return dataset
+
+
+def _gaussian_kernel_config(radius=5, sigma_frames=3.0):
+    return types.SimpleNamespace(
+        data=types.SimpleNamespace(
+            pedal_boundary_kernel_type="gaussian",
+            pedal_boundary_kernel_radius=radius,
+            pedal_boundary_kernel_sigma_frames=sigma_frames,
+        )
+    )
+
+
+def test_gaussian_pedal_boundary_kernel_is_symmetric_and_centered():
+    kernel = build_pedal_boundary_kernel(_gaussian_kernel_config(radius=5, sigma_frames=3.0))
+    kernel_by_offset = dict(kernel)
+
+    assert len(kernel) == 11
+    assert kernel_by_offset[0] == 1.0
+    for offset in range(1, 6):
+        np.testing.assert_allclose(kernel_by_offset[offset], kernel_by_offset[-offset])
+    np.testing.assert_allclose(kernel_by_offset[1], np.exp(-0.5 * (1 / 3.0) ** 2))
+    np.testing.assert_allclose(kernel_by_offset[5], np.exp(-0.5 * (5 / 3.0) ** 2))
+
+
+def test_fast_and_slow_pedal_targets_match_with_gaussian_kernel():
+    dataset = _make_dataset(
+        [
+            ("PedalOn", 0.08),
+            ("PedalOff", 0.16),
+        ],
+        n_frames=12,
+    )
+    dataset.pedal_boundary_kernel = build_pedal_boundary_kernel(
+        _gaussian_kernel_config(radius=5, sigma_frames=3.0)
+    )
+
+    slow_targets = dataset._build_pedal_targets_slow(0.00, 0.24, 0.02)
+    fast_targets = dataset._build_pedal_targets_fast(0.00, 0.24, 0.02)
+
+    for slow, fast in zip(slow_targets, fast_targets):
+        assert torch.equal(fast, slow)
+    np.testing.assert_allclose(fast_targets[1][4].item(), 1.0)
+    np.testing.assert_allclose(fast_targets[1][1].item(), np.exp(-0.5 * (3 / 3.0) ** 2))
 
 
 def _assert_fast_matches_slow(events, begin_sec, end_sec, second_per_frame=0.02, n_frames=8):

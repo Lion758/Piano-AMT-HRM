@@ -1,5 +1,6 @@
 
 from pathlib import Path
+import math
 import os
 import sys
 
@@ -100,9 +101,51 @@ def stable_hash_to_digit(s: str) -> int:
 PEDAL_BOUNDARY_KERNEL = ((0, 1.0), (-1, 0.5), (1, 0.5), (-2, 0.25), (2, 0.25))
 
 
+def _config_get(config, key, default):
+    if config is None:
+        return default
+    try:
+        if key in config:
+            return config[key]
+    except TypeError:
+        pass
+    return getattr(config, key, default)
+
+
+def build_pedal_boundary_kernel(config=None):
+    data_config = _config_get(config, "data", config)
+    kernel_type = str(_config_get(data_config, "pedal_boundary_kernel_type", "triangular")).lower()
+
+    if kernel_type == "triangular":
+        return PEDAL_BOUNDARY_KERNEL
+
+    if kernel_type == "gaussian":
+        radius = int(_config_get(data_config, "pedal_boundary_kernel_radius", 5))
+        sigma_frames = float(_config_get(data_config, "pedal_boundary_kernel_sigma_frames", 3.0))
+        if radius < 0:
+            raise ValueError(f"pedal_boundary_kernel_radius must be >= 0, got {radius}.")
+        if sigma_frames <= 0.0:
+            raise ValueError(
+                f"pedal_boundary_kernel_sigma_frames must be > 0, got {sigma_frames}."
+            )
+        return tuple(
+            (
+                offset,
+                float(math.exp(-0.5 * (offset / sigma_frames) ** 2)),
+            )
+            for offset in range(-radius, radius + 1)
+        )
+
+    raise ValueError(
+        f"Unsupported pedal_boundary_kernel_type {kernel_type!r}; "
+        "expected 'triangular' or 'gaussian'."
+    )
+
+
 class SingleWavDataset(Dataset):
     def __init__(self,config, dataset_dir:str, dataset_index:int, audio_idx, midi_path, audio_h5_path, random_clip = True, augmenter=None) -> None:
         self.config = config
+        self.pedal_boundary_kernel = build_pedal_boundary_kernel(config)
         self.dataset_dir = dataset_dir
         self.dataset_index = dataset_index
         self.dataset_sequence_type = config.data.dataset_sequence_types[dataset_index]
@@ -238,6 +281,7 @@ class SingleWavDataset(Dataset):
 
     def _build_pedal_targets_slow(self, begin_sec, end_sec, second_per_frame):
         pedal_rows = self._get_pedal_rows()
+        pedal_boundary_kernel = getattr(self, "pedal_boundary_kernel", PEDAL_BOUNDARY_KERNEL)
 
         pedal_frame_target = torch.zeros(self.n_frames, dtype=torch.float32)
         pedal_onset_target = torch.zeros(self.n_frames, dtype=torch.float32)
@@ -260,7 +304,7 @@ class SingleWavDataset(Dataset):
             pedal_frame_target[cursor_frame:ev_frame] = state
             new_state = 1 if ev["type"] == "PedalOn" else 0
             target_arr = pedal_onset_target if new_state == 1 else pedal_offset_target
-            for offset, val in PEDAL_BOUNDARY_KERNEL:
+            for offset, val in pedal_boundary_kernel:
                 f = ev_frame + offset
                 if 0 <= f < self.n_frames:
                     if val > target_arr[f].item():
@@ -274,6 +318,7 @@ class SingleWavDataset(Dataset):
     def _build_pedal_targets_fast(self, begin_sec, end_sec, second_per_frame):
         if not hasattr(self, "pedal_event_times") or not hasattr(self, "pedal_event_states"):
             self._prepare_pedal_cache()
+        pedal_boundary_kernel = getattr(self, "pedal_boundary_kernel", PEDAL_BOUNDARY_KERNEL)
 
         pedal_frame_target = np.zeros(self.n_frames, dtype=np.float32)
         pedal_onset_target = np.zeros(self.n_frames, dtype=np.float32)
@@ -322,7 +367,7 @@ class SingleWavDataset(Dataset):
         ):
             if frames.size == 0:
                 continue
-            for offset, val in PEDAL_BOUNDARY_KERNEL:
+            for offset, val in pedal_boundary_kernel:
                 kernel_frames = frames + offset
                 valid_frames = kernel_frames[(0 <= kernel_frames) & (kernel_frames < self.n_frames)]
                 if valid_frames.size > 0:
@@ -383,8 +428,8 @@ class SingleWavDataset(Dataset):
         # Auxiliary per-frame sustain-pedal targets, aligned 1:1 with the encoder time axis
         # (length = self.n_frames). Three signals:
         #   - pedal_frame_target: binary state (0=up, 1=down) at each frame center
-        #   - pedal_onset_target: triangular soft kernel around each PedalOn frame
-        #   - pedal_offset_target: triangular soft kernel around each PedalOff frame
+        #   - pedal_onset_target: configurable soft kernel around each PedalOn frame
+        #   - pedal_offset_target: configurable soft kernel around each PedalOff frame
         # The encoder gets direct supervision for pedal cues; the existing decoder pedal
         # tokens are unchanged.
         pedal_frame_target, pedal_onset_target, pedal_offset_target = self._build_pedal_targets_fast(

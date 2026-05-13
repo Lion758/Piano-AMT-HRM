@@ -141,6 +141,35 @@ def remove_ignored_layers(state_dict, ignore_layers):
     return removed_layers
 
 
+LEGACY_LINEAR_PEDAL_HEAD_KEYS = tuple(
+    f"{head_name}.{param_name}"
+    for head_name in (
+        "pedal_frame_head",
+        "pedal_onset_head",
+        "pedal_offset_head",
+    )
+    for param_name in ("weight", "bias")
+)
+
+
+def remove_legacy_linear_pedal_head_layers(state_dict):
+    removed_layers = []
+    for key in LEGACY_LINEAR_PEDAL_HEAD_KEYS:
+        for candidate_key in (key, f"model.{key}"):
+            if candidate_key in state_dict:
+                del state_dict[candidate_key]
+                removed_layers.append(candidate_key)
+    return removed_layers
+
+
+def should_resume_full_lightning_checkpoint(checkpoint_format, ignored_layers, legacy_pedal_head_layers):
+    return checkpoint_format == "lightning" and len(ignored_layers) == 0 and len(legacy_pedal_head_layers) == 0
+
+
+def should_load_checkpoint_strictly(strict_checkpoint, skipped_layers):
+    return bool(strict_checkpoint) and len(skipped_layers) == 0
+
+
 def infer_transformer_ffn_activation_from_state_dict(state_dict):
     relu_keys = {
         "encoder.encoder_layers.0.mlp.intermediate_layers.0.weight",
@@ -580,7 +609,7 @@ class MT3Trainer(pl.LightningModule):
             for pedal_name, pedal_head_name, _ in available_pedal_head_specs:
                 pedal_head = getattr(self.model, pedal_head_name)
                 pedal_head_outputs[f"{pedal_name}_output"] = torch.sigmoid(
-                    pedal_head(pedal_encoder_outputs).squeeze(-1)
+                    pedal_head(pedal_encoder_outputs)
                 ).detach()
 
         # [B, n_tokens]
@@ -886,11 +915,11 @@ class MT3Trainer(pl.LightningModule):
                         metric_dict[f"{source_prefix}_{metric_name}"].append(np.nan)
 
             pedal_frame_metric_specs = (
-                ("pedal_frame", "pedal_frame_output", "pedal_frame_target"),
-                ("pedal_onset_frame", "pedal_onset_output", "pedal_onset_target"),
-                ("pedal_offset_frame", "pedal_offset_output", "pedal_offset_target"),
+                ("pedal_frame", "pedal_frame_output", "pedal_frame_target", 0.5),
+                ("pedal_onset_frame", "pedal_onset_output", "pedal_onset_target", 0.99),
+                ("pedal_offset_frame", "pedal_offset_output", "pedal_offset_target", 0.99),
             )
-            for metric_prefix, output_key, target_key in pedal_frame_metric_specs:
+            for metric_prefix, output_key, target_key, target_threshold in pedal_frame_metric_specs:
                 if len(data_list) > 0 and output_key in data_list[0]:
                     frame_outputs, frame_targets = transcription_metrics.collect_trimmed_frame_arrays(
                         data_list,
@@ -901,6 +930,7 @@ class MT3Trainer(pl.LightningModule):
                         metric_prefix,
                         frame_outputs,
                         frame_targets,
+                        target_threshold=target_threshold,
                     )
                     for metric_name, metric_value in frame_metrics.items():
                         metric_dict[metric_name].append(metric_value)
@@ -1128,16 +1158,19 @@ def my_main(config: OmegaConf):
         model_state_dict = extract_model_state_dict(checkpoint, checkpoint_format)
         validate_transformer_ffn_activation_compatibility(model_state_dict, config.model.mlp_activations)
         ignored_layers = remove_ignored_layers(model_state_dict, config.model.checkpoint_ignore_layres)
+        legacy_pedal_head_layers = remove_legacy_linear_pedal_head_layers(model_state_dict)
 
-        if checkpoint_format == "lightning" and len(ignored_layers) == 0:
+        if should_resume_full_lightning_checkpoint(checkpoint_format, ignored_layers, legacy_pedal_head_layers):
             resume_ckpt_path = config.model.checkpoint_path
             print("Resuming full Lightning checkpoint:", resume_ckpt_path)
         else:
+            skipped_layers = ignored_layers + legacy_pedal_head_layers
             if checkpoint_format == "lightning":
-                print("Loading model weights from Lightning checkpoint without optimizer state because ignored layers were requested:", ignored_layers)
+                print("Loading model weights from Lightning checkpoint without optimizer state because layers were skipped:", skipped_layers)
             else:
                 print("Loading model weights from state_dict checkpoint:", config.model.checkpoint_path)
-            model.model.load_state_dict(model_state_dict, strict=config.model.strict_checkpoint)
+            load_strict = should_load_checkpoint_strictly(config.model.strict_checkpoint, skipped_layers)
+            model.model.load_state_dict(model_state_dict, strict=load_strict)
     
     # model.model = torch.compile(model.model)
     

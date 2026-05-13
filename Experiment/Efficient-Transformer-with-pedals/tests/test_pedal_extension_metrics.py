@@ -492,14 +492,15 @@ def test_collect_trimmed_frame_arrays_is_generic_for_pedal_boundary_heads():
 def test_pedal_boundary_frame_metrics_use_central_soft_target_only():
     metric_dict = transcription_metrics.cal_binary_frame_metrics(
         "pedal_onset_frame",
-        frame_output=[0.6, 0.6, 0.2, 0.9],
-        frame_target=[1.0, 0.5, 0.25, 0.0],
+        frame_output=[0.6, 0.6, 0.7, 0.9],
+        frame_target=[1.0, 0.946, 0.607, 0.0],
+        target_threshold=0.99,
     )
 
     assert metric_dict == {
-        "pedal_onset_frame_precision": 1 / 3,
+        "pedal_onset_frame_precision": 1 / 4,
         "pedal_onset_frame_recall": 1.0,
-        "pedal_onset_frame_f1": 0.5,
+        "pedal_onset_frame_f1": 0.4,
     }
 
 

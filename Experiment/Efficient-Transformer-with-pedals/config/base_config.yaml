@@ -25,6 +25,9 @@ data:
     token_types: performance-seq
     use_truth_offsets: true # false = use pedal-extended offsets; true = use raw physical key-release offsets
     emit_pedal_tokens: true # false = literature-style baseline with no pedal tokens in target sequence
+    pedal_boundary_kernel_type: triangular # triangular or gaussian; supervises pedal onset/offset heads
+    pedal_boundary_kernel_radius: 2 # ignored by triangular; gaussian uses +/- this many frames
+    pedal_boundary_kernel_sigma_frames: 3.0 # ignored by triangular
     midi_min: 0
     midi_max: 127
     n_frames: 256 #  512, 1024, 2048
@@ -67,6 +70,8 @@ training:
   online_testing: false
 
   debug_log_offline: true
+  pedal_boundary_focal_alpha: 0.25
+  pedal_boundary_focal_gamma: 2.0
   losses:
     loss_decoder:      [decoder_outputs, decoder_targets, loss.CrossEntropyLoss]
     loss_pedal_state:  [pedal_frame_logits,  pedal_frame_target,  loss.PedalFrameBCELoss, 0.3]

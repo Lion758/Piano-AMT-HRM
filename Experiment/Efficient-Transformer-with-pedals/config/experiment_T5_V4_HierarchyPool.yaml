@@ -2,17 +2,31 @@ defaults:
   - experiment_T5_V3_HybridGlobalLocalCrossAttn
 
 model:
-  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260506-235013_Efficient_Transformer_V4_Pedal_3PedalHead-2-170k/AMT-audio-to-midi/4pp285qi/checkpoints/epoch=96-step=170000.ckpt
-  checkpoint_ignore_layres: []
+  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260513-015751_Efficient_Transformer_V4_Pedal_TemporalConvHeads-warm-start/AMT-audio-to-midi/7wcla4v2/checkpoints/epoch=16-step=30000.ckpt
+  checkpoint_ignore_layres: [
+    "pedal_frame_head.weight",
+    "pedal_frame_head.bias",
+    "pedal_onset_head.weight",
+    "pedal_onset_head.bias",
+    "pedal_offset_head.weight",
+    "pedal_offset_head.bias"
+  ]
   
 
   cross_attention_hierarchy_pooling: true
   pooling_sizes: [4, 4, 2, 2, 1, 1]
   # pooling_sizes: [4, 4, 4, 4, 4, 4]
+  pedal_head_type: temporal_conv
+  pedal_head_hidden: 64
+  pedal_head_dropout: 0.1
+  pedal_frame_head_kernel_size: 7
+  pedal_onset_head_kernel_size: 11
+  pedal_offset_head_kernel_size: 11
 
 training:
-  training_steps: 200000
-  notes: "Efficient_Transformer_V4_Pedal_3PedalHead-2-200k"
+  training_steps: 45000
+  learning_rate: 5e-5
+  notes: "Efficient_Transformer_V4_Pedal_ConvHeads_gauss_boundary"
 data:
   augmentation:
     enabled: false

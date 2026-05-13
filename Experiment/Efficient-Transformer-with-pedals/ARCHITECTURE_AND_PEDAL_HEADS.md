@@ -12,8 +12,8 @@ audio clip
   -> 6-layer Transformer encoder
       -> decoder cross-attention -> autoregressive MIDI-like event tokens -> CE loss
       -> pedal frame head         -> pedal-down frame logits             -> BCE loss
-      -> pedal onset head         -> PedalOn boundary frame logits       -> BCE loss
-      -> pedal offset head        -> PedalOff boundary frame logits      -> BCE loss
+      -> pedal onset head         -> PedalOn boundary frame logits       -> BCE or focal loss
+      -> pedal offset head        -> PedalOff boundary frame logits      -> BCE or focal loss
 ```
 
 The decoder and the three auxiliary pedal heads use the same encoder input stream:
@@ -34,7 +34,8 @@ Main files:
 | `data/dataset_Audio2Midi.py` | Builds audio clips, decoder token targets, cross-attention masks, and pedal-frame targets. |
 | `data/symbolic_music_tokenizer.py` | Converts MIDI/TSV note and pedal events to event tokens and back. |
 | `loss/CrossEntropyLoss.py` | Decoder token cross entropy. |
-| `loss/PedalFrameBCELoss.py` | BCE-with-logits loss for the three pedal heads. |
+| `loss/PedalFrameBCELoss.py` | BCE-with-logits loss for pedal frame-style heads. |
+| `loss/PedalBoundaryFocalLoss.py` | Optional focal loss for sparse pedal onset/offset boundary heads. |
 | `train.py` | Lightning training loop, loss aggregation, validation, and test-time generation. |
 | `metrics/transcription_metrics.py` | Token, event, pedal-frame, and frame-head-to-event metrics. |
 
@@ -437,8 +438,8 @@ ones even if no `PedalOn` event occurs in the clip.
 
 ### 10.2 `pedal_onset_target`
 
-This is a soft boundary target around `PedalOn` events. It is mostly zero. Around
-each PedalOn frame, the dataset writes a small triangular kernel:
+This is a soft boundary target around `PedalOn` events. It is mostly zero. By
+default, around each PedalOn frame, the dataset writes a small triangular kernel:
 
 ```text
 event frame:      1.00
@@ -447,10 +448,13 @@ two frames away:  0.25
 ```
 
 At a 20 ms frame hop, this supervises roughly +/- 40 ms around the boundary.
+The kernel can also be configured as a Gaussian for boundary-head experiments,
+for example radius 5 and sigma 3 frames.
 
 ### 10.3 `pedal_offset_target`
 
-This is the same soft boundary idea, but around `PedalOff` events:
+This is the same configurable soft boundary idea, but around `PedalOff` events.
+The default triangular kernel is:
 
 ```text
 event frame:      1.00
@@ -479,7 +483,7 @@ so padding beyond the real audio is not counted.
 
 ## 11. The Four Training Losses
 
-The active loss config is:
+The baseline loss config is:
 
 ```yaml
 losses:
@@ -513,6 +517,18 @@ pedal_head_logits[b, t] -> target value in [0, 1]
 
 `BCEWithLogitsLoss` accepts the soft onset/offset targets directly, so the 0.5
 and 0.25 neighboring labels are meaningful training targets, not just hard labels.
+
+Gaussian-boundary experiments may keep BCE for all three heads, or use focal
+loss only for the sparse onset/offset heads:
+
+```yaml
+loss_pedal_state:  [pedal_frame_logits,  pedal_frame_target,  loss.PedalFrameBCELoss, 0.3]
+loss_pedal_onset:  [pedal_onset_logits,  pedal_onset_target,  loss.PedalBoundaryFocalLoss, 0.3]
+loss_pedal_offset: [pedal_offset_logits, pedal_offset_target, loss.PedalBoundaryFocalLoss, 0.3]
+```
+
+The state head remains BCE because the positive/negative balance is much less
+extreme than for boundary frames.
 
 ## 12. Are The Decoder And Pedal Heads Training Against The Same Targets?
 
@@ -689,10 +705,11 @@ vs
 pedal_frame_target[t] > 0.5
 ```
 
-For onset and offset frame metrics, the code also thresholds the soft target at
-`> 0.5`, so only the center `1.0` boundary frame is counted as positive for the
-metric. The neighboring `0.5` and `0.25` labels still influence training through
-BCE, but they are not positive labels for the frame metric.
+For onset and offset frame metrics, the code thresholds the soft target at
+`> 0.99`, so only the center `1.0` boundary frame is counted as positive for the
+metric. This keeps the diagnostic comparable when Gaussian kernels make nearby
+frames larger than `0.5`. Neighboring soft labels still influence training, but
+they are not positive labels for the central boundary frame metric.
 
 Decoder pedal event metrics compare detokenized PedalOn/PedalOff events or spans
 against reference pedal events. They answer a different question:
@@ -841,4 +858,3 @@ The auxiliary heads ask simpler frame-wise questions:
 Those simpler questions make the encoder more pedal-aware. The decoder can then
 use that improved representation to produce better pedal events, even when the
 heads are not directly used in the output pipeline.
-

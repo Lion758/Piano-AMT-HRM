@@ -6,9 +6,9 @@ import torch.nn.functional as Functional
 class PedalFrameBCELoss(nn.Module):
     """BCE on per-frame sustain-pedal targets. Inputs are [B, T] logits / targets.
 
-    Used for the auxiliary encoder pedal heads (state, onset, offset). Targets may be
-    binary (state) or soft in [0, 1] (triangular onset/offset kernels) — both are
-    valid inputs for binary_cross_entropy_with_logits.
+    Used for the auxiliary encoder pedal heads. Targets may be binary (state) or
+    soft in [0, 1] (onset/offset boundary kernels) — both are valid inputs for
+    binary_cross_entropy_with_logits.
     """
 
     def __init__(self, config=None):
