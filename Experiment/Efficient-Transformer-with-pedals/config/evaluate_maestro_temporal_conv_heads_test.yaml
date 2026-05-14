@@ -3,10 +3,7 @@ defaults:
   - _self_
 
 model:
-  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260513-015751_Efficient_Transformer_V4_Pedal_TemporalConvHeads-warm-start/AMT-audio-to-midi/7wcla4v2/checkpoints/epoch=16-step=30000.ckpt
-  mlp_activations: relu
-  strict_checkpoint: false
-
+  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260513-223345_Efficient_Transformer_V4_Pedal_TemporalConvHeads-gaussian-boundary-bce/AMT-audio-to-midi/fcf063m2/checkpoints/epoch=25-step=45000.ckpt
 data:
   dataset_dir: /home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0
   dataset_dirs: [/home/rachel/.group-5/Piano-AMT-HRM/Backend/efficient-seq2seq-piano-trans/dataset/maestro-v3.0.0]
@@ -22,10 +19,10 @@ evaluation:
   midi_pedal_event_source: frame_head
   save_track_json: true
   save_output_midi: true
-  test_output_dir: evaluations/MAESTRO_TemporalConvHeads_30k_test
+  test_output_dir: evaluations/MAESTRO_TemporalConvHeads_Gaus
 
 training:
   mode: test
-  notes: "MAESTRO_TemporalConvHeads_30k_test"
+  notes: "MAESTRO_TemporalConvHeads_Gaus"
   batch_test: 100
   num_workers: 4

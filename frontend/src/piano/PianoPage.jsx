@@ -915,6 +915,14 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
             onSeek={player.seek}
             onSpeedChange={player.setSpeed}
             onVolumeChange={player.setVolume}
+            loopStart={player.loopStart}
+            loopEnd={player.loopEnd}
+            isLooping={player.isLooping}
+            hasLoopRange={player.hasLoopRange}
+            onLoopStart={player.setLoopStart}
+            onLoopEnd={player.setLoopEnd}
+            onLoopToggle={player.toggleLoop}
+            onLoopClear={player.clearLoop}
             onMenuToggle={() => setMenuOpen(v => !v)}
             onTutorToggle={() => setChatOpen(v => !v)}
             onCompareOpen={handleOpenComparisonPanel}

@@ -35,7 +35,7 @@ Main files:
 | `data/symbolic_music_tokenizer.py` | Converts MIDI/TSV note and pedal events to event tokens and back. |
 | `loss/CrossEntropyLoss.py` | Decoder token cross entropy. |
 | `loss/PedalFrameBCELoss.py` | BCE-with-logits loss for pedal frame-style heads. |
-| `loss/PedalBoundaryFocalLoss.py` | Optional focal loss for sparse pedal onset/offset boundary heads. |
+| `loss/PedalBoundaryFocalLoss.py` | Optional quality focal loss for sparse soft pedal onset/offset boundary heads. |
 | `train.py` | Lightning training loop, loss aggregation, validation, and test-time generation. |
 | `metrics/transcription_metrics.py` | Token, event, pedal-frame, and frame-head-to-event metrics. |
 
@@ -518,8 +518,8 @@ pedal_head_logits[b, t] -> target value in [0, 1]
 `BCEWithLogitsLoss` accepts the soft onset/offset targets directly, so the 0.5
 and 0.25 neighboring labels are meaningful training targets, not just hard labels.
 
-Gaussian-boundary experiments may keep BCE for all three heads, or use focal
-loss only for the sparse onset/offset heads:
+Gaussian-boundary experiments may keep BCE for all three heads, or use quality
+focal loss only for the sparse onset/offset heads:
 
 ```yaml
 loss_pedal_state:  [pedal_frame_logits,  pedal_frame_target,  loss.PedalFrameBCELoss, 0.3]

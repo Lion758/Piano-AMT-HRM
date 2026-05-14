@@ -4,6 +4,7 @@ import { extendNotesWithSustain } from '../utils/pedalHelpers.js';
 
 const PLAYBACK_LOOKAHEAD_SECONDS = 0.02;
 const INITIAL_VOLUME = 0.8;
+const LOOP_MIN_SECONDS = 0.1;
 
 export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans = [], playbackDuration = duration) {
   void _baseTempo;
@@ -15,6 +16,9 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
   const [speed, setSpeedState] = useState(1);
   const [volume, setVolumeState] = useState(INITIAL_VOLUME);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [loopStart, setLoopStartState] = useState(0);
+  const [loopEnd, setLoopEndState] = useState(0);
+  const [isLooping, setIsLoopingState] = useState(false);
 
   const samplerRef = useRef(null);
   const activePartRef = useRef(null);
@@ -25,6 +29,9 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
   const speedRef = useRef(1);
   const scheduledSpeedRef = useRef(1);
   const isPlayingRef = useRef(false);
+  const loopStartRef = useRef(0);
+  const loopEndRef = useRef(0);
+  const isLoopingRef = useRef(false);
   const lastFrameTimeRef = useRef(null);
   const playbackStartTimeRef = useRef(null);
   const sessionIdRef = useRef(0);
@@ -47,6 +54,17 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
     currentTimeRef.current = nextTime;
     setCurrentTime(nextTime);
     return nextTime;
+  }, [clampTime]);
+
+  const setLoopingState = useCallback((nextIsLooping) => {
+    isLoopingRef.current = nextIsLooping;
+    setIsLoopingState(nextIsLooping);
+  }, []);
+
+  const getLoopRange = useCallback(() => {
+    const start = clampTime(loopStartRef.current);
+    const end = clampTime(loopEndRef.current);
+    return end - start >= LOOP_MIN_SECONDS ? { start, end } : null;
   }, [clampTime]);
 
   const stopAnimation = useCallback(() => {
@@ -181,6 +199,12 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
     }
 
     const nextTime = advanceSongTime(timestamp);
+    const loopRange = getLoopRange();
+    if (isLoopingRef.current && loopRange && nextTime >= loopRange.end) {
+      startPlaybackFromOffset(loopRange.start, speedRef.current, { retriggerHeldNotes: false });
+      return;
+    }
+
     if (durationRef.current > 0 && nextTime >= durationRef.current) {
       finishPlaybackRef.current(sessionId, durationRef.current);
       return;
@@ -191,13 +215,30 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
     });
   };
 
-  const startPlaybackFromOffset = useCallback((offset, playbackSpeed = speedRef.current) => {
+  const startPlaybackFromOffset = useCallback((offset, playbackSpeed = speedRef.current, options = {}) => {
+    const { retriggerHeldNotes = true } = options;
+
     if (!noteEventsRef.current.length || !samplerRef.current) {
       return false;
     }
 
-    const startOffset = clampTime(offset);
+    let startOffset = clampTime(offset);
+    const loopRange = getLoopRange();
+    if (
+      isLoopingRef.current
+      && loopRange
+      && (startOffset < loopRange.start || startOffset >= loopRange.end)
+    ) {
+      startOffset = loopRange.start;
+    }
+    const shouldRetriggerHeldNotes = retriggerHeldNotes && !(
+      isLoopingRef.current
+      && loopRange
+      && Math.abs(startOffset - loopRange.start) < 0.001
+    );
+
     clearPlaybackSession();
+    syncCurrentTime(startOffset);
 
     if (durationRef.current > 0 && startOffset >= durationRef.current) {
       setPlayingState(false);
@@ -213,7 +254,9 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
     part.start(0);
 
     const startTime = Tone.now() + PLAYBACK_LOOKAHEAD_SECONDS;
-    triggerHeldNotesAtOffset(startOffset, playbackSpeed, startTime, sessionId);
+    if (shouldRetriggerHeldNotes) {
+      triggerHeldNotesAtOffset(startOffset, playbackSpeed, startTime, sessionId);
+    }
     Tone.Transport.start(startTime, 0);
 
     playbackStartTimeRef.current = window.performance.now() + (PLAYBACK_LOOKAHEAD_SECONDS * 1000);
@@ -223,7 +266,7 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
     });
     setPlayingState(true);
     return true;
-  }, [buildPlaybackPart, clampTime, clearPlaybackSession, setPlayingState, syncCurrentTime, triggerHeldNotesAtOffset]);
+  }, [buildPlaybackPart, clampTime, clearPlaybackSession, getLoopRange, setPlayingState, syncCurrentTime, triggerHeldNotesAtOffset]);
 
   useEffect(() => {
     const sampler = new Tone.Sampler({
@@ -259,7 +302,17 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
 
   useEffect(() => {
     durationRef.current = resolvedDuration;
-  }, [resolvedDuration]);
+    const nextStart = clampTime(loopStartRef.current);
+    const nextEnd = clampTime(loopEndRef.current);
+    loopStartRef.current = nextStart;
+    loopEndRef.current = nextEnd;
+    setLoopStartState(nextStart);
+    setLoopEndState(nextEnd);
+
+    if (nextEnd - nextStart < LOOP_MIN_SECONDS) {
+      setLoopingState(false);
+    }
+  }, [clampTime, resolvedDuration, setLoopingState]);
 
   useEffect(() => {
     const playbackNotes = extendNotesWithSustain(notes, sustainSpans);
@@ -274,7 +327,12 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
     clearPlaybackSession();
     syncCurrentTime(0);
     setPlayingState(false);
-  }, [notes, sustainSpans, clearPlaybackSession, setPlayingState, syncCurrentTime]);
+    setLoopingState(false);
+    loopStartRef.current = 0;
+    loopEndRef.current = 0;
+    setLoopStartState(0);
+    setLoopEndState(0);
+  }, [notes, sustainSpans, clearPlaybackSession, setLoopingState, setPlayingState, syncCurrentTime]);
 
   const play = useCallback(async () => {
     if (!noteEventsRef.current.length) {
@@ -342,6 +400,49 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
     setVolumeState(safeVolume);
   }, []);
 
+  const setLoopStart = useCallback((time = currentTimeRef.current) => {
+    const nextStart = clampTime(time);
+    loopStartRef.current = nextStart;
+    setLoopStartState(nextStart);
+
+    if (loopEndRef.current - nextStart < LOOP_MIN_SECONDS) {
+      loopEndRef.current = 0;
+      setLoopEndState(0);
+      setLoopingState(false);
+    }
+  }, [clampTime, setLoopingState]);
+
+  const setLoopEnd = useCallback((time = currentTimeRef.current) => {
+    const nextEnd = clampTime(time);
+    loopEndRef.current = nextEnd;
+    setLoopEndState(nextEnd);
+
+    if (nextEnd - loopStartRef.current < LOOP_MIN_SECONDS) {
+      setLoopingState(false);
+    }
+  }, [clampTime, setLoopingState]);
+
+  const clearLoop = useCallback(() => {
+    loopStartRef.current = 0;
+    loopEndRef.current = 0;
+    setLoopStartState(0);
+    setLoopEndState(0);
+    setLoopingState(false);
+  }, [setLoopingState]);
+
+  const toggleLoop = useCallback(() => {
+    const loopRange = getLoopRange();
+    const nextIsLooping = !isLoopingRef.current && Boolean(loopRange);
+    setLoopingState(nextIsLooping);
+
+    if (nextIsLooping && loopRange && isPlayingRef.current) {
+      const now = currentTimeRef.current;
+      if (now < loopRange.start || now >= loopRange.end) {
+        startPlaybackFromOffset(loopRange.start, speedRef.current);
+      }
+    }
+  }, [getLoopRange, setLoopingState, startPlaybackFromOffset]);
+
   return {
     play,
     pause,
@@ -349,11 +450,19 @@ export function usePianoPlayer(notes, duration, _baseTempo = 120, sustainSpans =
     seek,
     setSpeed,
     setVolume,
+    setLoopStart,
+    setLoopEnd,
+    clearLoop,
+    toggleLoop,
     currentTime,
     duration: resolvedDuration,
     isPlaying,
     speed,
     volume,
     isLoaded,
+    loopStart,
+    loopEnd,
+    isLooping,
+    hasLoopRange: loopEnd - loopStart >= LOOP_MIN_SECONDS,
   };
 }

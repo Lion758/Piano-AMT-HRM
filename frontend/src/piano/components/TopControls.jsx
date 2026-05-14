@@ -17,10 +17,28 @@ export default function TopControls({
   onSeek,
   onSpeedChange,
   onVolumeChange,
+  loopStart = 0,
+  loopEnd = 0,
+  isLooping = false,
+  hasLoopRange = false,
+  onLoopStart,
+  onLoopEnd,
+  onLoopToggle,
+  onLoopClear,
   onMenuToggle,
   onTutorToggle,
   onCompareOpen,
 }) {
+  const safeDuration = duration || 0;
+  const loopStartPercent = safeDuration > 0
+    ? Math.max(0, Math.min(100, (loopStart / safeDuration) * 100))
+    : 0;
+  const loopEndPercent = safeDuration > 0
+    ? Math.max(0, Math.min(100, (loopEnd / safeDuration) * 100))
+    : 0;
+  const loopRangeLeft = Math.min(loopStartPercent, loopEndPercent);
+  const loopRangeWidth = Math.max(0, loopEndPercent - loopStartPercent);
+
   return (
     <div className="top-controls">
       <div className="tc-row tc-row-primary">
@@ -130,18 +148,90 @@ export default function TopControls({
         <span className="tc-time">{formatTime(currentTime)}</span>
         <div className="tc-progress-shell">
           <span className="tc-progress-label">Timeline</span>
-          <input
-            type="range"
-            className="tc-slider progress-slider"
-            min={0}
-            max={duration || 1}
-            step={0.1}
-            value={currentTime}
-            onChange={(e) => onSeek(parseFloat(e.target.value))}
-            disabled={!isLoaded}
-          />
+          <div className="tc-progress-track">
+            {hasLoopRange && (
+              <span
+                className="tc-loop-range"
+                style={{ left: `${loopRangeLeft}%`, width: `${loopRangeWidth}%` }}
+                aria-hidden="true"
+              />
+            )}
+            {(loopStart > 0 || hasLoopRange) && (
+              <span
+                className="tc-loop-marker tc-loop-marker-start"
+                style={{ left: `${loopStartPercent}%` }}
+                aria-hidden="true"
+              >
+                A
+              </span>
+            )}
+            {hasLoopRange && (
+              <span
+                className="tc-loop-marker tc-loop-marker-end"
+                style={{ left: `${loopEndPercent}%` }}
+                aria-hidden="true"
+              >
+                B
+              </span>
+            )}
+            <input
+              type="range"
+              className="tc-slider progress-slider"
+              min={0}
+              max={duration || 1}
+              step={0.1}
+              value={currentTime}
+              onChange={(e) => onSeek(parseFloat(e.target.value))}
+              disabled={!isLoaded}
+            />
+          </div>
         </div>
         <span className="tc-time">{formatTime(duration)}</span>
+      </div>
+
+      <div className="tc-row tc-row-loop">
+        <div className="tc-loop-readout">
+          <span>Loop A-B</span>
+          <strong>
+            {hasLoopRange
+              ? `${formatTime(loopStart)} - ${formatTime(loopEnd)}`
+              : 'Set markers'}
+          </strong>
+        </div>
+        <div className="tc-loop-controls" role="group" aria-label="Loop controls">
+          <button
+            className="tc-marker-btn"
+            onClick={() => onLoopStart?.(currentTime)}
+            disabled={!isLoaded}
+            type="button"
+          >
+            Set A
+          </button>
+          <button
+            className="tc-marker-btn"
+            onClick={() => onLoopEnd?.(currentTime)}
+            disabled={!isLoaded}
+            type="button"
+          >
+            Set B
+          </button>
+          <button
+            className={`tc-marker-btn tc-loop-toggle${isLooping ? ' active' : ''}`}
+            onClick={onLoopToggle}
+            disabled={!isLoaded || !hasLoopRange}
+            type="button"
+          >
+            {isLooping ? 'Loop On' : 'Loop Off'}
+          </button>
+          <button
+            className="tc-marker-btn tc-loop-clear"
+            onClick={onLoopClear}
+            disabled={!isLoaded || (!hasLoopRange && loopStart === 0 && loopEnd === 0)}
+            type="button"
+          >
+            Clear
+          </button>
+        </div>
       </div>
 
     </div>

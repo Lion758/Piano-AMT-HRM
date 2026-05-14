@@ -115,6 +115,15 @@
   background: linear-gradient(180deg, rgba(18, 13, 10, 0.42), rgba(255, 255, 255, 0.018));
 }
 
+.tc-row-loop {
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 232, 228, 0.07);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(18, 13, 10, 0.32), rgba(255, 255, 255, 0.016));
+}
+
 .tc-row-status {
   justify-content: flex-end;
 }
@@ -260,6 +269,58 @@
   min-width: 180px;
 }
 
+.tc-progress-track {
+  position: relative;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 180px;
+  height: 28px;
+}
+
+.tc-progress-track .progress-slider {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  min-width: 0;
+}
+
+.tc-loop-range {
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(143, 180, 162, 0.38), rgba(236, 211, 164, 0.46));
+  box-shadow: 0 0 14px rgba(236, 211, 164, 0.14);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.tc-loop-marker {
+  position: absolute;
+  top: 50%;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgba(255, 245, 219, 0.72);
+  border-radius: 999px;
+  background: linear-gradient(135deg, #f0ddb6, #d4ac79 32%, #9d774c);
+  color: #20160f;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+.tc-loop-marker-end {
+  background: linear-gradient(135deg, #cae0d3, #8fb4a2 42%, #517763);
+  color: #101a15;
+}
+
 .volume-slider {
   width: 80px;
 }
@@ -278,6 +339,72 @@
   color: var(--pp-muted);
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.tc-loop-readout {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 160px;
+  color: var(--pp-muted);
+}
+
+.tc-loop-readout span {
+  color: var(--pp-muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.tc-loop-readout strong {
+  color: var(--pp-gold-bright);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.tc-loop-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.tc-marker-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid rgba(255, 232, 228, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--pp-text);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 800;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.tc-marker-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(242, 210, 144, 0.26);
+  background: rgba(236, 211, 164, 0.08);
+}
+
+.tc-marker-btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.tc-loop-toggle.active {
+  border-color: rgba(143, 180, 162, 0.4);
+  background: rgba(143, 180, 162, 0.16);
+  color: #cae0d3;
+}
+
+.tc-loop-clear {
+  color: var(--pp-muted);
 }
 
 .tc-control {
@@ -528,7 +655,7 @@
   color: var(--pp-text);
   font-size: 14px;
   line-height: 1.35;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 .pp-upload-kicker {
@@ -550,7 +677,7 @@
   font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
   font-size: 28px;
   line-height: 1.15;
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
 }
 
 .pp-upload-card::before,
@@ -1691,7 +1818,7 @@ body.chat-panel-resizing .chat-resize-handle::before {
   font-weight: 600;
   margin: 0;
   color: var(--pp-text);
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 .chat-status {
@@ -1974,8 +2101,19 @@ body.chat-panel-resizing .chat-resize-handle::before {
   .tc-row-secondary {
     flex-wrap: wrap;
   }
+  .tc-row-loop {
+    align-items: flex-start;
+    flex-direction: column;
+  }
   .tc-progress-shell {
     min-width: 100%;
+  }
+  .tc-loop-readout {
+    width: 100%;
+  }
+  .tc-loop-controls {
+    width: 100%;
+    justify-content: flex-start;
   }
   .tc-settings {
     justify-content: flex-start;
@@ -2011,6 +2149,7 @@ body.chat-panel-resizing .chat-resize-handle::before {
   }
   .tc-rail-btn,
   .tc-play-btn,
+  .tc-marker-btn,
   .tc-control {
     width: 100%;
     justify-content: center;

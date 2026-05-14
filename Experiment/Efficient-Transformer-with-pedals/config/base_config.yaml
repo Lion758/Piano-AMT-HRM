@@ -70,7 +70,6 @@ training:
   online_testing: false
 
   debug_log_offline: true
-  pedal_boundary_focal_alpha: 0.25
   pedal_boundary_focal_gamma: 2.0
   losses:
     loss_decoder:      [decoder_outputs, decoder_targets, loss.CrossEntropyLoss]

@@ -2,15 +2,7 @@ defaults:
   - experiment_T5_V3_HybridGlobalLocalCrossAttn
 
 model:
-  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260513-015751_Efficient_Transformer_V4_Pedal_TemporalConvHeads-warm-start/AMT-audio-to-midi/7wcla4v2/checkpoints/epoch=16-step=30000.ckpt
-  checkpoint_ignore_layres: [
-    "pedal_frame_head.weight",
-    "pedal_frame_head.bias",
-    "pedal_onset_head.weight",
-    "pedal_onset_head.bias",
-    "pedal_offset_head.weight",
-    "pedal_offset_head.bias"
-  ]
+  checkpoint_path: /home/rachel/.group-5/Piano-AMT-HRM/Experiment/Efficient-Transformer-with-pedals/runs/Transformer-T5/260514-154114_Efficient_Transformer_V4_ConvHeads_100k_gaussian_/AMT-audio-to-midi/cuim96l1/checkpoints/epoch=56-step=100000.ckpt
   
 
   cross_attention_hierarchy_pooling: true
@@ -24,9 +16,20 @@ model:
   pedal_offset_head_kernel_size: 11
 
 training:
-  training_steps: 45000
-  learning_rate: 5e-5
-  notes: "Efficient_Transformer_V4_Pedal_ConvHeads_gauss_boundary"
+  training_steps: 100000
+  learning_rate: 1e-4
+  notes: "Efficient_Transformer_V4_ConvHeads_100k_gaussian_"
+  pedal_boundary_focal_gamma: 2.0
+  losses:
+    loss_pedal_onset:  [pedal_onset_logits,  pedal_onset_target,  loss.PedalBoundaryFocalLoss, 0.3]
+    loss_pedal_offset: [pedal_offset_logits, pedal_offset_target, loss.PedalBoundaryFocalLoss, 0.3]
 data:
+  pedal_boundary_kernel_type: gaussian
+  pedal_boundary_kernel_radius: 5
+  pedal_boundary_kernel_sigma_frames: 3.0
   augmentation:
     enabled: false
+
+evaluation:
+  subset: test
+  test_output_dir: evaluations/Gaussian_QFL_100k_test
