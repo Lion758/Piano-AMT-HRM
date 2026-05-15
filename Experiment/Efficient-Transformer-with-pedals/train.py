@@ -741,8 +741,11 @@ class MT3Trainer(pl.LightningModule):
         report_pedal_extended = evaluation_config.get("report_pedal_extended", False)
         pedal_event_source = str(evaluation_config.get("pedal_event_source", "decoder"))
         midi_pedal_event_source = str(evaluation_config.get("midi_pedal_event_source", "decoder"))
+        frame_head_event_extractor = str(evaluation_config.get("frame_head_event_extractor", "state_hysteresis"))
         frame_head_threshold_on = float(evaluation_config.get("frame_head_threshold_on", 0.5))
         frame_head_threshold_off = float(evaluation_config.get("frame_head_threshold_off", 0.4))
+        frame_head_offset_threshold = float(evaluation_config.get("frame_head_offset_threshold", 0.5))
+        frame_head_min_on_delta = float(evaluation_config.get("frame_head_min_on_delta", 0.0))
         frame_head_min_down_frames = int(evaluation_config.get("frame_head_min_down_frames", 3))
         frame_head_min_up_frames = int(evaluation_config.get("frame_head_min_up_frames", 2))
         pedal_reference_metric_names = (
@@ -769,6 +772,12 @@ class MT3Trainer(pl.LightningModule):
             raise ValueError(f"evaluation.pedal_event_source must be one of {sorted(valid_pedal_event_sources)}, got {pedal_event_source!r}.")
         if midi_pedal_event_source not in valid_pedal_event_sources:
             raise ValueError(f"evaluation.midi_pedal_event_source must be one of {sorted(valid_pedal_event_sources)}, got {midi_pedal_event_source!r}.")
+        valid_frame_head_event_extractors = {"state_hysteresis", "trend_dual_trigger"}
+        if frame_head_event_extractor not in valid_frame_head_event_extractors:
+            raise ValueError(
+                "evaluation.frame_head_event_extractor must be one of "
+                f"{sorted(valid_frame_head_event_extractors)}, got {frame_head_event_extractor!r}."
+            )
 
         # Save test tokens to json
         if self.config.training.mode == "test":
@@ -803,19 +812,50 @@ class MT3Trainer(pl.LightningModule):
             output_note_data_list, decoder_token_pedal_event_list = sm_tokenizer.midi_events_to_notes(output_event_data_list)
             target_note_data_list, target_pedal_event_list = sm_tokenizer.midi_events_to_notes(target_event_data_list)
 
+            frame_head_state_pedal_event_list = None
+            frame_head_trend_dual_pedal_event_list = None
             frame_head_pedal_event_list = None
+            frame_head_event_extractor_used = "not_available"
             if len(data_list) > 0 and "pedal_frame_output" in data_list[0]:
                 frame_head_pedal_frame_outputs = transcription_metrics.collect_trimmed_frame_arrays(
                     data_list,
                     "pedal_frame_output",
                 )
-                frame_head_pedal_event_list = transcription_metrics.pedal_frame_output_to_events(
+                frame_head_state_pedal_event_list = transcription_metrics.pedal_frame_output_to_events(
                     frame_head_pedal_frame_outputs,
                     sec_per_frame=sec_per_frame,
                     threshold_on=frame_head_threshold_on,
                     threshold_off=frame_head_threshold_off,
                     min_pedal_down_frames=frame_head_min_down_frames,
                     min_pedal_up_frames=frame_head_min_up_frames,
+                )
+                if "pedal_offset_output" in data_list[0]:
+                    frame_head_pedal_frame_outputs_for_trend, frame_head_pedal_offset_outputs = (
+                        transcription_metrics.collect_trimmed_frame_arrays(
+                            data_list,
+                            "pedal_frame_output",
+                            "pedal_offset_output",
+                        )
+                    )
+                    frame_head_trend_dual_pedal_event_list = (
+                        transcription_metrics.pedal_frame_offset_outputs_to_events(
+                            frame_head_pedal_frame_outputs_for_trend,
+                            frame_head_pedal_offset_outputs,
+                            sec_per_frame=sec_per_frame,
+                            threshold_on=frame_head_threshold_on,
+                            threshold_off=frame_head_threshold_off,
+                            offset_threshold=frame_head_offset_threshold,
+                            min_on_delta=frame_head_min_on_delta,
+                            min_pedal_down_frames=frame_head_min_down_frames,
+                            min_pedal_up_frames=frame_head_min_up_frames,
+                        )
+                    )
+                frame_head_pedal_event_list, frame_head_event_extractor_used = (
+                    transcription_metrics.choose_frame_head_event_list(
+                        frame_head_state_pedal_event_list,
+                        frame_head_trend_dual_pedal_event_list,
+                        frame_head_event_extractor,
+                    )
                 )
 
             output_pedal_event_list, pedal_event_source_used = transcription_metrics.choose_pedal_event_list(
@@ -830,6 +870,7 @@ class MT3Trainer(pl.LightningModule):
             )
             metric_dict["pedal_event_source_used"].append(pedal_event_source_used)
             metric_dict["midi_pedal_event_source_used"].append(midi_pedal_event_source_used)
+            metric_dict["frame_head_event_extractor_used"].append(frame_head_event_extractor_used)
 
             tsv_path = os.path.splitext(target_midi_path)[0] + ".midi-notes.tsv"
             if os.path.exists(tsv_path):
@@ -843,6 +884,8 @@ class MT3Trainer(pl.LightningModule):
                 pedal_event_lists=[
                     decoder_token_pedal_event_list,
                     frame_head_pedal_event_list or [],
+                    frame_head_state_pedal_event_list or [],
+                    frame_head_trend_dual_pedal_event_list or [],
                     output_pedal_event_list,
                     midi_pedal_event_list,
                     target_pedal_event_list,
@@ -852,6 +895,8 @@ class MT3Trainer(pl.LightningModule):
             source_pedal_event_lists = {
                 "decoder_token": decoder_token_pedal_event_list,
                 "frame_head": frame_head_pedal_event_list,
+                "frame_head_state": frame_head_state_pedal_event_list,
+                "frame_head_trend_dual": frame_head_trend_dual_pedal_event_list,
             }
 
             if len(reference_pedal_event_list) > 0 and report_pedal_metrics:

@@ -681,6 +681,72 @@ def pedal_frame_output_to_raw_spans(
     return list(zip(on_frames.tolist(), off_frames.tolist()))
 
 
+def pedal_frame_offset_outputs_to_events(
+    pedal_frame_output,
+    pedal_offset_output,
+    sec_per_frame,
+    threshold_on=0.5,
+    threshold_off=0.4,
+    offset_threshold=0.5,
+    min_on_delta=0.0,
+    min_pedal_down_frames=3,
+    min_pedal_up_frames=2,
+):
+    raw_spans = pedal_frame_offset_outputs_to_raw_spans(
+        pedal_frame_output,
+        pedal_offset_output,
+        threshold_on=threshold_on,
+        threshold_off=threshold_off,
+        offset_threshold=offset_threshold,
+        min_on_delta=min_on_delta,
+    )
+    return pedal_frame_spans_to_events(
+        raw_spans,
+        sec_per_frame=sec_per_frame,
+        min_pedal_down_frames=min_pedal_down_frames,
+        min_pedal_up_frames=min_pedal_up_frames,
+    )
+
+
+def pedal_frame_offset_outputs_to_raw_spans(
+    pedal_frame_output,
+    pedal_offset_output,
+    threshold_on=0.5,
+    threshold_off=0.4,
+    offset_threshold=0.5,
+    min_on_delta=0.0,
+):
+    frame_probs = np.asarray(pedal_frame_output, dtype=np.float32).reshape(-1)
+    offset_probs = np.asarray(pedal_offset_output, dtype=np.float32).reshape(-1)
+    valid_frames = min(len(frame_probs), len(offset_probs))
+    if valid_frames <= 0:
+        return []
+
+    frame_probs = frame_probs[:valid_frames]
+    offset_probs = offset_probs[:valid_frames]
+    min_on_delta = float(min_on_delta)
+
+    spans = []
+    down = False
+    on_frame = None
+    previous_frame_prob = 0.0
+    for frame_idx, (frame_prob, offset_prob) in enumerate(zip(frame_probs, offset_probs)):
+        if down:
+            if offset_prob >= offset_threshold or frame_prob < threshold_off:
+                spans.append((int(on_frame), int(frame_idx)))
+                down = False
+                on_frame = None
+        else:
+            if frame_prob >= threshold_on and frame_prob - previous_frame_prob > min_on_delta:
+                down = True
+                on_frame = int(frame_idx)
+        previous_frame_prob = float(frame_prob)
+
+    if down:
+        spans.append((int(on_frame), int(valid_frames)))
+    return spans
+
+
 def pedal_frame_spans_to_events(
     spans,
     sec_per_frame,
@@ -707,6 +773,19 @@ def pedal_frame_spans_to_events(
         events.append({"time": float(on_frame) * sec_per_frame, "type": "PedalOn"})
         events.append({"time": float(off_frame) * sec_per_frame, "type": "PedalOff"})
     return events
+
+
+def choose_frame_head_event_list(state_events, trend_dual_events, requested_extractor):
+    if requested_extractor == "state_hysteresis":
+        return state_events, "state_hysteresis"
+    if requested_extractor == "trend_dual_trigger":
+        if trend_dual_events is None:
+            return state_events, "state_hysteresis_fallback_offset_unavailable"
+        return trend_dual_events, "trend_dual_trigger"
+    raise ValueError(
+        f"Unknown frame-head event extractor {requested_extractor!r}. "
+        "Expected 'state_hysteresis' or 'trend_dual_trigger'."
+    )
 
 
 def choose_pedal_event_list(decoder_pedal_event_list, frame_head_pedal_event_list, requested_source):

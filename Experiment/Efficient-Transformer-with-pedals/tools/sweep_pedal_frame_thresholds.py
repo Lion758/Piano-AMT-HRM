@@ -126,10 +126,13 @@ from data.constants import DEFAULT_HOP_WIDTH, DEFAULT_SAMPLE_RATE, sm_tokenizer
 from metrics import transcription_metrics
 
 
-DEFAULT_THRESHOLD_ON_VALUES = (0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60)
-DEFAULT_THRESHOLD_OFF_VALUES = (0.20, 0.25, 0.30, 0.35, 0.40, 0.45)
-DEFAULT_MIN_DOWN_FRAMES = (1, 2, 3, 4, 5, 6)
-DEFAULT_MIN_UP_FRAMES = (1, 2, 3, 4, 5, 6)
+DEFAULT_EVENT_EXTRACTORS = ("state_hysteresis", "trend_dual_trigger")
+DEFAULT_THRESHOLD_ON_VALUES = (0.45, 0.50, 0.55, 0.60, 0.65, 0.70)
+DEFAULT_THRESHOLD_OFF_VALUES = (0.25, 0.30, 0.35, 0.40, 0.45, 0.50)
+DEFAULT_OFFSET_THRESHOLD_VALUES = (0.30, 0.40, 0.50, 0.60, 0.70)
+DEFAULT_MIN_ON_DELTA_VALUES = (0.0, 0.005, 0.01)
+DEFAULT_MIN_DOWN_FRAMES = (1, 2, 3, 4, 5, 6, 7, 8)
+DEFAULT_MIN_UP_FRAMES = (1, 2, 3, 4)
 DEFAULT_TARGET_METRIC = "frame_head_pedal+offset_f1"
 
 
@@ -138,6 +141,7 @@ class TrackData:
     name: str
     data_list: list[dict]
     pedal_frame_output: np.ndarray
+    pedal_offset_output: np.ndarray | None
     reference_pedal_event_list: list[dict]
     piece_end_time: float
 
@@ -148,6 +152,10 @@ def parse_float_list(value: str) -> tuple[float, ...]:
 
 def parse_int_list(value: str) -> tuple[int, ...]:
     return tuple(int(item.strip()) for item in value.split(",") if item.strip())
+
+
+def parse_string_list(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
 def load_reference_pedal_events(midi_path: str) -> list[dict]:
@@ -177,6 +185,13 @@ def load_track(json_path: Path, sec_per_frame: float) -> TrackData:
         data_list,
         "pedal_frame_output",
     )
+    pedal_offset_output = None
+    if "pedal_offset_output" in data_list[0]:
+        _, pedal_offset_output = transcription_metrics.collect_trimmed_frame_arrays(
+            data_list,
+            "pedal_frame_output",
+            "pedal_offset_output",
+        )
     reference_pedal_event_list = load_reference_pedal_events(data_list[0]["midi_path"])
     total_frames = max(
         int(row.get("total_frames", row["frame_offsets"] + len(row["pedal_frame_output"])))
@@ -193,6 +208,7 @@ def load_track(json_path: Path, sec_per_frame: float) -> TrackData:
         name=str(track_json.get("audio_name") or json_path.stem),
         data_list=data_list,
         pedal_frame_output=pedal_frame_output,
+        pedal_offset_output=pedal_offset_output,
         reference_pedal_event_list=reference_pedal_event_list,
         piece_end_time=piece_end_time,
     )
@@ -217,20 +233,27 @@ def mean_or_nan(values: list[float]) -> float:
 
 
 def default_distance_steps(row: dict) -> float:
-    return (
+    distance = (
         abs(row["frame_head_threshold_on"] - 0.50) / 0.05
         + abs(row["frame_head_threshold_off"] - 0.40) / 0.05
         + abs(row["frame_head_min_down_frames"] - 3)
         + abs(row["frame_head_min_up_frames"] - 2)
     )
+    if row.get("frame_head_event_extractor") == "trend_dual_trigger":
+        distance += abs(row["frame_head_offset_threshold"] - 0.50) / 0.10
+        distance += abs(row["frame_head_min_on_delta"] - 0.0) / 0.005
+    return distance
 
 
 def score_combination(
     tracks: list[TrackData],
     raw_spans_by_track: list[list[tuple[int, int]]],
     sec_per_frame: float,
+    event_extractor: str,
     threshold_on: float,
     threshold_off: float,
+    offset_threshold: float | None,
+    min_on_delta: float | None,
     min_down_frames: int,
     min_up_frames: int,
 ) -> dict:
@@ -301,8 +324,11 @@ def score_combination(
         reference_f1.append(reference_metrics["pedal_f1"])
 
     row = {
+        "frame_head_event_extractor": event_extractor,
         "frame_head_threshold_on": threshold_on,
         "frame_head_threshold_off": threshold_off,
+        "frame_head_offset_threshold": offset_threshold,
+        "frame_head_min_on_delta": min_on_delta,
         "frame_head_min_down_frames": min_down_frames,
         "frame_head_min_up_frames": min_up_frames,
         "track_count": len(tracks),
@@ -336,20 +362,31 @@ def choose_best_row(df: pd.DataFrame, target_metric: str) -> pd.Series:
     candidates = candidates.sort_values(
         by=[
             "default_distance_steps",
+            "frame_head_event_extractor",
             "frame_head_threshold_on",
             "frame_head_threshold_off",
+            "frame_head_offset_threshold",
+            "frame_head_min_on_delta",
             "frame_head_min_down_frames",
             "frame_head_min_up_frames",
         ],
-        ascending=[True, True, True, True, True],
+        ascending=[True, True, True, True, True, True, True, True],
     )
     return candidates.iloc[0]
 
 
 def format_row_summary(row: pd.Series) -> str:
+    offset_text = ""
+    if row["frame_head_event_extractor"] == "trend_dual_trigger":
+        offset_text = (
+            f", offset={row['frame_head_offset_threshold']:.2f}, "
+            f"min_delta={row['frame_head_min_on_delta']:.3f}"
+        )
     return (
+        f"extractor={row['frame_head_event_extractor']}, "
         f"on={row['frame_head_threshold_on']:.2f}, "
-        f"off={row['frame_head_threshold_off']:.2f}, "
+        f"off={row['frame_head_threshold_off']:.2f}"
+        f"{offset_text}, "
         f"min_down={int(row['frame_head_min_down_frames'])}, "
         f"min_up={int(row['frame_head_min_up_frames'])}, "
         f"pedal+offset_f1={row['frame_head_pedal+offset_f1']:.6f}, "
@@ -370,37 +407,103 @@ def run_sweep(args: argparse.Namespace) -> pd.DataFrame:
     print(f"Loading {len(json_paths)} track JSON files from {eval_dir} ...")
     tracks = [load_track(json_path, sec_per_frame=sec_per_frame) for json_path in json_paths]
 
+    event_extractors = args.event_extractors
+    valid_event_extractors = {"state_hysteresis", "trend_dual_trigger"}
+    unknown_extractors = sorted(set(event_extractors) - valid_event_extractors)
+    if unknown_extractors:
+        raise ValueError(
+            f"Unknown event extractors {unknown_extractors}; expected {sorted(valid_event_extractors)}."
+        )
+
     threshold_pairs = valid_threshold_pairs(args.threshold_on_values, args.threshold_off_values)
-    print(f"Evaluating {len(threshold_pairs)} threshold pairs and {len(args.min_down_frames) * len(args.min_up_frames)} min-frame settings ...")
+    print(
+        f"Evaluating extractors={event_extractors}, {len(threshold_pairs)} threshold pairs, "
+        f"{len(args.min_down_frames) * len(args.min_up_frames)} min-frame settings ..."
+    )
 
     rows = []
-    for pair_idx, (threshold_on, threshold_off) in enumerate(threshold_pairs, start=1):
-        raw_spans_by_track = [
-            transcription_metrics.pedal_frame_output_to_raw_spans(
-                track.pedal_frame_output,
-                threshold_on=threshold_on,
-                threshold_off=threshold_off,
-            )
-            for track in tracks
-        ]
-        for min_down_frames, min_up_frames in product(args.min_down_frames, args.min_up_frames):
-            rows.append(
-                score_combination(
-                    tracks,
-                    raw_spans_by_track,
-                    sec_per_frame=sec_per_frame,
-                    threshold_on=threshold_on,
-                    threshold_off=threshold_off,
-                    min_down_frames=min_down_frames,
-                    min_up_frames=min_up_frames,
+    for event_extractor in event_extractors:
+        if event_extractor == "trend_dual_trigger":
+            missing_offsets = [track.name for track in tracks if track.pedal_offset_output is None]
+            if missing_offsets:
+                print(
+                    "Skipping trend_dual_trigger because pedal_offset_output is unavailable "
+                    f"for {len(missing_offsets)} tracks."
                 )
+                continue
+
+        for pair_idx, (threshold_on, threshold_off) in enumerate(threshold_pairs, start=1):
+            if event_extractor == "state_hysteresis":
+                raw_spans_by_track = [
+                    transcription_metrics.pedal_frame_output_to_raw_spans(
+                        track.pedal_frame_output,
+                        threshold_on=threshold_on,
+                        threshold_off=threshold_off,
+                    )
+                    for track in tracks
+                ]
+                for min_down_frames, min_up_frames in product(args.min_down_frames, args.min_up_frames):
+                    rows.append(
+                        score_combination(
+                            tracks,
+                            raw_spans_by_track,
+                            sec_per_frame=sec_per_frame,
+                            event_extractor=event_extractor,
+                            threshold_on=threshold_on,
+                            threshold_off=threshold_off,
+                            offset_threshold=np.nan,
+                            min_on_delta=np.nan,
+                            min_down_frames=min_down_frames,
+                            min_up_frames=min_up_frames,
+                        )
+                    )
+            else:
+                for offset_threshold, min_on_delta in product(
+                    args.offset_threshold_values,
+                    args.min_on_delta_values,
+                ):
+                    raw_spans_by_track = [
+                        transcription_metrics.pedal_frame_offset_outputs_to_raw_spans(
+                            track.pedal_frame_output,
+                            track.pedal_offset_output,
+                            threshold_on=threshold_on,
+                            threshold_off=threshold_off,
+                            offset_threshold=offset_threshold,
+                            min_on_delta=min_on_delta,
+                        )
+                        for track in tracks
+                    ]
+                    for min_down_frames, min_up_frames in product(
+                        args.min_down_frames,
+                        args.min_up_frames,
+                    ):
+                        rows.append(
+                            score_combination(
+                                tracks,
+                                raw_spans_by_track,
+                                sec_per_frame=sec_per_frame,
+                                event_extractor=event_extractor,
+                                threshold_on=threshold_on,
+                                threshold_off=threshold_off,
+                                offset_threshold=offset_threshold,
+                                min_on_delta=min_on_delta,
+                                min_down_frames=min_down_frames,
+                                min_up_frames=min_up_frames,
+                            )
+                        )
+            print(
+                f"Finished {event_extractor} threshold pair {pair_idx}/{len(threshold_pairs)}: "
+                f"on={threshold_on:.2f}, off={threshold_off:.2f}"
             )
-        print(f"Finished threshold pair {pair_idx}/{len(threshold_pairs)}: on={threshold_on:.2f}, off={threshold_off:.2f}")
+
+    if len(rows) == 0:
+        raise ValueError("No sweep rows were generated. Check requested event extractors and cached outputs.")
 
     df = pd.DataFrame(rows)
     best_row = choose_best_row(df, args.target_metric)
     baseline = df[
-        (df["frame_head_threshold_on"] == 0.50)
+        (df["frame_head_event_extractor"] == "state_hysteresis")
+        & (df["frame_head_threshold_on"] == 0.50)
         & (df["frame_head_threshold_off"] == 0.40)
         & (df["frame_head_min_down_frames"] == 3)
         & (df["frame_head_min_up_frames"] == 2)
@@ -427,6 +530,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-csv", required=True, help="Path to write the sweep CSV.")
     parser.add_argument("--target-metric", default=DEFAULT_TARGET_METRIC)
     parser.add_argument(
+        "--event-extractors",
+        type=parse_string_list,
+        default=DEFAULT_EVENT_EXTRACTORS,
+        help="Comma-separated event extractors: state_hysteresis,trend_dual_trigger.",
+    )
+    parser.add_argument(
         "--threshold-on-values",
         type=parse_float_list,
         default=DEFAULT_THRESHOLD_ON_VALUES,
@@ -437,6 +546,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=parse_float_list,
         default=DEFAULT_THRESHOLD_OFF_VALUES,
         help="Comma-separated frame_head_threshold_off values.",
+    )
+    parser.add_argument(
+        "--offset-threshold-values",
+        type=parse_float_list,
+        default=DEFAULT_OFFSET_THRESHOLD_VALUES,
+        help="Comma-separated frame_head_offset_threshold values for trend_dual_trigger.",
+    )
+    parser.add_argument(
+        "--min-on-delta-values",
+        type=parse_float_list,
+        default=DEFAULT_MIN_ON_DELTA_VALUES,
+        help="Comma-separated frame_head_min_on_delta values for trend_dual_trigger.",
     )
     parser.add_argument(
         "--min-down-frames",

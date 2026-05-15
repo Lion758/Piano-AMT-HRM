@@ -452,6 +452,70 @@ def test_pedal_frame_output_to_events_hysteresis_merge_filter_and_empty():
     assert transcription_metrics.pedal_frame_output_to_events([], sec_per_frame=0.02) == []
 
 
+def test_trend_dual_onset_requires_rise_and_min_delta():
+    raw_spans = transcription_metrics.pedal_frame_offset_outputs_to_raw_spans(
+        pedal_frame_output=[0.49, 0.50, 0.51, 0.80, 0.82, 0.20],
+        pedal_offset_output=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        threshold_on=0.5,
+        threshold_off=0.4,
+        offset_threshold=0.9,
+        min_on_delta=0.02,
+    )
+    assert raw_spans == [(3, 5)]
+
+    assert transcription_metrics.pedal_frame_offset_outputs_to_raw_spans(
+        pedal_frame_output=[0.2, 0.6, 0.7, 0.3],
+        pedal_offset_output=[0.0, 0.0, 0.0, 0.0],
+        threshold_on=0.5,
+        threshold_off=0.4,
+        offset_threshold=0.9,
+        min_on_delta=0.0,
+    ) == [(1, 3)]
+
+
+def test_trend_dual_offsets_fire_from_offset_head_or_state_drop():
+    assert transcription_metrics.pedal_frame_offset_outputs_to_raw_spans(
+        pedal_frame_output=[0.1, 0.6, 0.8, 0.8, 0.8],
+        pedal_offset_output=[0.0, 0.0, 0.0, 0.9, 0.0],
+        threshold_on=0.5,
+        threshold_off=0.4,
+        offset_threshold=0.5,
+    ) == [(1, 3)]
+
+    assert transcription_metrics.pedal_frame_offset_outputs_to_raw_spans(
+        pedal_frame_output=[0.1, 0.6, 0.8, 0.8, 0.3],
+        pedal_offset_output=[0.0, 0.0, 0.0, 0.0, 0.0],
+        threshold_on=0.5,
+        threshold_off=0.4,
+        offset_threshold=0.5,
+    ) == [(1, 4)]
+
+    assert transcription_metrics.pedal_frame_offset_outputs_to_raw_spans(
+        pedal_frame_output=[0.1, 0.6, 0.8, 0.8, 0.8],
+        pedal_offset_output=[0.0, 0.0, 0.0, 0.0, 0.0],
+        threshold_on=0.5,
+        threshold_off=0.4,
+        offset_threshold=0.5,
+    ) == [(1, 5)]
+
+
+def test_trend_dual_events_reuse_cleanup_rules():
+    events = transcription_metrics.pedal_frame_offset_outputs_to_events(
+        pedal_frame_output=[0.1, 0.6, 0.7, 0.3, 0.6, 0.7, 0.8, 0.2],
+        pedal_offset_output=[0.0] * 8,
+        sec_per_frame=0.02,
+        threshold_on=0.5,
+        threshold_off=0.4,
+        offset_threshold=0.9,
+        min_pedal_down_frames=3,
+        min_pedal_up_frames=2,
+    )
+    assert events == [
+        {"time": 0.02, "type": "PedalOn"},
+        {"time": 0.14, "type": "PedalOff"},
+    ]
+
+
 def test_collect_trimmed_frame_arrays_is_generic_for_pedal_boundary_heads():
     data_list = [
         {
@@ -531,3 +595,32 @@ def test_choose_pedal_event_list_honors_source_and_fallback():
     )
     assert events is decoder_events
     assert source_used == "decoder_fallback_frame_head_unavailable"
+
+
+def test_choose_frame_head_event_list_honors_extractor_and_fallback():
+    state_events = [{"time": 0.1, "type": "PedalOn"}]
+    trend_events = [{"time": 0.08, "type": "PedalOn"}]
+
+    events, extractor_used = transcription_metrics.choose_frame_head_event_list(
+        state_events,
+        trend_events,
+        "state_hysteresis",
+    )
+    assert events is state_events
+    assert extractor_used == "state_hysteresis"
+
+    events, extractor_used = transcription_metrics.choose_frame_head_event_list(
+        state_events,
+        trend_events,
+        "trend_dual_trigger",
+    )
+    assert events is trend_events
+    assert extractor_used == "trend_dual_trigger"
+
+    events, extractor_used = transcription_metrics.choose_frame_head_event_list(
+        state_events,
+        None,
+        "trend_dual_trigger",
+    )
+    assert events is state_events
+    assert extractor_used == "state_hysteresis_fallback_offset_unavailable"

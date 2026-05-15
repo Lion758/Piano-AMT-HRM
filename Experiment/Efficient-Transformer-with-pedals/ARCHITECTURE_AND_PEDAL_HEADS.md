@@ -673,13 +673,16 @@ The test code can also compute:
 mel -> encoder -> pedal_frame_head -> sigmoid probabilities
 ```
 
-Then `metrics/transcription_metrics.py` can threshold the pedal-frame output and
-convert it into PedalOn/PedalOff events. This is controlled by:
+Then `metrics/transcription_metrics.py` can convert frame-head probabilities into
+PedalOn/PedalOff events. The default extractor uses pedal-state hysteresis. An
+optional extractor verifies PedalOn events with an upward state trend and can end
+PedalOff events from either the offset head or a state drop. This is controlled by:
 
 ```yaml
 evaluation:
   pedal_event_source: decoder   # or frame_head
   midi_pedal_event_source: decoder   # or frame_head
+  frame_head_event_extractor: state_hysteresis   # or trend_dual_trigger
 ```
 
 The base config defaults to the decoder event source. The

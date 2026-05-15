@@ -53,8 +53,11 @@ evaluation:
   copy_reference_midi: false # copied ground-truth MIDI for side-by-side comparison
   pedal_event_source: decoder # decoder or frame_head; controls headline pedal and pedal-extended metrics
   midi_pedal_event_source: decoder # decoder or frame_head; controls saved MIDI pedal events
+  frame_head_event_extractor: state_hysteresis # state_hysteresis or trend_dual_trigger
   frame_head_threshold_on: 0.5
   frame_head_threshold_off: 0.4
+  frame_head_offset_threshold: 0.5
+  frame_head_min_on_delta: 0.0
   frame_head_min_down_frames: 3
   frame_head_min_up_frames: 2
 
