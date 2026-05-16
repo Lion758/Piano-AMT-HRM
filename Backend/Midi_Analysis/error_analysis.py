@@ -1,7 +1,12 @@
+import math
 import numpy as np
 from typing import Dict, List, Any, Tuple, Optional
 from collections import defaultdict
 import statistics
+
+
+ROBUST_ALIGNMENT_TRIM_FRACTION = 0.05
+ONSET_GROUPING_TOLERANCE_SECONDS = 0.05
 
 class ErrorAnalysis:
     """
@@ -24,11 +29,12 @@ class ErrorAnalysis:
         self.performance_data = analysis_data.get('performance', {})
         self.aligned_notes = analysis_data.get('alignment', [])
         self.mode = self._detect_analysis_mode()
-        
+
         # Performance metrics storage
         self.metrics = {}
         self.error_categories = {}
         self.practice_recommendations = []
+        self._robust_alignment_context: Optional[Dict[str, Any]] = None
     
     def analyze_performance(self) -> Dict[str, Any]:
         """
@@ -47,6 +53,7 @@ class ErrorAnalysis:
         # Run all analysis modules
         self._analyze_note_accuracy()
         self._analyze_alignment_reliability()
+        self._analyze_alignment_filter()
         self._analyze_timing_errors()
         self._analyze_rhythmic_consistency()
         self._analyze_dynamic_control()
@@ -119,6 +126,276 @@ class ErrorAnalysis:
             'minimum_required_aligned_pairs': int(min_required),
             'reason': None if is_reliable else 'too_few_aligned_pairs_for_stable_metrics',
         }
+
+    def _analyze_alignment_filter(self):
+        """Record the robust aligned-note subset used by timing-style metrics."""
+        context = self._get_robust_alignment_context()
+        self.metrics['alignment_filter'] = {
+            'applied_to': ['timing_errors', 'rhythmic_consistency', 'articulation', 'phrasing'],
+            'source_pair_count': int(context.get('source_pair_count', 0)),
+            'scored_pair_count': int(context.get('scored_pair_count', 0)),
+            'trimmed_pair_count': int(context.get('trimmed_pair_count', 0)),
+            'requested_trim_fraction': ROBUST_ALIGNMENT_TRIM_FRACTION,
+            'actual_trim_fraction': round(float(context.get('actual_trim_fraction', 0.0)), 4),
+            'tempo_normalization': {
+                'applied': bool(context.get('tempo_normalization_applied', False)),
+                'scale': round(float(context.get('tempo_scale', 1.0)), 6),
+                'intercept_s': round(float(context.get('tempo_intercept', 0.0)), 6),
+                'source': context.get('tempo_normalization_source', 'unavailable'),
+            },
+        }
+
+    def _get_matched_aligned_pairs(self) -> List[Dict[str, Any]]:
+        """Return reference/performance note pairs sorted in reference time."""
+        pairs = [
+            p for p in self.aligned_notes
+            if p.get('reference_note') and p.get('performance_note')
+        ]
+        return sorted(
+            pairs,
+            key=lambda p: (
+                float(p.get('reference_note', {}).get('start', 0.0)),
+                int(p.get('reference_note', {}).get('pitch', 0)),
+                float(p.get('performance_note', {}).get('start', 0.0)),
+            ),
+        )
+
+    def _get_robust_alignment_context(self) -> Dict[str, Any]:
+        """
+        Build the aligned-pair subset used by timing, rhythm, articulation, and phrasing.
+
+        We first fit a global affine tempo map (performance_time ~= intercept +
+        scale * reference_time), trim the 5% worst residual outliers, then refit
+        the map on the kept notes. The returned pairs are shallow copies whose
+        `time_difference` is the tempo-normalized residual; the raw value is kept
+        as `raw_time_difference`.
+        """
+        if self._robust_alignment_context is not None:
+            return self._robust_alignment_context
+
+        pairs = self._get_matched_aligned_pairs()
+        source_count = len(pairs)
+        if not pairs:
+            self._robust_alignment_context = {
+                'pairs': [],
+                'trimmed_pairs': [],
+                'source_pair_count': 0,
+                'scored_pair_count': 0,
+                'trimmed_pair_count': 0,
+                'actual_trim_fraction': 0.0,
+                'tempo_scale': 1.0,
+                'tempo_intercept': 0.0,
+                'tempo_normalization_applied': False,
+                'tempo_normalization_source': 'no_aligned_pairs',
+            }
+            return self._robust_alignment_context
+
+        initial_scale, initial_source = self._estimate_global_tempo_scale(pairs)
+        initial_intercept = self._estimate_tempo_intercept(pairs, initial_scale)
+        initial_records = [
+            (
+                abs(self._tempo_normalized_residual(pair, initial_scale, initial_intercept)),
+                idx,
+                pair,
+            )
+            for idx, pair in enumerate(pairs)
+        ]
+
+        trim_count = int(source_count * ROBUST_ALIGNMENT_TRIM_FRACTION)
+        if source_count - trim_count < 3:
+            trim_count = max(0, source_count - 3)
+
+        trimmed_indices = {
+            idx
+            for _, idx, _ in sorted(initial_records, key=lambda item: item[0], reverse=True)[:trim_count]
+        }
+        kept_originals = [pair for idx, pair in enumerate(pairs) if idx not in trimmed_indices]
+        trimmed_originals = [pair for idx, pair in enumerate(pairs) if idx in trimmed_indices]
+
+        final_scale, final_source = self._estimate_global_tempo_scale(kept_originals)
+        final_intercept = self._estimate_tempo_intercept(kept_originals, final_scale)
+
+        kept_pairs = [
+            self._with_tempo_normalized_time_difference(pair, final_scale, final_intercept, False)
+            for pair in kept_originals
+        ]
+        trimmed_pairs = [
+            self._with_tempo_normalized_time_difference(pair, final_scale, final_intercept, True)
+            for pair in trimmed_originals
+        ]
+
+        self._robust_alignment_context = {
+            'pairs': kept_pairs,
+            'trimmed_pairs': trimmed_pairs,
+            'source_pair_count': int(source_count),
+            'scored_pair_count': int(len(kept_pairs)),
+            'trimmed_pair_count': int(len(trimmed_pairs)),
+            'actual_trim_fraction': (len(trimmed_pairs) / source_count) if source_count else 0.0,
+            'tempo_scale': float(final_scale),
+            'tempo_intercept': float(final_intercept),
+            'tempo_normalization_applied': bool(source_count >= 3),
+            'tempo_normalization_source': final_source or initial_source,
+        }
+        return self._robust_alignment_context
+
+    def _estimate_global_tempo_scale(self, pairs: List[Dict[str, Any]]) -> Tuple[float, str]:
+        """Estimate performance/reference tempo scale robustly from aligned notes."""
+        onset_groups = self._group_aligned_pairs_by_reference_onset(pairs)
+        if len(onset_groups) >= 2:
+            ratios: List[float] = []
+            for i in range(1, len(onset_groups)):
+                ref_delta = onset_groups[i]['reference_start'] - onset_groups[i - 1]['reference_start']
+                perf_delta = onset_groups[i]['performance_start'] - onset_groups[i - 1]['performance_start']
+                if ref_delta > 1e-4 and perf_delta > 1e-4:
+                    ratio = perf_delta / ref_delta
+                    if math.isfinite(ratio) and 0.25 <= ratio <= 4.0:
+                        ratios.append(ratio)
+
+            if ratios:
+                return max(0.25, min(4.0, float(statistics.median(ratios)))), 'median_grouped_ioi_ratio'
+
+            ref_span = onset_groups[-1]['reference_start'] - onset_groups[0]['reference_start']
+            perf_span = onset_groups[-1]['performance_start'] - onset_groups[0]['performance_start']
+            if ref_span > 1e-6 and perf_span > 1e-6:
+                return max(0.25, min(4.0, float(perf_span / ref_span))), 'grouped_span_ratio'
+
+        if len(pairs) < 2:
+            return 1.0, 'insufficient_pairs'
+
+        ref_starts = [float(p['reference_note'].get('start', 0.0)) for p in pairs]
+        perf_starts = [float(p['performance_note'].get('start', 0.0)) for p in pairs]
+
+        ratios: List[float] = []
+        for i in range(1, len(pairs)):
+            ref_delta = ref_starts[i] - ref_starts[i - 1]
+            perf_delta = perf_starts[i] - perf_starts[i - 1]
+            if ref_delta > 1e-4 and perf_delta > 1e-4:
+                ratio = perf_delta / ref_delta
+                if math.isfinite(ratio) and 0.25 <= ratio <= 4.0:
+                    ratios.append(ratio)
+
+        if ratios:
+            return max(0.25, min(4.0, float(statistics.median(ratios)))), 'median_ioi_ratio'
+
+        ref_span = ref_starts[-1] - ref_starts[0]
+        perf_span = perf_starts[-1] - perf_starts[0]
+        if ref_span > 1e-6 and perf_span > 1e-6:
+            return max(0.25, min(4.0, float(perf_span / ref_span))), 'span_ratio'
+
+        return 1.0, 'identity_fallback'
+
+    def _group_aligned_pairs_by_reference_onset(
+        self,
+        pairs: List[Dict[str, Any]],
+        *,
+        tempo_scale: float = 1.0,
+        tempo_intercept: float = 0.0,
+        normalize_performance_time: bool = False,
+        tolerance_s: float = ONSET_GROUPING_TOLERANCE_SECONDS,
+    ) -> List[Dict[str, Any]]:
+        """Collapse chord tones into reference-onset groups for event-level rhythm metrics."""
+        if not pairs:
+            return []
+
+        sorted_pairs = sorted(
+            pairs,
+            key=lambda p: (
+                float(p.get('reference_note', {}).get('start', 0.0)),
+                int(p.get('reference_note', {}).get('pitch', 0)),
+                float(p.get('performance_note', {}).get('start', 0.0)),
+            ),
+        )
+
+        groups: List[List[Dict[str, Any]]] = []
+        current: List[Dict[str, Any]] = []
+        current_start: Optional[float] = None
+        for pair in sorted_pairs:
+            ref_start = float(pair['reference_note'].get('start', 0.0))
+            if current and current_start is not None and abs(ref_start - current_start) > tolerance_s:
+                groups.append(current)
+                current = []
+                current_start = None
+
+            if current_start is None:
+                current_start = ref_start
+            current.append(pair)
+
+        if current:
+            groups.append(current)
+
+        normalized_groups: List[Dict[str, Any]] = []
+        for group in groups:
+            ref_starts = [float(p['reference_note'].get('start', 0.0)) for p in group]
+            perf_starts = []
+            for pair in group:
+                perf_start = float(pair['performance_note'].get('start', 0.0))
+                if normalize_performance_time and tempo_scale > 1e-9:
+                    perf_start = (perf_start - tempo_intercept) / tempo_scale
+                perf_starts.append(perf_start)
+
+            normalized_groups.append(
+                {
+                    'reference_start': float(statistics.median(ref_starts)),
+                    'performance_start': float(statistics.median(perf_starts)),
+                    'pair_count': int(len(group)),
+                    'pairs': group,
+                }
+            )
+
+        return normalized_groups
+
+    def _estimate_tempo_intercept(self, pairs: List[Dict[str, Any]], tempo_scale: float) -> float:
+        offsets = []
+        for pair in pairs:
+            ref_start = float(pair['reference_note'].get('start', 0.0))
+            perf_start = float(pair['performance_note'].get('start', ref_start))
+            offsets.append(perf_start - tempo_scale * ref_start)
+        return float(statistics.median(offsets)) if offsets else 0.0
+
+    def _tempo_normalized_residual(
+        self,
+        pair: Dict[str, Any],
+        tempo_scale: float,
+        tempo_intercept: float,
+    ) -> float:
+        ref_start = float(pair['reference_note'].get('start', 0.0))
+        perf_start = float(pair['performance_note'].get('start', ref_start))
+        expected_perf_start = tempo_intercept + tempo_scale * ref_start
+        residual = perf_start - expected_perf_start
+        return float(residual) if math.isfinite(residual) else 0.0
+
+    def _pair_raw_time_difference(self, pair: Dict[str, Any]) -> float:
+        raw = pair.get('time_difference', None)
+        if isinstance(raw, (int, float)) and math.isfinite(float(raw)):
+            return float(raw)
+        ref_start = float(pair.get('reference_note', {}).get('start', 0.0))
+        perf_start = float(pair.get('performance_note', {}).get('start', ref_start))
+        return perf_start - ref_start
+
+    def _with_tempo_normalized_time_difference(
+        self,
+        pair: Dict[str, Any],
+        tempo_scale: float,
+        tempo_intercept: float,
+        trimmed: bool,
+    ) -> Dict[str, Any]:
+        residual = self._tempo_normalized_residual(pair, tempo_scale, tempo_intercept)
+        return {
+            **pair,
+            'raw_time_difference': self._pair_raw_time_difference(pair),
+            'time_difference': residual,
+            'tempo_normalized_time_difference': residual,
+            'tempo_scale': float(tempo_scale),
+            'tempo_intercept': float(tempo_intercept),
+            'robust_alignment_trimmed': bool(trimmed),
+        }
+
+    def _tempo_normalized_duration(self, note: Dict[str, Any], tempo_scale: Optional[float] = None) -> float:
+        duration = float(note.get('duration', 0.0) or 0.0)
+        scale = float(tempo_scale if tempo_scale is not None else self._get_robust_alignment_context().get('tempo_scale', 1.0))
+        if scale > 1e-9:
+            return duration / scale
+        return duration
     
     def _analyze_note_accuracy(self):
         """Analyze note accuracy: missing notes, extra notes, wrong notes."""
@@ -172,8 +449,8 @@ class ErrorAnalysis:
     
     def _analyze_timing_errors(self):
         """Analyze timing errors: rushing, dragging, inconsistency."""
-        aligned_pairs = [p for p in self.aligned_notes 
-                        if p.get('reference_note') and p.get('performance_note')]
+        robust_context = self._get_robust_alignment_context()
+        aligned_pairs = robust_context.get('pairs', [])
         
         if not aligned_pairs:
             self.metrics['timing_errors'] = {
@@ -224,6 +501,9 @@ class ErrorAnalysis:
             'mean_error_ms': round(mean_error * 1000, 1),  # Convert to milliseconds
             'std_error_ms': round(std_error * 1000, 1),
             'max_error_ms': round(max_error * 1000, 1),
+            'time_difference_source': 'tempo_normalized_residuals',
+            'trimmed_aligned_note_count': int(robust_context.get('trimmed_pair_count', 0)),
+            'tempo_scale': round(float(robust_context.get('tempo_scale', 1.0)), 6),
             'rushing_count': len(rushing_notes),
             'dragging_count': len(dragging_notes),
             'accurate_count': len(accurate_notes),
@@ -248,20 +528,29 @@ class ErrorAnalysis:
         coefficient of variation (CV) on raw performance durations penalizes
         pieces with naturally varied rhythms even when performed perfectly.
         """
-        import math
-
         # Prefer aligned data for reference-vs-performance comparison
-        aligned_pairs = [p for p in self.aligned_notes
-                        if p.get('reference_note') and p.get('performance_note')]
+        robust_context = self._get_robust_alignment_context()
+        aligned_pairs = list(robust_context.get('pairs', []))
 
         if len(aligned_pairs) >= 3:
             # Sort by reference time for stable consecutive IOI comparison
             aligned_pairs.sort(key=lambda x: x['reference_note']['start'])
 
-            ref_starts = [p['reference_note']['start'] for p in aligned_pairs]
-            perf_starts = [p['performance_note']['start'] for p in aligned_pairs]
+            tempo_scale = float(robust_context.get('tempo_scale', 1.0) or 1.0)
+            tempo_intercept = float(robust_context.get('tempo_intercept', 0.0) or 0.0)
+            onset_groups = self._group_aligned_pairs_by_reference_onset(
+                aligned_pairs,
+                tempo_scale=tempo_scale,
+                tempo_intercept=tempo_intercept,
+                normalize_performance_time=True,
+            )
+            ref_starts = [g['reference_start'] for g in onset_groups]
+            perf_starts = [g['performance_start'] for g in onset_groups]
             ref_durs = [p['reference_note']['duration'] for p in aligned_pairs]
-            perf_durs = [p['performance_note']['duration'] for p in aligned_pairs]
+            perf_durs = [
+                self._tempo_normalized_duration(p['performance_note'], tempo_scale)
+                for p in aligned_pairs
+            ]
 
             # Inter-onset intervals (IOIs)
             ref_ioi = [ref_starts[i] - ref_starts[i - 1] for i in range(1, len(ref_starts))]
@@ -295,6 +584,7 @@ class ErrorAnalysis:
             avg_ioi_ratio = statistics.mean([
                 (p / r) for r, p in zip(ref_ioi, perf_ioi) if r > 1e-6
             ]) if ref_ioi else 0
+            chord_group_count = sum(1 for group in onset_groups if int(group.get('pair_count', 0)) > 1)
 
             self.metrics['rhythmic_consistency'] = {
                 'duration_consistency_score': round(rhythm_score, 2),
@@ -304,6 +594,16 @@ class ErrorAnalysis:
                 'average_ioi_ratio': round(avg_ioi_ratio, 3),
                 'ioi_match_score': round(ioi_score, 2),
                 'duration_match_score': round(dur_score, 2),
+                'tempo_normalized': True,
+                'trimmed_aligned_note_count': int(robust_context.get('trimmed_pair_count', 0)),
+                'tempo_scale': round(float(robust_context.get('tempo_scale', 1.0)), 6),
+                'onset_grouping': {
+                    'applied': True,
+                    'tolerance_s': ONSET_GROUPING_TOLERANCE_SECONDS,
+                    'group_count': int(len(onset_groups)),
+                    'chord_group_count': int(chord_group_count),
+                    'grouped_ioi_count': int(len(ref_ioi)),
+                },
                 'tempo_stability': self._analyze_tempo_stability()
             }
             return
@@ -374,7 +674,9 @@ class ErrorAnalysis:
     def _analyze_articulation(self):
         """Analyze articulation: staccato, legato, note durations."""
         performance_notes = self.performance_data.get('notes', [])
-        
+        robust_context = self._get_robust_alignment_context()
+        aligned_pairs = list(robust_context.get('pairs', []))
+
         if not performance_notes:
             return
         
@@ -400,11 +702,55 @@ class ErrorAnalysis:
         legato_notes = [ratio for ratio in articulation_ratios if ratio > 0.9]
         normal_notes = [ratio for ratio in articulation_ratios if 0.5 <= ratio <= 0.9]
         
-        articulation_consistency = self._calculate_consistency_score(articulation_ratios)
-        
+        performance_articulation_consistency = self._calculate_consistency_score(articulation_ratios)
+        articulation_consistency = performance_articulation_consistency
+        articulation_match_score = None
+        average_reference_duration_ratio = None
+        shorter_than_reference_percentage = None
+        longer_than_reference_percentage = None
+        matching_reference_percentage = None
+
+        if len(aligned_pairs) >= 2:
+            tempo_scale = float(robust_context.get('tempo_scale', 1.0) or 1.0)
+            duration_ratios = []
+            log_devs = []
+            for pair in aligned_pairs:
+                ref_duration = float(pair['reference_note'].get('duration', 0.0) or 0.0)
+                perf_duration = self._tempo_normalized_duration(pair['performance_note'], tempo_scale)
+                if ref_duration > 1e-6 and perf_duration > 1e-6:
+                    ratio = perf_duration / ref_duration
+                    duration_ratios.append(ratio)
+                    log_devs.append(abs(math.log(ratio)))
+
+            if log_devs:
+                mean_dev = statistics.mean(log_devs)
+                std_dev = statistics.stdev(log_devs) if len(log_devs) > 1 else 0.0
+                articulation_match_score = 1.0 / (1.0 + 6.0 * mean_dev + 3.0 * std_dev)
+                articulation_consistency = articulation_match_score
+
+            if duration_ratios:
+                average_reference_duration_ratio = statistics.mean(duration_ratios)
+                shorter_than_reference_percentage = (
+                    sum(1 for ratio in duration_ratios if ratio < 0.75) / len(duration_ratios)
+                ) * 100
+                longer_than_reference_percentage = (
+                    sum(1 for ratio in duration_ratios if ratio > 1.25) / len(duration_ratios)
+                ) * 100
+                matching_reference_percentage = (
+                    sum(1 for ratio in duration_ratios if 0.75 <= ratio <= 1.25) / len(duration_ratios)
+                ) * 100
+
         self.metrics['articulation'] = {
             'average_duration': round(statistics.mean(perf_durations), 3) if perf_durations else 0,
             'articulation_consistency': round(articulation_consistency, 2),
+            'articulation_basis': 'tempo_normalized_reference_duration_match' if articulation_match_score is not None else 'performance_articulation_ratio_cv',
+            'performance_articulation_consistency': round(performance_articulation_consistency, 2),
+            'average_reference_duration_ratio': round(average_reference_duration_ratio, 2) if average_reference_duration_ratio is not None else None,
+            'shorter_than_reference_percentage': round(shorter_than_reference_percentage, 1) if shorter_than_reference_percentage is not None else None,
+            'longer_than_reference_percentage': round(longer_than_reference_percentage, 1) if longer_than_reference_percentage is not None else None,
+            'matching_reference_percentage': round(matching_reference_percentage, 1) if matching_reference_percentage is not None else None,
+            'trimmed_aligned_note_count': int(robust_context.get('trimmed_pair_count', 0)),
+            'tempo_scale': round(float(robust_context.get('tempo_scale', 1.0)), 6),
             'staccato_percentage': round((len(staccato_notes) / len(articulation_ratios)) * 100, 1) if articulation_ratios else 0,
             'legato_percentage': round((len(legato_notes) / len(articulation_ratios)) * 100, 1) if articulation_ratios else 0,
             'normal_percentage': round((len(normal_notes) / len(articulation_ratios)) * 100, 1) if articulation_ratios else 0,
@@ -416,8 +762,8 @@ class ErrorAnalysis:
         # This assumes phrase segmentation data is available
         # For now, analyze based on timing patterns
         
-        aligned_pairs = [p for p in self.aligned_notes 
-                        if p.get('reference_note') and p.get('performance_note')]
+        robust_context = self._get_robust_alignment_context()
+        aligned_pairs = list(robust_context.get('pairs', []))
         
         if len(aligned_pairs) < 10:  # Need enough data for phrasing analysis
             return
@@ -445,7 +791,10 @@ class ErrorAnalysis:
             'detected_phrases': len(phrase_boundaries) + 1,
             'average_phrase_length': len(aligned_pairs) / (len(phrase_boundaries) + 1) if phrase_boundaries else len(aligned_pairs),
             'phrase_consistency': round(statistics.mean(phrase_consistency), 3) if phrase_consistency else 0,
-            'phrasing_regularity': self._assess_phrasing_regularity(phrase_boundaries, len(aligned_pairs))
+            'phrasing_regularity': self._assess_phrasing_regularity(phrase_boundaries, len(aligned_pairs)),
+            'time_difference_source': 'tempo_normalized_residuals',
+            'trimmed_aligned_note_count': int(robust_context.get('trimmed_pair_count', 0)),
+            'tempo_scale': round(float(robust_context.get('tempo_scale', 1.0)), 6)
         }
     
     # Add this method to the ErrorAnalysis class in error_analysis.py
@@ -453,8 +802,52 @@ class ErrorAnalysis:
 
     def _analyze_tempo_stability(self) -> Dict[str, Any]:
         """Analyze tempo stability throughout the performance."""
+        robust_context = self._get_robust_alignment_context()
+        aligned_pairs = list(robust_context.get('pairs', []))
+        if len(aligned_pairs) >= 10:
+            aligned_pairs.sort(key=lambda x: x['reference_note']['start'])
+            tempo_scale = float(robust_context.get('tempo_scale', 1.0) or 1.0)
+            tempo_intercept = float(robust_context.get('tempo_intercept', 0.0) or 0.0)
+            onset_groups = self._group_aligned_pairs_by_reference_onset(
+                aligned_pairs,
+                tempo_scale=tempo_scale,
+                tempo_intercept=tempo_intercept,
+                normalize_performance_time=True,
+            )
+            local_scales = []
+            for i in range(1, len(onset_groups)):
+                ref_ioi = onset_groups[i]['reference_start'] - onset_groups[i - 1]['reference_start']
+                perf_ioi = onset_groups[i]['performance_start'] - onset_groups[i - 1]['performance_start']
+                if ref_ioi > 1e-4 and perf_ioi > 1e-4:
+                    normalized_scale = perf_ioi / ref_ioi
+                    if math.isfinite(normalized_scale) and 0.25 <= normalized_scale <= 4.0:
+                        local_scales.append(normalized_scale)
+
+            if len(local_scales) >= 5:
+                mean_scale = statistics.mean(local_scales)
+                cv = (
+                    statistics.stdev(local_scales) / mean_scale
+                    if len(local_scales) > 1 and mean_scale > 1e-9 else 0.0
+                )
+                stability_score = 1 / (1 + cv)
+                rubato_patterns = self._detect_rubato_patterns(local_scales)
+                return {
+                    'stability_score': round(stability_score, 2),
+                    'tempo_variation': round(cv * 100, 1),
+                    'average_tempo_scale': round(float(tempo_scale), 4),
+                    'average_normalized_local_scale': round(float(mean_scale), 4),
+                    'tempo_scale_range': {
+                        'min': round(float(min(local_scales)), 3),
+                        'max': round(float(max(local_scales)), 3)
+                    },
+                    'tempo_normalized': True,
+                    'trimmed_aligned_note_count': int(robust_context.get('trimmed_pair_count', 0)),
+                    'onset_group_count': int(len(onset_groups)),
+                    'rubato_patterns': rubato_patterns
+                }
+
         performance_notes = self.performance_data.get('notes', [])
-        
+
         if len(performance_notes) < 10:  # Need enough notes for tempo analysis
             return {
                 'stability_score': 0.5,
@@ -1146,17 +1539,17 @@ class ErrorAnalysis:
             total_weight += weights['dynamic_control']
 
         if 'articulation' in self.metrics:
-            import math
-
             # Prefer reference-vs-performance articulation match on aligned note pairs.
-            aligned_pairs = [
-                p for p in self.aligned_notes
-                if p.get('reference_note') and p.get('performance_note')
-            ]
+            robust_context = self._get_robust_alignment_context()
+            aligned_pairs = list(robust_context.get('pairs', []))
 
             if aligned_pairs:
+                tempo_scale = float(robust_context.get('tempo_scale', 1.0) or 1.0)
                 ref_durs = [p['reference_note']['duration'] for p in aligned_pairs]
-                perf_durs = [p['performance_note']['duration'] for p in aligned_pairs]
+                perf_durs = [
+                    self._tempo_normalized_duration(p['performance_note'], tempo_scale)
+                    for p in aligned_pairs
+                ]
                 log_devs = []
                 for ref_duration, perf_duration in zip(ref_durs, perf_durs):
                     if ref_duration > 1e-6 and perf_duration > 1e-6:
@@ -1164,7 +1557,8 @@ class ErrorAnalysis:
 
                 if log_devs:
                     mean_dev = statistics.mean(log_devs)
-                    articulation_score = 1.0 / (1.0 + 6.0 * mean_dev)
+                    std_dev = statistics.stdev(log_devs) if len(log_devs) > 1 else 0.0
+                    articulation_score = 1.0 / (1.0 + 6.0 * mean_dev + 3.0 * std_dev)
                 else:
                     articulation_score = 1.0
             else:

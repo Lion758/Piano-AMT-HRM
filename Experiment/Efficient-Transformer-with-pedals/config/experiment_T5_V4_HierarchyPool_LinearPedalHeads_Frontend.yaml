@@ -1,0 +1,13 @@
+defaults:
+  - experiment_T5_V3_HybridGlobalLocalCrossAttn
+
+model:
+  checkpoint_path: checkpoints/200k_PedalHeads.ckpt
+  strict_checkpoint: false
+  checkpoint_ignore_layres: []
+  cross_attention_hierarchy_pooling: true
+  pooling_sizes: [4, 4, 2, 2, 1, 1]
+  pedal_head_type: linear
+
+training:
+  notes: "Efficient_Transformer_V4_LinearPedalHeads_frontend"

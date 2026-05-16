@@ -211,7 +211,7 @@ TRAIN_STUB_MODULE_NAMES = T5_STUB_MODULE_NAMES + (
 )
 
 
-def _load_temporal_conv_pedal_head():
+def _load_t5_module():
     with _preserve_modules(T5_STUB_MODULE_NAMES):
         _install_t5_import_stubs()
         spec = importlib.util.spec_from_file_location(
@@ -220,7 +220,11 @@ def _load_temporal_conv_pedal_head():
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return module.TemporalConvPedalHead
+        return module
+
+
+def _load_temporal_conv_pedal_head():
+    return _load_t5_module().TemporalConvPedalHead
 
 
 def _load_checkpoint_helpers():
@@ -235,6 +239,7 @@ def _load_checkpoint_helpers():
         spec.loader.exec_module(module)
         return (
             module.remove_legacy_linear_pedal_head_layers,
+            module.should_strip_legacy_linear_pedal_head_layers,
             module.should_load_checkpoint_strictly,
             module.should_resume_full_lightning_checkpoint,
         )
@@ -276,8 +281,21 @@ def test_three_temporal_conv_pedal_heads_have_expected_parameter_count():
     assert 110_000 <= total_params <= 120_000
 
 
+def test_linear_pedal_head_matches_legacy_checkpoint_shape_and_outputs_frame_logits():
+    t5_module = _load_t5_module()
+    head = t5_module.make_pedal_head("linear", emb_dim=512)
+    z = torch.randn(2, 17, 512)
+
+    logits = t5_module.apply_pedal_head(head, z)
+
+    assert isinstance(head, nn.Linear)
+    assert tuple(head.weight.shape) == (1, 512)
+    assert tuple(head.bias.shape) == (1,)
+    assert logits.shape == (2, 17)
+
+
 def test_remove_legacy_linear_pedal_head_layers_keeps_backbone_keys():
-    remove_legacy_linear_pedal_head_layers, _, _ = _load_checkpoint_helpers()
+    remove_legacy_linear_pedal_head_layers, _, _, _ = _load_checkpoint_helpers()
 
     state_dict = {
         "encoder.dense.weight": torch.randn(4, 4),
@@ -303,7 +321,7 @@ def test_remove_legacy_linear_pedal_head_layers_keeps_backbone_keys():
 
 
 def test_legacy_linear_pedal_heads_disable_strict_loading_and_full_resume():
-    _, should_load_checkpoint_strictly, should_resume_full_lightning_checkpoint = _load_checkpoint_helpers()
+    _, _, should_load_checkpoint_strictly, should_resume_full_lightning_checkpoint = _load_checkpoint_helpers()
 
     legacy_layers = ["pedal_frame_head.weight"]
 
@@ -313,10 +331,21 @@ def test_legacy_linear_pedal_heads_disable_strict_loading_and_full_resume():
     assert should_resume_full_lightning_checkpoint("lightning", [], []) is True
 
 
+def test_checkpoint_loader_only_strips_linear_heads_for_temporal_conv_configs():
+    _, should_strip_legacy_linear_pedal_head_layers, _, _ = _load_checkpoint_helpers()
+
+    linear_config = types.SimpleNamespace(model=types.SimpleNamespace(pedal_head_type="linear"))
+    temporal_conv_config = types.SimpleNamespace(model=types.SimpleNamespace(pedal_head_type="temporal_conv"))
+    missing_config = types.SimpleNamespace(model=types.SimpleNamespace())
+
+    assert should_strip_legacy_linear_pedal_head_layers(linear_config) is False
+    assert should_strip_legacy_linear_pedal_head_layers(temporal_conv_config) is True
+    assert should_strip_legacy_linear_pedal_head_layers(missing_config) is False
+
+
 def test_v4_config_names_temporal_conv_pedal_head_hyperparameters():
     config_text = (PROJECT_DIR / "config" / "experiment_T5_V4_HierarchyPool.yaml").read_text()
 
-    assert "notes: \"Efficient_Transformer_V4_Pedal_TemporalConvHeads-200k\"" in config_text
     assert "pedal_head_type: temporal_conv" in config_text
     assert "pedal_head_hidden: 64" in config_text
     assert "pedal_head_dropout: 0.1" in config_text
@@ -331,4 +360,15 @@ def test_v4_config_names_temporal_conv_pedal_head_hyperparameters():
         "pedal_offset_head.weight",
         "pedal_offset_head.bias",
     ):
-        assert legacy_key in config_text
+        assert legacy_key not in config_text
+
+
+def test_frontend_config_uses_linear_pedal_heads_checkpoint():
+    main_config_text = (PROJECT_DIR / "config" / "main_config.yaml").read_text()
+    frontend_config_text = (
+        PROJECT_DIR / "config" / "experiment_T5_V4_HierarchyPool_LinearPedalHeads_Frontend.yaml"
+    ).read_text()
+
+    assert "- experiment_T5_V4_HierarchyPool_LinearPedalHeads_Frontend" in main_config_text
+    assert "checkpoint_path: checkpoints/200k_PedalHeads.ckpt" in frontend_config_text
+    assert "pedal_head_type: linear" in frontend_config_text

@@ -19,6 +19,7 @@ from train import (
     remove_ignored_layers,
     remove_legacy_linear_pedal_head_layers,
     should_load_checkpoint_strictly,
+    should_strip_legacy_linear_pedal_head_layers,
     validate_transformer_ffn_activation_compatibility,
 )
 from utils import sequence_processing
@@ -56,7 +57,11 @@ def _load_model_if_needed(config: OmegaConf) -> None:
     state_dict = extract_model_state_dict(checkpoint, checkpoint_format)
     validate_transformer_ffn_activation_compatibility(state_dict, config.model.mlp_activations)
     ignored_layers = remove_ignored_layers(state_dict, config.model.checkpoint_ignore_layres)
-    legacy_pedal_head_layers = remove_legacy_linear_pedal_head_layers(state_dict)
+    legacy_pedal_head_layers = (
+        remove_legacy_linear_pedal_head_layers(state_dict)
+        if should_strip_legacy_linear_pedal_head_layers(config)
+        else []
+    )
     skipped_layers = ignored_layers + legacy_pedal_head_layers
 
     load_strict = should_load_checkpoint_strictly(config.model.strict_checkpoint, skipped_layers)

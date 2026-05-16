@@ -1,5 +1,5 @@
 defaults:
-  - experiment_T5_V4_HierarchyPool
+  - experiment_T5_V4_HierarchyPool_LinearPedalHeads_Frontend
   - _self_
 
 model:

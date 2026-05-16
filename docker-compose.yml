@@ -1,5 +1,6 @@
 services:
   backend:
+    gpus: all
     build:
       context: .
       dockerfile: Backend/Dockerfile

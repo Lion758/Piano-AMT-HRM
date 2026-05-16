@@ -56,6 +56,27 @@ class TemporalConvPedalHead(nn.Module):
         return self.proj(h).squeeze(-1)
 
 
+def make_pedal_head(pedal_head_type, emb_dim, kernel_size=7, hidden=64, dropout=0.1):
+    pedal_head_type = str(pedal_head_type or "linear").strip().lower()
+    if pedal_head_type == "linear":
+        return nn.Linear(emb_dim, 1)
+    if pedal_head_type == "temporal_conv":
+        return TemporalConvPedalHead(
+            emb_dim,
+            kernel_size=kernel_size,
+            hidden=hidden,
+            dropout=dropout,
+        )
+    raise ValueError(f"Unsupported pedal_head_type {pedal_head_type!r}; expected 'linear' or 'temporal_conv'.")
+
+
+def apply_pedal_head(head, encoder_outputs):
+    logits = head(encoder_outputs)
+    if logits.ndim == 3 and logits.shape[-1] == 1:
+        return logits.squeeze(-1)
+    return logits
+
+
 class Transformer(nn.Module):
     def __init__(self, config):
         super(Transformer, self).__init__()
@@ -89,30 +110,29 @@ class Transformer(nn.Module):
         elif config.decoder_name == "CompoundTransformerDecoder":
             self.decoder = CompoundDecoder(config=config, sub_token_names=sub_token_names)
 
-        pedal_head_type = getattr(config, "pedal_head_type", "temporal_conv")
-        if pedal_head_type != "temporal_conv":
-            raise ValueError(f"Unsupported pedal_head_type {pedal_head_type!r}; expected 'temporal_conv'.")
+        pedal_head_type = getattr(config, "pedal_head_type", "linear")
         pedal_head_hidden = getattr(config, "pedal_head_hidden", 64)
         pedal_head_dropout = getattr(config, "pedal_head_dropout", 0.1)
         pedal_frame_head_kernel_size = getattr(config, "pedal_frame_head_kernel_size", 7)
         pedal_onset_head_kernel_size = getattr(config, "pedal_onset_head_kernel_size", 11)
         pedal_offset_head_kernel_size = getattr(config, "pedal_offset_head_kernel_size", 11)
 
-        # Auxiliary temporal pedal heads on encoder outputs. They preserve the
-        # encoder frame grid while adding local temporal context before projection.
-        self.pedal_frame_head = TemporalConvPedalHead(
+        self.pedal_frame_head = make_pedal_head(
+            pedal_head_type,
             config.emb_dim,
             kernel_size=pedal_frame_head_kernel_size,
             hidden=pedal_head_hidden,
             dropout=pedal_head_dropout,
         )
-        self.pedal_onset_head = TemporalConvPedalHead(
+        self.pedal_onset_head = make_pedal_head(
+            pedal_head_type,
             config.emb_dim,
             kernel_size=pedal_onset_head_kernel_size,
             hidden=pedal_head_hidden,
             dropout=pedal_head_dropout,
         )
-        self.pedal_offset_head = TemporalConvPedalHead(
+        self.pedal_offset_head = make_pedal_head(
+            pedal_head_type,
             config.emb_dim,
             kernel_size=pedal_offset_head_kernel_size,
             hidden=pedal_head_hidden,
@@ -280,9 +300,9 @@ class Transformer(nn.Module):
         encoder_outputs = self.encode(encoder_input_tokens, encoder_segment_ids=encoder_segment_ids, enable_dropout=enable_dropout)
 
         # Auxiliary per-frame pedal logits, [B, T], aligned 1:1 with encoder time axis.
-        res_dict["pedal_frame_logits"] = self.pedal_frame_head(encoder_outputs)
-        res_dict["pedal_onset_logits"] = self.pedal_onset_head(encoder_outputs)
-        res_dict["pedal_offset_logits"] = self.pedal_offset_head(encoder_outputs)
+        res_dict["pedal_frame_logits"] = apply_pedal_head(self.pedal_frame_head, encoder_outputs)
+        res_dict["pedal_onset_logits"] = apply_pedal_head(self.pedal_onset_head, encoder_outputs)
+        res_dict["pedal_offset_logits"] = apply_pedal_head(self.pedal_offset_head, encoder_outputs)
 
         decoder_output_dict = self.decode(encoder_outputs, encoder_outputs, decoder_input_tokens, decoder_target_tokens, encoder_segment_ids=encoder_segment_ids, decoder_segment_ids=decoder_segment_ids, decoder_positions=decoder_positions, enable_dropout=enable_dropout, decode=decode,
             decoder_targets_frame_index=decoder_targets_frame_index,
@@ -477,4 +497,3 @@ class Transformer(nn.Module):
 
     
     
-

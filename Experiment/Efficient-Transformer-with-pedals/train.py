@@ -162,6 +162,31 @@ def remove_legacy_linear_pedal_head_layers(state_dict):
     return removed_layers
 
 
+def _get_nested_config_value(config, dotted_key, default=None):
+    current = config
+    for key in dotted_key.split("."):
+        if current is None:
+            return default
+        try:
+            current = current[key]
+            continue
+        except (KeyError, TypeError):
+            pass
+        try:
+            current = getattr(current, key)
+        except AttributeError:
+            return default
+    return default if current is None else current
+
+
+def get_config_pedal_head_type(config):
+    return str(_get_nested_config_value(config, "model.pedal_head_type", "linear")).strip().lower()
+
+
+def should_strip_legacy_linear_pedal_head_layers(config):
+    return get_config_pedal_head_type(config) != "linear"
+
+
 def should_resume_full_lightning_checkpoint(checkpoint_format, ignored_layers, legacy_pedal_head_layers):
     return checkpoint_format == "lightning" and len(ignored_layers) == 0 and len(legacy_pedal_head_layers) == 0
 
@@ -1203,7 +1228,11 @@ def my_main(config: OmegaConf):
         model_state_dict = extract_model_state_dict(checkpoint, checkpoint_format)
         validate_transformer_ffn_activation_compatibility(model_state_dict, config.model.mlp_activations)
         ignored_layers = remove_ignored_layers(model_state_dict, config.model.checkpoint_ignore_layres)
-        legacy_pedal_head_layers = remove_legacy_linear_pedal_head_layers(model_state_dict)
+        legacy_pedal_head_layers = (
+            remove_legacy_linear_pedal_head_layers(model_state_dict)
+            if should_strip_legacy_linear_pedal_head_layers(config)
+            else []
+        )
 
         if should_resume_full_lightning_checkpoint(checkpoint_format, ignored_layers, legacy_pedal_head_layers):
             resume_ckpt_path = config.model.checkpoint_path
