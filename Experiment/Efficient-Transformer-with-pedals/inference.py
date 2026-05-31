@@ -77,8 +77,9 @@ def run_inference(config: OmegaConf) -> None:
 
     audio_path = config.audio_path
     wav, sr = torchaudio.load(audio_path)
+    wav = wav.to(device)
     if wav.shape[0] > 1:
-        wav = wav.to(device).mean(dim=0, keepdim=True)
+        wav = wav.mean(dim=0, keepdim=True)
     if sr != DEFAULT_SAMPLE_RATE:
         wav = torchaudio.transforms.Resample(sr, DEFAULT_SAMPLE_RATE).to(device)(wav)
 

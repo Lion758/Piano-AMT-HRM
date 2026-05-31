@@ -227,6 +227,30 @@
   cursor: default;
 }
 
+.tc-record-btn {
+  color: var(--pp-gold-bright);
+}
+
+.tc-record-btn svg {
+  filter: drop-shadow(0 0 8px rgba(236, 211, 164, 0.28));
+}
+
+.tc-record-btn:hover:not(:disabled),
+.tc-record-btn.active {
+  border-color: rgba(242, 210, 144, 0.34);
+  background:
+    radial-gradient(circle, rgba(236, 211, 164, 0.22), transparent 54%),
+    linear-gradient(180deg, rgba(83, 60, 38, 0.96), rgba(31, 22, 15, 0.96));
+  color: #fff2d8;
+}
+
+.tc-stop-btn.recording-active {
+  border-color: rgba(242, 210, 144, 0.42);
+  background: linear-gradient(135deg, #f0ddb6, #d4ac79 32%, #9d774c);
+  color: #1f160f;
+  box-shadow: 0 0 0 3px rgba(236, 211, 164, 0.12);
+}
+
 .tc-time {
   font-size: 0.78rem;
   font-weight: 700;
@@ -1032,6 +1056,167 @@
   color: var(--pp-danger) !important;
   font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+.piano-page.recording-modal-open .pp-main,
+.piano-page.recording-modal-open .pp-keyboard,
+.piano-page.recording-modal-open .pp-progress-bar {
+  filter: blur(3px) brightness(0.76);
+  transition: filter 0.22s ease;
+}
+
+.pp-recording-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 108;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background:
+    radial-gradient(circle at 50% 38%, rgba(236, 211, 164, 0.16), transparent 28%),
+    rgba(7, 5, 4, 0.48);
+  backdrop-filter: blur(7px);
+}
+
+.pp-recording-backdrop.passive {
+  pointer-events: none;
+}
+
+.pp-recording-backdrop.passive .pp-recording-panel {
+  pointer-events: auto;
+}
+
+.pp-recording-panel {
+  width: min(440px, 100%);
+  padding: 28px;
+  border: 1px solid rgba(244, 226, 201, 0.16);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(47, 34, 24, 0.96), rgba(17, 12, 9, 0.96)),
+    radial-gradient(circle at 20% 0%, rgba(236, 211, 164, 0.14), transparent 34%);
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.48),
+    inset 0 1px 0 rgba(255, 244, 221, 0.08);
+  color: var(--pp-text);
+  text-align: center;
+}
+
+.pp-recording-panel.countdown,
+.pp-recording-panel.recording {
+  width: min(360px, 90vw);
+}
+
+.pp-recording-kicker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 1px solid rgba(236, 211, 164, 0.16);
+  border-radius: 999px;
+  background: rgba(236, 211, 164, 0.08);
+  color: var(--pp-gold-bright);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.pp-recording-kicker.live::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--pp-gold-bright);
+  box-shadow: 0 0 12px rgba(236, 211, 164, 0.72);
+}
+
+.pp-recording-kicker.error {
+  color: #f0b39e;
+  border-color: rgba(224, 140, 112, 0.2);
+  background: rgba(224, 140, 112, 0.08);
+}
+
+.pp-countdown-number,
+.pp-recording-timer,
+.pp-recording-panel.review strong,
+.pp-recording-panel.error strong {
+  display: block;
+  margin: 16px 0 10px;
+  color: var(--pp-text);
+  line-height: 1;
+}
+
+.pp-countdown-number {
+  font-size: clamp(84px, 16vw, 128px);
+  font-weight: 900;
+  text-shadow: 0 0 34px rgba(236, 211, 164, 0.28);
+}
+
+.pp-recording-timer {
+  color: var(--pp-gold-bright);
+  font-size: clamp(44px, 8vw, 66px);
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.pp-recording-panel.review strong,
+.pp-recording-panel.error strong {
+  font-size: 26px;
+}
+
+.pp-recording-panel p {
+  margin: 0;
+  color: var(--pp-muted);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.pp-recording-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.pp-recording-primary,
+.pp-recording-secondary {
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.pp-recording-primary {
+  border: 1px solid rgba(255, 245, 219, 0.42);
+  background: linear-gradient(135deg, #f0ddb6, #d4ac79 32%, #9d774c);
+  color: #1f160f;
+  box-shadow: 0 16px 32px rgba(72, 52, 28, 0.28);
+}
+
+.pp-recording-secondary {
+  border: 1px solid rgba(255, 232, 228, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--pp-text);
+}
+
+.pp-recording-primary:hover,
+.pp-recording-secondary:hover {
+  transform: translateY(-1px);
+  border-color: rgba(242, 210, 144, 0.32);
+}
+
+.pp-recording-stop {
+  min-width: 156px;
 }
 
 .pp-compare-panel-backdrop {
@@ -2261,6 +2446,14 @@ body.chat-panel-resizing .chat-resize-handle::before {
   .pp-compare-panel-actions,
   .pp-compare-secondary-action,
   .pp-compare-submit {
+    width: 100%;
+  }
+  .pp-recording-panel {
+    padding: 22px;
+  }
+  .pp-recording-actions,
+  .pp-recording-primary,
+  .pp-recording-secondary {
     width: 100%;
   }
   .pp-upload-steps {

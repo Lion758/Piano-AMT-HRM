@@ -11,9 +11,14 @@ export default function TopControls({
   isMenuOpen,
   isTutorOpen,
   isCompareOpen,
+  isRecording = false,
+  isCountingDown = false,
+  recordDisabled = false,
   onPlay,
   onPause,
   onStop,
+  onRecord,
+  onStopRecording,
   onSeek,
   onSpeedChange,
   onVolumeChange,
@@ -38,6 +43,7 @@ export default function TopControls({
     : 0;
   const loopRangeLeft = Math.min(loopStartPercent, loopEndPercent);
   const loopRangeWidth = Math.max(0, loopEndPercent - loopStartPercent);
+  const recordingActive = isRecording || isCountingDown;
 
   return (
     <div className="top-controls">
@@ -99,10 +105,22 @@ export default function TopControls({
           </button>
 
           <button
-            className="tc-btn tc-stop-btn"
-            onClick={onStop}
-            disabled={!isLoaded}
-            title="Return to start"
+            className={`tc-btn tc-record-btn${recordingActive ? ' active' : ''}`}
+            onClick={onRecord}
+            disabled={recordDisabled || recordingActive}
+            title={isRecording ? 'Recording in progress' : isCountingDown ? 'Countdown in progress' : 'Record your take'}
+            type="button"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <circle cx="12" cy="12" r="6" />
+            </svg>
+          </button>
+
+          <button
+            className={`tc-btn tc-stop-btn${recordingActive ? ' recording-active' : ''}`}
+            onClick={recordingActive ? onStopRecording : onStop}
+            disabled={!recordingActive && !isLoaded}
+            title={isCountingDown ? 'Cancel recording countdown' : isRecording ? 'Stop recording' : 'Return to start'}
             type="button"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">

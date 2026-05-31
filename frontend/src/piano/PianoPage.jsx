@@ -17,6 +17,15 @@ const PREPARATION_STEP_LABELS = {
   ready: 'Ready',
 };
 
+const RECORDING_COUNTDOWN_START = 3;
+const RECORDING_MIME_TYPES = [
+  'audio/webm;codecs=opus',
+  'audio/webm',
+  'audio/ogg;codecs=opus',
+  'audio/ogg',
+  'audio/mp4',
+];
+
 function getPreparationSteps(includeComparison, skipTranscription = false) {
   const steps = ['uploading'];
   if (!skipTranscription) steps.push('transcribing');
@@ -30,6 +39,26 @@ function isMidiFile(file) {
   const name = file.name || '';
   const type = file.type || '';
   return /\.(mid|midi)$/i.test(name) || type === 'audio/midi' || type === 'audio/x-midi';
+}
+
+function getSupportedRecordingMimeType() {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+    return '';
+  }
+  return RECORDING_MIME_TYPES.find(type => MediaRecorder.isTypeSupported(type)) || '';
+}
+
+function getRecordingExtension(mimeType) {
+  const normalizedType = String(mimeType || '').toLowerCase();
+  if (normalizedType.includes('ogg')) return 'ogg';
+  if (normalizedType.includes('mp4')) return 'm4a';
+  return 'webm';
+}
+
+function formatRecordingTime(totalSeconds) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
 function titleFromFilename(filename, fallback = 'Untitled Song') {
@@ -105,6 +134,11 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
   const [comparisonReferenceFile, setComparisonReferenceFile] = useState(null);
   const [comparisonStatus, setComparisonStatus] = useState('Choose your performance file and the original MIDI.');
   const [comparisonError, setComparisonError] = useState('');
+  const [recordingPhase, setRecordingPhase] = useState('idle');
+  const [countdownValue, setCountdownValue] = useState(RECORDING_COUNTDOWN_START);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordingError, setRecordingError] = useState('');
+  const [recordedPerformanceFile, setRecordedPerformanceFile] = useState(null);
   const [midiLibraryItems, setMidiLibraryItems] = useState([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
   const [libraryError, setLibraryError] = useState('');
@@ -128,6 +162,12 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
       performanceLibraryItem: null,
     };
   });
+  const mediaRecorderRef = useRef(null);
+  const recordingStreamRef = useRef(null);
+  const recordedChunksRef = useRef([]);
+  const recordingMimeTypeRef = useRef('');
+  const countdownTimerRef = useRef(null);
+  const recordingTimerRef = useRef(null);
 
   // Load MIDI
   const {
@@ -154,6 +194,10 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
     [comparisonPerformanceFile],
   );
   const projectReferenceItem = currentProject?.referenceLibraryItem || null;
+  const isCountingDown = recordingPhase === 'countdown';
+  const isRecording = recordingPhase === 'recording';
+  const isRecordingReview = recordingPhase === 'review';
+  const isRecordingOverlayOpen = recordingPhase !== 'idle';
   const midiLibraryProjects = useMemo(() => {
     const groups = new Map();
     midiLibraryItems.forEach((item) => {
@@ -166,6 +210,176 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
 
   // Speed-synced visual time
   const visualTime = player.currentTime;
+
+  const clearRecordingTimers = useCallback(() => {
+    if (countdownTimerRef.current) {
+      window.clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+    if (recordingTimerRef.current) {
+      window.clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+  }, []);
+
+  const stopRecordingStream = useCallback(() => {
+    if (!recordingStreamRef.current) return;
+    recordingStreamRef.current.getTracks().forEach(track => track.stop());
+    recordingStreamRef.current = null;
+  }, []);
+
+  const beginRecording = useCallback((stream, mimeType) => {
+    try {
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+
+      recordedChunksRef.current = [];
+      recordingMimeTypeRef.current = mimeType || recorder.mimeType || 'audio/webm';
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data?.size > 0) {
+          recordedChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onerror = () => {
+        clearRecordingTimers();
+        stopRecordingStream();
+        mediaRecorderRef.current = null;
+        setRecordingError('Recording stopped because the microphone stream failed. Try again.');
+        setRecordingPhase('error');
+      };
+
+      recorder.onstop = () => {
+        clearRecordingTimers();
+        stopRecordingStream();
+        mediaRecorderRef.current = null;
+
+        const chunks = recordedChunksRef.current;
+        if (chunks.length === 0) {
+          setRecordingError('No audio was captured. Check your microphone and try again.');
+          setRecordingPhase('error');
+          return;
+        }
+
+        const type = recordingMimeTypeRef.current || chunks[0]?.type || 'audio/webm';
+        const extension = getRecordingExtension(type);
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const blob = new Blob(chunks, { type });
+        const file = new File([blob], `piano-recording-${stamp}.${extension}`, { type });
+        setRecordedPerformanceFile(file);
+        setRecordingError('');
+        setRecordingPhase('review');
+      };
+
+      recorder.start();
+      setRecordingSeconds(0);
+      setRecordingError('');
+      setRecordingPhase('recording');
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds(seconds => seconds + 1);
+      }, 1000);
+    } catch (err) {
+      clearRecordingTimers();
+      stopRecordingStream();
+      mediaRecorderRef.current = null;
+      setRecordingError(err.message || 'Could not start microphone recording.');
+      setRecordingPhase('error');
+    }
+  }, [clearRecordingTimers, stopRecordingStream]);
+
+  const startRecordingFlow = useCallback(async () => {
+    clearRecordingTimers();
+    stopRecordingStream();
+    mediaRecorderRef.current = null;
+    recordedChunksRef.current = [];
+    recordingMimeTypeRef.current = '';
+    setRecordedPerformanceFile(null);
+    setRecordingError('');
+    setRecordingSeconds(0);
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setRecordingError('Microphone recording is not supported in this browser.');
+      setRecordingPhase('error');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = getSupportedRecordingMimeType();
+      recordingStreamRef.current = stream;
+      setMenuOpen(false);
+      setLibraryOpen(false);
+      setChatOpen(false);
+      setComparisonPanelOpen(false);
+      setCountdownValue(RECORDING_COUNTDOWN_START);
+      setRecordingPhase('countdown');
+
+      let nextCount = RECORDING_COUNTDOWN_START;
+      countdownTimerRef.current = window.setInterval(() => {
+        nextCount -= 1;
+        if (nextCount > 0) {
+          setCountdownValue(nextCount);
+          return;
+        }
+
+        if (countdownTimerRef.current) {
+          window.clearInterval(countdownTimerRef.current);
+          countdownTimerRef.current = null;
+        }
+        beginRecording(stream, mimeType);
+      }, 1000);
+    } catch (err) {
+      stopRecordingStream();
+      setRecordingError(
+        err.name === 'NotAllowedError'
+          ? 'Microphone permission was blocked. Allow microphone access to record your take.'
+          : err.message || 'Could not access the microphone.',
+      );
+      setRecordingPhase('error');
+    }
+  }, [beginRecording, clearRecordingTimers, stopRecordingStream]);
+
+  const handleRecordClick = useCallback(() => {
+    if (recordingPhase !== 'idle' && recordingPhase !== 'error') return;
+    startRecordingFlow();
+  }, [recordingPhase, startRecordingFlow]);
+
+  const handleStopRecording = useCallback(() => {
+    if (recordingPhase === 'countdown') {
+      clearRecordingTimers();
+      stopRecordingStream();
+      setRecordingPhase('idle');
+      return;
+    }
+
+    const recorder = mediaRecorderRef.current;
+    if (recordingPhase !== 'recording' || !recorder || recorder.state === 'inactive') return;
+    recorder.stop();
+  }, [clearRecordingTimers, recordingPhase, stopRecordingStream]);
+
+  const handleRetryRecording = useCallback(() => {
+    startRecordingFlow();
+  }, [startRecordingFlow]);
+
+  const handleCloseRecordingError = useCallback(() => {
+    clearRecordingTimers();
+    stopRecordingStream();
+    setRecordingError('');
+    setRecordingPhase('idle');
+  }, [clearRecordingTimers, stopRecordingStream]);
+
+  useEffect(() => () => {
+    clearRecordingTimers();
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.onstop = null;
+      recorder.stop();
+    }
+    stopRecordingStream();
+  }, [clearRecordingTimers, stopRecordingStream]);
 
   useEffect(() => {
     setActiveMidiUrl(midiUrl || null);
@@ -533,17 +747,17 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
     setComparisonStatus(file ? `Reference ready: ${file.name}` : 'Choose the original MIDI reference.');
   }, []);
 
-  const handlePrepareComparison = useCallback(async () => {
-    if (!comparisonPerformanceFile) {
+  const prepareComparison = useCallback(async (performanceFile, referenceFile = null) => {
+    if (!performanceFile) {
       setComparisonError('Choose the performance audio or MIDI first.');
       return;
     }
-    if (!projectReferenceItem?.id && !comparisonReferenceFile) {
+    if (!projectReferenceItem?.id && !referenceFile) {
       setComparisonError('Choose the original reference MIDI.');
       return;
     }
 
-    const comparisonIsMidi = isMidiFile(comparisonPerformanceFile);
+    const comparisonIsMidi = isMidiFile(performanceFile);
     const phaseSteps = getPreparationSteps(true, comparisonIsMidi);
     let phaseIndex = 0;
     let phaseTimer = null;
@@ -568,11 +782,11 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
 
     try {
       const formData = new FormData();
-      formData.append(comparisonIsMidi ? 'performance_midi' : 'performance_audio', comparisonPerformanceFile);
+      formData.append(comparisonIsMidi ? 'performance_midi' : 'performance_audio', performanceFile);
       if (projectReferenceItem?.id) {
         formData.append('reference_midi_library_id', projectReferenceItem.id);
       } else {
-        formData.append('reference_midi', comparisonReferenceFile);
+        formData.append('reference_midi', referenceFile);
       }
 
       const response = await fetch(`${API_BASE}/tutor/prepare`, {
@@ -619,6 +833,11 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
       setChatOpen(true);
       window.location.hash = buildPianoHash(nextMidiUrl, nextProject);
     } catch (err) {
+      setComparisonPerformanceFile(performanceFile);
+      if (!projectReferenceItem?.id) {
+        setComparisonReferenceFile(referenceFile);
+      }
+      setComparisonPanelOpen(true);
       setComparisonError(err.message || 'Something went wrong.');
       setPreparePhase('idle');
       setComparisonStatus('Check the files and try again.');
@@ -626,13 +845,40 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
       if (phaseTimer) window.clearInterval(phaseTimer);
       setIsPreparingTutor(false);
     }
-  }, [comparisonPerformanceFile, comparisonReferenceFile, currentProject, projectReferenceItem]);
+  }, [currentProject, projectReferenceItem]);
+
+  const handlePrepareComparison = useCallback(() => {
+    prepareComparison(comparisonPerformanceFile, comparisonReferenceFile);
+  }, [comparisonPerformanceFile, comparisonReferenceFile, prepareComparison]);
+
+  const handleCompareRecording = useCallback(() => {
+    if (!recordedPerformanceFile) {
+      setRecordingError('No recording is ready to compare yet.');
+      setRecordingPhase('error');
+      return;
+    }
+
+    if (!projectReferenceItem?.id) {
+      setComparisonPerformanceFile(recordedPerformanceFile);
+      setComparisonReferenceFile(null);
+      setComparisonError('');
+      setComparisonStatus(`Recording ready: ${recordedPerformanceFile.name}. Choose the original reference MIDI.`);
+      setComparisonPanelOpen(true);
+      setRecordingPhase('idle');
+      return;
+    }
+
+    const file = recordedPerformanceFile;
+    setRecordingPhase('idle');
+    setRecordedPerformanceFile(null);
+    prepareComparison(file, null);
+  }, [prepareComparison, projectReferenceItem?.id, recordedPerformanceFile]);
 
   const preparationSteps = getPreparationSteps(false, performanceIsMidi);
   const comparisonPreparationSteps = getPreparationSteps(true, comparisonPerformanceIsMidi);
 
   return (
-    <div className="piano-page">
+    <div className={`piano-page${isRecordingOverlayOpen ? ' recording-modal-open' : ''}`}>
       <LeftMenu
         isOpen={menuOpen}
         onToggle={() => setMenuOpen(v => !v)}
@@ -650,6 +896,103 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
         preparedTutor={preparedTutor}
         projectName={currentProject?.name || preparedTutor?.projectName || null}
       />
+
+      {isRecordingOverlayOpen && (
+        <div className={`pp-recording-backdrop${isCountingDown || isRecording ? ' passive' : ''}`}>
+          <section
+            className={`pp-recording-panel ${recordingPhase}`}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pp-recording-title"
+          >
+            {isCountingDown && (
+              <>
+                <span className="pp-recording-kicker">Get ready</span>
+                <strong className="pp-countdown-number" id="pp-recording-title">
+                  {countdownValue}
+                </strong>
+                <p>Recording starts after the countdown.</p>
+                <div className="pp-recording-actions">
+                  <button
+                    className="pp-recording-secondary pp-recording-stop"
+                    onClick={handleStopRecording}
+                    type="button"
+                  >
+                    Stop
+                  </button>
+                </div>
+              </>
+            )}
+
+            {isRecording && (
+              <>
+                <span className="pp-recording-kicker live">Recording</span>
+                <strong className="pp-recording-timer" id="pp-recording-title">
+                  {formatRecordingTime(recordingSeconds)}
+                </strong>
+                <p>Play your take. Stop when finished.</p>
+                <div className="pp-recording-actions">
+                  <button
+                    className="pp-recording-primary pp-recording-stop"
+                    onClick={handleStopRecording}
+                    type="button"
+                  >
+                    Stop Recording
+                  </button>
+                </div>
+              </>
+            )}
+
+            {isRecordingReview && (
+              <>
+                <span className="pp-recording-kicker">Take captured</span>
+                <strong id="pp-recording-title">Compare this recording?</strong>
+                <p>{recordedPerformanceFile?.name || 'Your recording is ready.'}</p>
+                <div className="pp-recording-actions">
+                  <button
+                    className="pp-recording-secondary"
+                    onClick={handleRetryRecording}
+                    type="button"
+                  >
+                    Retry
+                  </button>
+                  <button
+                    className="pp-recording-primary"
+                    onClick={handleCompareRecording}
+                    type="button"
+                  >
+                    Compare Recording
+                  </button>
+                </div>
+              </>
+            )}
+
+            {recordingPhase === 'error' && (
+              <>
+                <span className="pp-recording-kicker error">Recording unavailable</span>
+                <strong id="pp-recording-title">Could not record</strong>
+                <p>{recordingError || 'Something went wrong while recording.'}</p>
+                <div className="pp-recording-actions">
+                  <button
+                    className="pp-recording-secondary"
+                    onClick={handleCloseRecordingError}
+                    type="button"
+                  >
+                    Close
+                  </button>
+                  <button
+                    className="pp-recording-primary"
+                    onClick={handleRetryRecording}
+                    type="button"
+                  >
+                    Try Again
+                  </button>
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      )}
 
       <aside className={`midi-library-drawer${libraryOpen ? ' open' : ''}`}>
         <div className="midi-library-drawer-content">
@@ -909,9 +1252,14 @@ export default function PianoPage({ midiUrl, projectName = null, referenceLibrar
             isMenuOpen={menuOpen}
             isTutorOpen={chatOpen}
             isCompareOpen={comparisonPanelOpen}
+            isRecording={isRecording}
+            isCountingDown={isCountingDown}
+            recordDisabled={!controlsReady || isPreparingTutor || recordingPhase !== 'idle'}
             onPlay={player.play}
             onPause={player.pause}
             onStop={player.stop}
+            onRecord={handleRecordClick}
+            onStopRecording={handleStopRecording}
             onSeek={player.seek}
             onSpeedChange={player.setSpeed}
             onVolumeChange={player.setVolume}
